@@ -22,7 +22,6 @@ import okhttp3.OkHttpClient
 import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
-import timber.log.Timber
 import java.io.IOException
 import java.math.BigDecimal
 
@@ -580,7 +579,7 @@ class TurnkeyWalletProviderHistoryTest {
                 )
             )
         )
-        client.listEthHistoryError = MockTurnkey.historyHttpError(MockTurnkey.ETH_HISTORY_PATH, 403)
+        client.listEthHistoryError = MockTurnkey.httpError(MockTurnkey.ETH_HISTORY_PATH, 403)
         val provider = makeProvider(MockTurnkey(turnkeyClient = client))
 
         val txs = provider.getTransactions(1, null, null, null)
@@ -606,7 +605,7 @@ class TurnkeyWalletProviderHistoryTest {
                 )
             )
         )
-        client.listEthHistoryError = MockTurnkey.historyHttpError(MockTurnkey.ETH_HISTORY_PATH, 503)
+        client.listEthHistoryError = MockTurnkey.httpError(MockTurnkey.ETH_HISTORY_PATH, 503)
         val provider = makeProvider(MockTurnkey(turnkeyClient = client))
 
         val txs = provider.getTransactions(1, null, null, null)
@@ -651,18 +650,11 @@ class TurnkeyWalletProviderHistoryTest {
     fun `the history feature gate is logged once at info level, not once per page`() = runBlocking {
         // The default mock client answers the way an organization without the feature does: HTTP 403.
         val provider = makeProvider(MockTurnkey())
-        val entries = mutableListOf<Pair<Int, String>>()
-        val tree = object : Timber.Tree() {
-            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
-                entries += priority to message
+        val entries = capturingLogs {
+            runBlocking {
+                provider.getTransactions(1, null, null, null)
+                provider.getTransactions(1, null, null, null)
             }
-        }
-        Timber.plant(tree)
-        try {
-            provider.getTransactions(1, null, null, null)
-            provider.getTransactions(1, null, null, null)
-        } finally {
-            Timber.uproot(tree)
         }
 
         val gate = entries.filter { it.second.contains("indexed transaction history is not enabled") }

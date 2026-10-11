@@ -10,6 +10,7 @@ import com.rain.sdk.internal.tokenstore.TokenMetadataStore
 import com.turnkey.core.models.errors.TurnkeyKotlinError
 import okhttp3.OkHttpClient
 import org.junit.Assume.assumeTrue
+import timber.log.Timber
 
 /**
  * Test doubles and fixtures for the Turnkey adapter's own suites.
@@ -35,6 +36,23 @@ internal fun assumeJdk24() {
         "Turnkey SDK types load JDK-24 class files. Current: $major",
         major >= 24
     )
+}
+
+/** Runs [block] with a Timber tree planted and returns every (priority, message) it logged, in order. */
+internal fun capturingLogs(block: () -> Unit): List<Pair<Int, String>> {
+    val entries = mutableListOf<Pair<Int, String>>()
+    val tree = object : Timber.Tree() {
+        override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+            entries += priority to message
+        }
+    }
+    Timber.plant(tree)
+    try {
+        block()
+    } finally {
+        Timber.uproot(tree)
+    }
+    return entries
 }
 
 /**

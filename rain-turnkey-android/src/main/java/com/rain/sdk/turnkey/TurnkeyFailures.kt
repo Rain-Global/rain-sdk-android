@@ -7,7 +7,7 @@ import timber.log.Timber
 /**
  * This throwable and its causes, nearest first, at most [MAX_CAUSE_DEPTH] deep so a cyclic cause
  * chain cannot spin a walk. The module's one cause walk: the error mapping, the export failure
- * translation, the session coordinator, the wallet provider's history fallback and
+ * translation, the session coordinator, the wallet provider's history and balance fallbacks and
  * [cancellationInChain] all read an exception through it.
  */
 internal fun Throwable.causeChain(): Sequence<Throwable> =
@@ -74,7 +74,7 @@ internal fun Throwable.sanitizedForHost(): Throwable {
 /**
  * A vendor HTTP failure with the response body removed; see [withoutResponseBody]. The message keeps
  * the vendor's path shape, so [TurnkeyErrorMapping.turnkeyHttpStatus] still reads the status off a
- * mapped error's cause, which the wallet provider's history fallback relies on.
+ * mapped error's cause, which the wallet provider's history and balance fallbacks (`isBackendRefusal`) rely on.
  */
 internal class TurnkeyHttpFailure(status: Int, target: String) : RuntimeException("HTTP error from $target: $status")
 

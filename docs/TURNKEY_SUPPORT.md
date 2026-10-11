@@ -244,9 +244,9 @@ After the Turnkey-backed `client` is resolved, every wallet operation routes thr
 | Rain operation | Turnkey API used |
 |----------------|------------------|
 | `client.getWalletAddress()` | `TurnkeyContext.wallets` (first Ethereum account) |
-| `client.getBalance(chainId, Token.Native)` | `TurnkeyClient.getWalletAddressBalances` (CAIP-19 `slip44:` filter) on supported chains; RPC `eth_getBalance` otherwise |
+| `client.getBalance(chainId, Token.Native)` | `TurnkeyClient.getWalletAddressBalances` (CAIP-19 `slip44:` filter) on supported chains, when the organization has the balance feature; RPC `eth_getBalance` otherwise, and when Turnkey refuses the read (HTTP 403 for an organization without the feature, logged once per provider, after which the provider reads the chain without asking again; or any other HTTP status, retried first when transient, logged as a warning each time; after such a refusal a chain with no RPC endpoint surfaces the refusal, not `RAIN_102`). A dead session or a transport failure surfaces as its own error |
 | `client.getBalance(chainId, Token.Contract(...))` | RPC `eth_call` (`balanceOf`) |
-| `client.getTokenBalances(chainId)` | `TurnkeyClient.getWalletAddressBalances` (CAIP-19) on supported chains, plus one Multicall3 / parallel `eth_call` batch per call for the registry and registered tokens, merged in for the tokens Turnkey's answer left out ([getTokenBalances](METHODS.md#gettokenbalanceschainid) says what the chain read costs and when it is skipped); Multicall3 / parallel `eth_call` alone otherwise |
+| `client.getTokenBalances(chainId)` | `TurnkeyClient.getWalletAddressBalances` (CAIP-19) on supported chains, when the organization has the balance feature, plus one Multicall3 / parallel `eth_call` batch per call for the registry and registered tokens, merged in for the tokens Turnkey's answer left out ([getTokenBalances](METHODS.md#gettokenbalanceschainid) says what the chain read costs and when it is skipped); Multicall3 / parallel `eth_call` over the registry and registered tokens alone otherwise, and when Turnkey refuses the read with HTTP 403, the feature gate, handled as the native row says (a chain with no RPC endpoint then fails with `RAIN_102`, the setting to fix). Any other refused status surfaces as its own error, because the chain's token list is not the backend's: the two each list tokens the other lacks. A dead session or a transport failure surfaces as its own error |
 | `client.sendNative(...)` / `client.sendToken(...)` | `TurnkeyClient.ethSendTransaction` + `getSendTransactionStatus` polling. Only on Turnkey's managed-broadcast chains — other chains (Avalanche, Celo, ZKsync, Plasma, Ink) are read-only and sends throw `RAIN_104` up front. By default (`sponsorGas = true`), every EVM send (transfers, withdrawals, approvals, raw sends) is sponsored by Turnkey Gas Station (minimal payload carrying Turnkey's gas-station nonce for replay protection; fee estimates quote what the wallet would pay itself), and Solana network fees are sponsored too (a zero-SOL sender skips the fee check and dry run; rent for a new recipient token account is a separate Turnkey toggle and stays with the sender). `TurnkeyConfig(sponsorGas = false)` returns to self-paid sends, and is required on a Turnkey organization without sponsorship enabled. Monad caveat: Turnkey sponsors through EIP-7702 delegation and Monad reverts any delegated-account transaction that would leave the balance under 10 MON, so a sponsored native MON send from a small wallet fails on chain even when the estimate succeeds (token sends are unaffected). |
 | `client.withdrawCollateral(...)` | EVM: `TurnkeyContext.signRawPayload` (EIP-712) + `ethSendTransaction`. Solana: core composes the withdrawal, skipping its self-paid dry run while the adapter sponsors the fee, then `solSendTransaction` (see [Solana notes](#solana-notes)). Either chain: a chain outside Turnkey's coverage is refused with `RAIN_104` before anything is read or signed (`prepareWithdrawal` is not refused, because it never broadcasts), and a status carrying decoded revert details (`error.revertChain` or `error.eth.revertChain`, whether the transaction failed before inclusion or was included and reverted, or a Solana `InstructionError` or the runtime's `Program <id> failed` log line) surfaces as `WithdrawalRevertedByNetwork`, the same as a failed dry run, with the transaction hash on `transactionId` (and in the cause's message) once included; a failed status without them (a broadcast, policy or blockhash failure) is `ProviderError`, and a Solana fee or rent shortfall is `InsufficientFunds`. |
 | `client.getTransactions(...)` | `TurnkeyClient.listEthTransactionHistory`, the indexed history (receives and externally submitted transactions included, EVM addresses in EIP-55 form), when the transaction history feature is enabled for the organization; otherwise `TurnkeyClient.getActivities` filtered to `ACTIVITY_TYPE_ETH_SEND_TRANSACTION`, sends only. The fallback runs only when Turnkey refuses the indexed query (HTTP 403 for an organization without the feature, logged once per provider); a dead session, a transport failure or a page that could not be decoded surfaces as its own error. |
@@ -254,6 +254,19 @@ After the Turnkey-backed `client` is resolved, every wallet operation routes thr
 
 On Solana chain ids the same methods route to `TurnkeyClient.solSendTransaction` /
 `getWalletAddressBalances` and the Solana account instead — see [Solana notes](#solana-notes).
+
+Turnkey enables the balance service, the indexed transaction history and Gas Station per
+organization. An organization on Turnkey's Free plan answered HTTP 403 to all three queries
+(`get_wallet_address_balances`, `list_eth_transaction_history`, `get_nonces`) in Rain's testing;
+Turnkey's own pages state the plan requirement only for gas sponsorship, an Enterprise feature per
+[Transaction management](https://docs.turnkey.com/features/transaction-management#gas-sponsorship-aka-gas-abstraction-gasless-transactions-fee-abstraction).
+The SDK keeps working without them: balances and history fall back as the rows above say, and sends
+need `TurnkeyConfig(sponsorGas = false)`.
+
+> **Known issue in `5.0.0-beta.1`.** The two balance reads have no fallback: on an organization
+> without the balance feature, `getBalance(chainId, Token.Native)` and `getTokenBalances` fail with
+> `RAIN_202` on the chains the service covers, and `getAllBalances` lists nothing for them. See the
+> [CHANGELOG](../CHANGELOG.md).
 
 ## Solana notes
 
@@ -282,7 +295,9 @@ is read-only and a send there throws `RAIN_104`. The broadcast chain list is und
 - **Balances.** From Turnkey's `get-balances` where it indexes the cluster; where it doesn't (devnet
   in particular), `getTokenBalances` discovers holdings from the node via `getTokenAccountsByOwner`
   against both token programs. Solana keeps token metadata off chain, so symbol / name stay null
-  unless the mint is registered.
+  unless the mint is registered. These reads fall back to the node on any failure but a dead
+  session, a transport failure included, and log no feature gate; the EVM reads in the table above
+  fall back on a refusal only.
 - **History.** From Turnkey's indexed history (`list_sol_transaction_history`) when the transaction
   history feature is enabled for the organization: receives included, and the row's hash is the real
   signature. Otherwise from the activity log, sends only, whichever of the two activity types Turnkey
