@@ -47,6 +47,7 @@ class PrivyManagerTest {
         } else {
             val user = mockk<PrivyUser>()
             every { user.embeddedEthereumWallets } returns wallets
+            coEvery { user.getAccessToken() } returns Result.success("access-token")
             coEvery { privy.getUser() } returns user
             auth = MutableStateFlow(AuthState.Authenticated(user))
         }
@@ -91,7 +92,27 @@ class PrivyManagerTest {
         }.exceptionOrNull()
 
         assertThat(error).isInstanceOf(RainError.TransactionOutcomeUnknown::class.java)
-        assertThat(error?.cause).isSameInstanceAs(lost)
+        assertThat(error?.cause).isNull()
+    }
+
+    @Test
+    fun `a send whose session refresh fails before any request leaves is NetworkError and never sends`() = runBlocking {
+        // The vendor refreshes the session inside a send; made first as its own call, a refresh
+        // that gets no answer is a retryable failure, never a lost send.
+        val provider = mockk<EmbeddedEthereumWalletProvider>()
+        every { provider.switchChain(any()) } just Runs
+        val privy = privyWith(listOf(wallet(WALLET, provider)))
+        val user = privy.getUser()!!
+        coEvery { user.getAccessToken() } returns
+            Result.failure(PrivyApiException(null, null, "Something went wrong", SocketTimeoutException("timeout")))
+        val manager = PrivyManager(privy)
+
+        val error = runCatching {
+            manager.sendTransaction(walletAddress = WALLET, rpcUrl = RPC, transactionJson = "{}")
+        }.exceptionOrNull()
+
+        assertThat(error).isInstanceOf(RainError.NetworkError::class.java)
+        coVerify(exactly = 0) { provider.request(any()) }
     }
 
     @Test
@@ -152,7 +173,11 @@ class PrivyManagerTest {
                 }.exceptionOrNull()
 
                 assertThat(error).isInstanceOf(expected)
-                assertThat(error?.cause).isSameInstanceAs(failure)
+                if (expected == RainError.NetworkError::class.java) {
+                    assertThat(error?.cause).isSameInstanceAs(failure)
+                } else {
+                    assertThat(error?.cause).isNull()
+                }
             }
         }
     }

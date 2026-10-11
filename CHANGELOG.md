@@ -95,12 +95,16 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   connection) now leaves as `RAIN_301` instead of `RAIN_501`, as the adapter's own RPC reads
   already did, and a read whose answer was lost is `RAIN_301` after its retries; an on-device
   wallet reports an offline device through its own prose and stays `RAIN_501`. A send whose
-  answer was lost after the request left (a timeout, a reset, a 5xx or an answer the vendor could
-  not read, or a resend the HTTP client made after a reset that then could not connect) is
-  `RAIN_305` `TransactionOutcomeUnknown`, the code the entry under Added introduces: Privy signs
-  and broadcasts inside that request, so the send may still land and `RAIN_301`'s "retry" would
-  send twice; in 5.0.0-beta.1 it was `RAIN_501`, the code a refused send carries too. A signature
-  whose answer was lost is `RAIN_301`: nothing was broadcast. A cancellation
+  answer was lost after a request for it left the device (a timeout, a reset, a 5xx or an answer
+  the vendor could not read, or a resend the HTTP client made after a reset that then could not
+  connect) is `RAIN_305` `TransactionOutcomeUnknown`, the code the entry under Added introduces,
+  with no cause and the failure kind in its message, as the Turnkey provider's: Privy signs and
+  broadcasts inside that request, so the send may still land and `RAIN_301`'s "retry" would send
+  twice; in 5.0.0-beta.1 it was `RAIN_501`, the code a refused send carries too (see Known issues
+  below). The session refresh Privy runs inside a send is now made first, as its own call, so a
+  refresh that fails is `RAIN_301` and never reads as a lost send; the signing-key fetch it runs
+  before the first send after a login cannot be, so a lost answer there reads as a lost send. A
+  signature whose answer was lost is `RAIN_301`: nothing was broadcast. A cancellation
   the vendor wrapped in its own failure now leaves a Privy call as the cancellation.
 - The SDK clears a Rain wallet or Turnkey session revoked by a login on another device as soon as
   the wallet backend refuses to refresh it: inside any wallet call that refreshes (with
@@ -185,6 +189,10 @@ Rain plans to fix each of these in a later beta.
   HTTP 400. This affects `sendNative`, `sendToken` and `withdrawCollateral` on Solana chains. EVM
   sends, Solana reads, `prepareWithdrawal` and Privy's Solana sends are not affected. The fix is
   listed under Unreleased above.
+- A send whose answer was lost after it was submitted, through any provider, arrives as `RAIN_501`
+  (`ProviderError`), the code a send the provider settled as failed or refused carries too, so an
+  app cannot tell a send it may retry from one it must not. Never resend on `RAIN_501` from a send
+  before reading history or the balance. The fix, `RAIN_305`, is listed under Unreleased above.
 - `PrivyProvider.refreshSession()` with the device offline throws `RAIN_201` and fires
   `onSessionExpired`, although the session is live and the next refresh online succeeds; on a
   session restored while offline it throws `RAIN_201` without firing the hook. A host that logs

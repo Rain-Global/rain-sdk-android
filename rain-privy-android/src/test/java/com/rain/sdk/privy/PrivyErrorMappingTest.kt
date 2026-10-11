@@ -182,6 +182,19 @@ class PrivyErrorMappingTest {
     }
 
     @Test
+    fun `an unknown fate names the failure kind, never a class, and carries no cause`() {
+        val resent = UnknownHostException("api.privy.io").apply { addSuppressed(SocketException("Connection reset")) }
+        val onResend = PrivyErrorMapping.map(wrapped(resent), send = true)
+        assertThat(onResend.message).contains("resent")
+        assertThat(onResend.message).doesNotContain("UnknownHostException")
+        assertThat(onResend.cause).isNull()
+        assertThat(PrivyErrorMapping.map(wrapped(SocketTimeoutException("timeout")), send = true).message)
+            .contains("timed out")
+        assertThat(PrivyErrorMapping.map(wrapped(IllegalStateException("503")), send = true).message)
+            .contains("server error")
+    }
+
+    @Test
     fun `a transport failure after the request left is NetworkError off a send and TransactionOutcomeUnknown on one`() {
         // A read timeout or a reset may follow a broadcast Privy already made inside the request,
         // so on a send it is RAIN_305, never the "retry" that RAIN_301 means nor the settled RAIN_501.
@@ -191,7 +204,7 @@ class PrivyErrorMappingTest {
             assertThat(PrivyErrorMapping.map(cause, send = false)).isInstanceOf(RainError.NetworkError::class.java)
             val onSend = PrivyErrorMapping.map(failure, send = true)
             assertThat(onSend).isInstanceOf(RainError.TransactionOutcomeUnknown::class.java)
-            assertThat(onSend.cause).isSameInstanceAs(failure)
+            assertThat(onSend.cause).isNull()
             assertThat(PrivyErrorMapping.map(cause, send = true)).isInstanceOf(RainError.TransactionOutcomeUnknown::class.java)
         }
     }
@@ -204,13 +217,13 @@ class PrivyErrorMappingTest {
         // send reads them as an unknown fate.
         for (cause in listOf<Throwable>(
             IllegalStateException("no body"),
-            IllegalStateException("Server error(https://auth.privy.io/api/v1/sessions: 503 Service Unavailable"),
+            IllegalStateException("Server error(https://api.privy.io/v1/wallets/clxyz/rpc: 503 Service Unavailable"),
         )) {
             for (send in listOf(false, true)) {
                 val failure = wrapped(cause)
                 val mapped = PrivyErrorMapping.map(failure, send)
                 assertThat(mapped).isInstanceOf(expectedStatusLess(send))
-                assertThat(mapped.cause).isSameInstanceAs(failure)
+                if (send) assertThat(mapped.cause).isNull() else assertThat(mapped.cause).isSameInstanceAs(failure)
             }
         }
     }
@@ -295,7 +308,7 @@ class PrivyErrorMappingTest {
                 val failure = PrivyApiException(null, null, "Something went wrong", cause)
                 val mapped = PrivyErrorMapping.map(failure, send)
                 assertThat(mapped).isInstanceOf(expectedStatusLess(send))
-                assertThat(mapped.cause).isSameInstanceAs(failure)
+                if (send) assertThat(mapped.cause).isNull() else assertThat(mapped.cause).isSameInstanceAs(failure)
             }
         }
     }

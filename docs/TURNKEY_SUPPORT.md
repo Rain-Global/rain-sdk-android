@@ -290,7 +290,8 @@ adapter, so the send surfaces as `TransactionOutcomeUnknown` (`RAIN_305`), which
 still land and names the vendor's failure. That error is not retry-safe; read history or the balance
 before sending again. The activity-log history leaves out sends Turnkey failed or rejected, so a
 listed send was broadcast or is still executing. A `ProviderError` (`RAIN_501`) from one of these
-sends is a settled failure or a refusal: nothing moved.
+sends is a settled failure or a refusal: nothing moved. `5.0.0-beta.1` reports the lost-answer cases
+above as `RAIN_501` too; see the [CHANGELOG](../CHANGELOG.md) known issue.
 
 ## Solana notes
 

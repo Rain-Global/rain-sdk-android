@@ -43,6 +43,7 @@ class PrivySessionCoordinatorTest {
         every { privy.authState } returns auth
         coEvery { privy.getAuthState() } answers { auth.value }
         coEvery { privy.getUser() } returns user
+        coEvery { user.getAccessToken() } returns Result.success("access-token")
         return privy
     }
 
@@ -303,8 +304,29 @@ class PrivySessionCoordinatorTest {
                 }
             }
         }
-        assertThat(thrown.cause).isSameInstanceAs(failure)
+        assertThat(thrown.cause).isNull()
         assertThat(attempts).isEqualTo(1)
+    }
+
+    @Test
+    fun `a lost answer on a send whose session died meanwhile is TransactionOutcomeUnknown with the hook fired`() {
+        // A logout mid-flight, or a refresh another call made that was refused: the send may
+        // still land, so the host must not read a death as "log in and send again".
+        val user = mockk<PrivyUser>()
+        val auth = MutableStateFlow<AuthState>(AuthState.Authenticated(user))
+        val privy = authenticatedPrivy(auth, user)
+        var hookCalls = 0
+        val coordinator = coordinator(privy, onSessionExpired = { hookCalls++ })
+
+        assertThrows(RainError.TransactionOutcomeUnknown::class.java) {
+            runBlocking {
+                coordinator.executeSend<String> {
+                    auth.value = AuthState.Unauthenticated
+                    throw lostAnswer()
+                }
+            }
+        }
+        assertThat(hookCalls).isEqualTo(1)
     }
 
     @Test
@@ -452,6 +474,29 @@ class PrivySessionCoordinatorTest {
             if (failures > 0) {
                 failures--
                 throw offlineRefusal()
+            }
+            "ok"
+        }
+
+        assertThat(result).isEqualTo("ok")
+        assertThat(delays.delays).containsExactly(500L).inOrder()
+    }
+
+    @Test
+    fun `a vendor 429 the typed mapping wrapped inside a read is still retried`() = runBlocking {
+        // mapOrNull turns a 429 into a ProviderError with the vendor answer as its cause; the
+        // status walk reads it through the cause, so the read backs off once and succeeds.
+        val user = mockk<PrivyUser>()
+        val auth = MutableStateFlow<AuthState>(AuthState.Authenticated(user))
+        val privy = authenticatedPrivy(auth, user)
+        val delays = RecordingDelay()
+        val coordinator = coordinator(privy, delayRecorder = delays)
+        var failures = 1
+
+        val result = coordinator.executeRead {
+            if (failures > 0) {
+                failures--
+                throw checkNotNull(PrivyErrorMapping.mapOrNull(apiException(429)))
             }
             "ok"
         }

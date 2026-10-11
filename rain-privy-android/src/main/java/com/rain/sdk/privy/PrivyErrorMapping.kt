@@ -8,6 +8,7 @@ import io.privy.network.NoNetworkException
 import io.privy.network.PrivyApiException
 import io.privy.wallet.EmbeddedWalletException
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.UnknownHostException
@@ -46,15 +47,20 @@ internal object PrivyErrorMapping {
      * [send] says whether the call that failed broadcasts: a send does, a read, a session refresh
      * and a signature do not. On a call that does not broadcast every transport failure is a
      * [RainError.NetworkError] ([isNetworkFailure]), the code hosts read as "retry, nothing was
-     * broadcast". On a send only a failure that provably happened before the request left the
+     * broadcast". On a send only a failure that provably happened before any request left the
      * device is ([neverReachedPrivy]): Privy signs and broadcasts a send inside the one request
-     * that carried it, so any failure after that may follow a broadcast, and a host that retried on
-     * `RAIN_301` would send twice. A transport failure after the request left (a timeout, a reset),
-     * an answer the vendor reports status-less (a 5xx, one it could not read; only a 4xx keeps its
-     * status, see [isNetworkFailure]) and a send the HTTP client resent after such a failure and
-     * then could not connect for leave as [RainError.TransactionOutcomeUnknown] ([answerLost]): the
-     * send may still land, so the host reads history or the balance before sending again. A 4xx is
-     * a refusal, mapped by type before this rule, and nothing moved.
+     * that carried it, so any failure after a request for it left may follow a broadcast, and a
+     * host that retried on `RAIN_301` would send twice. A transport failure after that (a timeout,
+     * a reset), an answer the vendor reports status-less (a 5xx, one it could not read; only a 4xx
+     * keeps its status, see [isNetworkFailure]) and a send the HTTP client resent after such a
+     * failure and then could not connect for leave as [RainError.TransactionOutcomeUnknown]
+     * ([answerLost]), built without the vendor exception as its cause, as the Turnkey provider's
+     * is, and with the failure kind in its message: the send may still land, so the host reads
+     * history or the balance before sending again. The request that failed is the send's own, or
+     * the signing-key fetch the vendor runs before the first send after a login on its
+     * server-wallet stack; the session refresh it also runs there is made first, as its own call,
+     * by [PrivySessionCoordinator.executeSend]. A 4xx is a refusal, mapped by type before this
+     * rule, and nothing moved.
      */
     fun map(e: Throwable, send: Boolean): RainError =
         e as? RainError
@@ -67,7 +73,7 @@ internal object PrivyErrorMapping {
      * The typed mapping of a Privy exception, or null for anything else. A status-less
      * [PrivyApiException], the shape the vendor gives a request that got no answer, returns null
      * too: only the call site knows whether that request may have left the device, so [map]
-     * decides with its `idempotent` argument.
+     * decides with its `send` argument.
      */
     fun mapOrNull(e: Throwable): RainError? = when (e) {
         is AuthenticationException -> mapAuthenticationException(e)
@@ -114,11 +120,11 @@ internal object PrivyErrorMapping {
         e.causeChain().firstOrNull { it.isHttpAnswer() || it.isNoAnswer() }
 
     /**
-     * Whether [e], or a cause of it, shows that a request left the device and its answer was lost
-     * or unreadable: a transport failure ([isNetworkFailure]), or the vendor's status-less wrapper,
-     * which only its request helper puts around the failure of a request it made. The vendor's
-     * confirmed-offline refusal wears the same wrapper but is refused before any request, so a send
-     * reads [neverReachedPrivy] first.
+     * Whether [e], or a cause of it, shows that a request made for the call left the device and
+     * its answer was lost or unreadable: a transport failure ([isNetworkFailure]), or the vendor's
+     * status-less wrapper, which only its request helper puts around the failure of a request it
+     * made. The vendor's confirmed-offline refusal wears the same wrapper but is refused before any
+     * request, so a send reads [neverReachedPrivy] first.
      */
     fun answerLost(e: Throwable): Boolean =
         isNetworkFailure(e) || e.causeChain().any { it is PrivyApiException && it.statusCode == null }
@@ -127,10 +133,9 @@ internal object PrivyErrorMapping {
         !send -> if (isNetworkFailure(e)) RainError.NetworkError(e.message, e) else null
         neverReachedPrivy(e) -> RainError.NetworkError(e.message, e)
         answerLost(e) -> RainError.TransactionOutcomeUnknown(
-            "The send's answer was lost after the request left the device " +
-                "(${e.causeChain().last().javaClass.simpleName}); the send may have been broadcast " +
-                "and may still land",
-            e,
+            "A request made for the send got no usable answer after it left the device: " +
+                "${e.lostAnswerKind()}. The send may have been broadcast and may still land; read " +
+                "history or the balance before sending again"
         )
         else -> null
     }
@@ -230,3 +235,20 @@ private val BEFORE_REQUEST_FAILURES = listOf(
 
 private fun Throwable.isBeforeRequest(): Boolean =
     BEFORE_REQUEST_FAILURES.any { it.isInstance(this) } || isVendorOfflineAnswer()
+
+/**
+ * What happened to a request whose answer was lost, for the message of a
+ * [RainError.TransactionOutcomeUnknown]: named by the event, never by a class, which a minified
+ * host may have renamed.
+ */
+private fun Throwable.lostAnswerKind(): String {
+    val chain = causeChain().toList()
+    return when {
+        chain.last().isBeforeRequest() ->
+            "the HTTP client resent the request after a failure and then could not connect"
+        chain.any { it is InterruptedIOException || it.javaClass.simpleName.contains("Timeout") } ->
+            "the request timed out"
+        chain.any { it is IOException } -> "the connection failed"
+        else -> "the answer was a server error or could not be read"
+    }
+}

@@ -28,8 +28,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * surface as [RainError.TokenExpired] and fire the hook once per session death; the hook
  * re-arms when a live session is seen again. Only a session Privy refuses or has dropped is a
  * death: a read, a signature or a [refreshNow] that got no answer from the network leaves as
- * [RainError.NetworkError], and a send whose answer was lost after the request left as
- * [RainError.TransactionOutcomeUnknown], with the session and the hook untouched either way.
+ * [RainError.NetworkError], and a send whose answer was lost after a request for it left the
+ * device as [RainError.TransactionOutcomeUnknown], with the session untouched either way; the
+ * hook fires only when the session is gone.
  */
 internal class PrivySessionCoordinator(
     private val privy: Privy,
@@ -104,16 +105,24 @@ internal class PrivySessionCoordinator(
     suspend fun <T> executeRead(block: suspend () -> T): T = execute(PrivyCall.READ, block)
 
     /**
-     * A signature: never retried, and a request that got no answer leaves as
-     * [RainError.NetworkError], because nothing was broadcast.
+     * A signature, or the session refresh made before a send: never retried, and a request that
+     * got no answer leaves as [RainError.NetworkError], because nothing was broadcast.
      */
     suspend fun <T> executeSign(block: suspend () -> T): T = execute(PrivyCall.SIGN, block)
 
     /**
-     * A send: never retried, and a request that left the device and got no answer leaves as
-     * [RainError.TransactionOutcomeUnknown], see [PrivyErrorMapping.map].
+     * A send: never retried. The vendor refreshes the session inside a send when the JWT is near
+     * expiry, and a refresh that failed there would read as a lost send, so the refresh is made
+     * first, as its own call that broadcasts nothing (`PrivyUser.getAccessToken` runs the vendor's
+     * `refreshSessionIfNeeded`), and the block then runs on a fresh token. A request made for the
+     * send that left the device and got no answer, or one the vendor reports status-less (a 5xx,
+     * an unreadable body), leaves as [RainError.TransactionOutcomeUnknown], see
+     * [PrivyErrorMapping.map], even when the session died meanwhile.
      */
-    suspend fun <T> executeSend(block: suspend () -> T): T = execute(PrivyCall.SEND, block)
+    suspend fun <T> executeSend(block: suspend () -> T): T {
+        execute(PrivyCall.SIGN) { requireUser().getAccessToken().getOrThrow() }
+        return execute(PrivyCall.SEND, block)
+    }
 
     /**
      * Forces a session refresh through Privy (`PrivyUser.refresh`). Throws
@@ -187,6 +196,10 @@ internal class PrivySessionCoordinator(
         return privy.getAuthState()
     }
 
+    /** A send's request left the device and its answer was lost: the fate the mapper calls unknown. */
+    private fun lostAnswerOnSend(e: Throwable): Boolean =
+        !PrivyErrorMapping.neverReachedPrivy(e) && PrivyErrorMapping.answerLost(e)
+
     /** Whether the vendor holds no session any more: its own answer to "did the session survive". */
     private suspend fun sessionDropped(): Boolean = privy.getAuthState() is AuthState.Unauthenticated
 
@@ -235,18 +248,32 @@ internal class PrivySessionCoordinator(
                         retryDelay(backoffMs)
                         backoffMs = (backoffMs * 2).coerceAtMost(policy.maxRetryDelayMs)
                     }
-                    // The vendor drops the session on a 4xx to the token refresh it runs inside a
-                    // wallet call, which arrives as neither an auth failure nor a transient one.
-                    sessionDropped() -> expireAndThrow(e)
-                    // Neither an auth problem nor retryable. It leaves as a RainError, never as a
-                    // vendor type: core passes a RainError through with its code and would otherwise see a
-                    // Privy exception it cannot classify.
-                    else -> {
-                        logUnmappedFailure(e)
-                        throw PrivyErrorMapping.map(e, send = call == PrivyCall.SEND)
-                    }
+                    else -> throw settledFailure(call, e)
                 }
             }
+        }
+    }
+
+    /**
+     * What a guarded call's failure leaves as once it is neither a cancellation, an auth failure
+     * nor a retry. It leaves as a [RainError], never as a vendor type: core passes a [RainError]
+     * through with its code and would otherwise see a Privy exception it cannot classify.
+     */
+    private suspend fun settledFailure(call: PrivyCall, e: Exception): Throwable = when {
+        // A lost answer on a send is an unknown fate even when the session died meanwhile (a
+        // logout mid-flight, a refresh another call made that was refused): the host must not
+        // resend. The death is still notified.
+        call == PrivyCall.SEND && lostAnswerOnSend(e) -> {
+            if (sessionDropped()) notifyDeath()
+            logUnmappedFailure(e)
+            PrivyErrorMapping.map(e, send = true)
+        }
+        // The vendor drops the session on a 4xx to the token refresh it runs inside a wallet
+        // call, which arrives as neither an auth failure nor a transient one.
+        sessionDropped() -> expireAndThrow(e)
+        else -> {
+            logUnmappedFailure(e)
+            PrivyErrorMapping.map(e, send = call == PrivyCall.SEND)
         }
     }
 
@@ -302,10 +329,11 @@ internal class PrivySessionCoordinator(
     /**
      * A request that got no answer (the network), or an HTTP answer that asks for a retry. Of the
      * statuses below only 408 and 429 ever arrive with their status: privy-core 0.15.0 reports a
-     * 5xx status-less (see [PrivyErrorMapping.isNetworkFailure]), so a 5xx is not retried today. A
-     * [RainError] raised inside the block is the coordinator's own verdict and never transient; the
-     * one such error, [requireUser]'s on a session the vendor cannot verify, stands for a vendor
-     * request already made, which is not repeated within the call.
+     * 5xx status-less (see [PrivyErrorMapping.isNetworkFailure]), so a 5xx is not retried today.
+     * [requireUser]'s [RainError.NetworkError] on a session the vendor cannot verify carries no
+     * transport cause, so it is not transient and the verification is not repeated within the
+     * call; a vendor 408 or 429 that [PrivyErrorMapping.mapOrNull] wrapped in a
+     * [RainError.ProviderError] still is, through its cause.
      */
     private fun isTransient(e: Throwable): Boolean =
         PrivyErrorMapping.isNetworkFailure(e) ||
