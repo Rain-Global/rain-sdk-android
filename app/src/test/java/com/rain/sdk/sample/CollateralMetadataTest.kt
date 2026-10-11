@@ -62,6 +62,15 @@ class CollateralMetadataTest {
         }
     }
 
+    @Test
+    fun `only tokens with resolved decimals become registrations`() {
+        val resolved = usdc.copy(symbol = "USDC", name = "USD Coin", decimals = 6)
+
+        val infos = registrableTokenInfos(84532, listOf(resolved, other))
+
+        assertThat(infos).containsExactly(TokenInfo(84532, USDC, "USDC", 6, "USD Coin"))
+    }
+
     private companion object {
         const val USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
         const val OTHER = "0x4444444444444444444444444444444444444444"

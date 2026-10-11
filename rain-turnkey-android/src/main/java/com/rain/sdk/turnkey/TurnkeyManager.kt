@@ -78,6 +78,8 @@ internal class TurnkeyManager(
     private val pollingIntervalMs: Long = POLLING_INTERVAL_MS,
     private val jsonRpcClient: JsonRpcClient = JsonRpcClient(httpClient),
 ) {
+    /** True when the SDK was built with an RPC endpoint for [chainId], so the chain can be read. */
+    internal fun hasRpcEndpoint(chainId: Int): Boolean = chainId in rpcEndpoints
 
     // Guards every Turnkey call: expiry check, proactive refresh, refresh-on-401, backoff. Always the
     // descriptor's coordinator, never a private one: a death or a managed re-login seen there is what

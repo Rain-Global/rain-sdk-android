@@ -183,7 +183,24 @@ class RainSession {
                 )
             },
         )
+        registerCollateralTokens(sdk, contract.chainId, tokens)
         return contract.copy(tokens = tokens)
+    }
+
+    /**
+     * Registers the contract's resolved tokens with the SDK, so the wallet's `getTokenBalances` lists
+     * them too: the built-in registry and the wallet backend's balance service know Rain's sandbox
+     * tokens only in part. A refused registration is logged, never fatal, because the collateral
+     * screens read the Rain API, not the token store.
+     */
+    private suspend fun registerCollateralTokens(sdk: RainSdk, chainId: Int, tokens: List<CollateralToken>) {
+        val infos = registrableTokenInfos(chainId, tokens)
+        if (infos.isEmpty()) return
+        try {
+            sdk.registerTokens(infos)
+        } catch (e: RainError) {
+            SampleLog.w("RainApi", "could not register ${infos.size} collateral token(s) on chainId=$chainId: ${e.code}")
+        }
     }
 
     // Shared builder config: naming for every chain's testnet token plus the Auth Pull targets,

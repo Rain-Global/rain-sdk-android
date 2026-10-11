@@ -2,19 +2,23 @@ package com.rain.sdk.internal.network.chainreader
 
 import com.rain.sdk.error.RainError
 import com.rain.sdk.internal.RainAdapterApi
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import timber.log.Timber
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * Minimal JSON-RPC 2.0 client used by the SDK's chain-read layer.
@@ -71,11 +75,10 @@ class JsonRpcClient(
             .build()
 
         val raw = try {
-            // okhttp's execute() is blocking — must run off the main thread to avoid
-            // NetworkOnMainThreadException when called from a UI-dispatched coroutine.
-            withContext(Dispatchers.IO) {
-                client.newCall(request).execute().use { it.body.string() }
-            }
+            // Enqueued, not executed: the coroutine suspends until OkHttp answers, and cancelling it
+            // cancels the call, so a caller that gives up, or a scope whose sibling failed, does not
+            // wait for the answer or the call timeout. The body is read on OkHttp's thread.
+            client.newCall(request).awaitBody()
         } catch (e: IOException) {
             Timber.e(e, "Rain SDK: JSON-RPC transport failure for $method")
             throw RainError.NetworkError(message = "RPC request failed for $method", cause = e)
@@ -89,7 +92,10 @@ class JsonRpcClient(
         }
 
         if (response.has("error") && !response.isNull("error")) {
-            val err = response.getJSONObject("error")
+            // JSON-RPC 2.0 makes `error` an object. An endpoint that sends a string or a number
+            // still fails as a RainError, never as a JSONException out of the chain-read layer.
+            val err = response.optJSONObject("error")
+                ?: throw RainError.InternalError("RPC error: ${response.optString("error")}")
             val code = err.optInt("code", -1)
             val message = err.optString("message", "Unknown RPC error")
             if (message.contains("revert", ignoreCase = true)) {
@@ -135,4 +141,29 @@ class JsonRpcClient(
         }
         return array
     }
+}
+
+/**
+ * Runs the call on OkHttp's dispatcher and suspends until it answers, resuming at most once. A
+ * cancelled coroutine cancels the call; the "Canceled" failure OkHttp then reports is ignored.
+ */
+private suspend fun Call.awaitBody(): String = suspendCancellableCoroutine { continuation ->
+    enqueue(
+        object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val body = try {
+                    response.use { it.body.string() }
+                } catch (e: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
+                    return
+                }
+                if (continuation.isActive) continuation.resume(body)
+            }
+        }
+    )
+    continuation.invokeOnCancellation { cancel() }
 }

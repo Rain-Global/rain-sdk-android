@@ -156,6 +156,9 @@ internal class MockTurnkeyClient(
     /** When set, [getWalletAddressBalances] throws this instead of producing a response. */
     var walletAddressBalancesError: Exception? = null
 
+    /** When set, [getWalletAddressBalances] suspends on it after recording the call, so a test can cancel mid-read. */
+    var walletAddressBalancesGate: CompletableDeferred<Unit>? = null
+
     /** When set, [ethSendTransaction] throws this instead of producing a response. */
     var ethSendTransactionError: Exception? = null
 
@@ -235,6 +238,7 @@ internal class MockTurnkeyClient(
         input: TGetWalletAddressBalancesBody
     ): TGetWalletAddressBalancesResponse {
         walletAddressBalanceCalls += input
+        walletAddressBalancesGate?.await()
         walletAddressBalancesError?.let { throw it }
         return TGetWalletAddressBalancesResponse(balances = mockBalances)
     }
@@ -306,7 +310,7 @@ internal class MockTurnkeyClient(
         getActivityAnswer?.let { return TGetActivityResponse(activity = it(input)) }
         // Turnkey answers an unknown id with an HTTP error, which the vendor's client throws as a bare exception.
         val activity = mockActivities.firstOrNull { it.id == input.activityId }
-            ?: throw MockTurnkey.historyHttpError(MockTurnkey.GET_ACTIVITY_PATH, 404)
+            ?: throw MockTurnkey.httpError(MockTurnkey.GET_ACTIVITY_PATH, 404)
         return TGetActivityResponse(activity = activity)
     }
 
@@ -315,7 +319,7 @@ internal class MockTurnkeyClient(
     ): TListEthTransactionHistoryResponse {
         listEthHistoryCalls += input
         listEthHistoryError?.let { throw it }
-        return mockEthHistory ?: throw MockTurnkey.historyHttpError(MockTurnkey.ETH_HISTORY_PATH, 403)
+        return mockEthHistory ?: throw MockTurnkey.httpError(MockTurnkey.ETH_HISTORY_PATH, 403)
     }
 
     override suspend fun listSolTransactionHistory(
@@ -323,7 +327,7 @@ internal class MockTurnkeyClient(
     ): TListSolTransactionHistoryResponse {
         listSolHistoryCalls += input
         listSolHistoryError?.let { throw it }
-        return mockSolHistory ?: throw MockTurnkey.historyHttpError(MockTurnkey.SOL_HISTORY_PATH, 403)
+        return mockSolHistory ?: throw MockTurnkey.httpError(MockTurnkey.SOL_HISTORY_PATH, 403)
     }
 }
 
@@ -765,8 +769,9 @@ internal class MockTurnkey(
         /**
          * The vendor client's failure for a non-2xx history response: a plain `RuntimeException`
          * whose message carries the status, the shape `TurnkeyErrorMapping.turnkeyHttpStatus` reads.
+         * Any vendor query path: the indexed history and the balances query fail the same way.
          */
-        fun historyHttpError(path: String, status: Int): RuntimeException =
+        fun httpError(path: String, status: Int): RuntimeException =
             RuntimeException("HTTP error from $path: $status")
 
         fun defaultSession(): Session = Session(

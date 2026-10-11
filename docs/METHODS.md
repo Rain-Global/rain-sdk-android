@@ -700,12 +700,22 @@ Fetches a single balance (native or a contract token) for the current wallet.
 
 ### getTokenBalances(chainId)
 
-Fetches all non-zero balances for the current wallet on the given network. The native
-balance is always included; zero-balance contract tokens are omitted. In `5.0.0-beta.1` the list
-can leave out a token the wallet holds. The [CHANGELOG](../CHANGELOG.md) says which tokens each
-provider lists, and [getBalance](#getbalancechainid-token) reads any single token.
+Fetches the current wallet's balances on the given network: the native balance, always, plus one
+entry per contract token the wallet holds that the provider lists. Zero-balance contract tokens are
+omitted. Which contract tokens a provider lists:
 
-- **Returns:** `List<Balance>` — one per non-zero token plus the native balance.
+| Provider | EVM chains | Solana |
+|----------|------------|--------|
+| Turnkey provider, Rain wallet | On Ethereum, Base, Polygon and their test networks: every token the wallet backend's balance service reports, plus every token in the SDK's built-in registry or passed to `registerTokens` that the service left out. Each call on these chains also sends one Multicall3 `eth_call` batch for the registry and registered tokens to the chain's RPC endpoint, alongside the service call; the service's row wins where both answer, and a chain with no endpoint, or a read that fails or takes longer than five seconds, leaves the service's rows and is logged once per chain. On an organization whose wallet backend has no balance service (HTTP 403, see [TURNKEY_SUPPORT.md](TURNKEY_SUPPORT.md)): the registry and registered tokens, read from the chain, with no service call after the first refusal. On other EVM chains: the registry and registered tokens, read from the chain. | The wallet backend's list where it indexes the cluster; otherwise every token account the node reports. See [Solana notes](TURNKEY_SUPPORT.md#solana-notes). |
+| Privy | The registry and registered tokens, read from the chain. | Every token account the node reports. |
+| Portal | The tokens Portal's own service reports. | No Solana account; a Solana chain id is not supported. |
+
+A token outside the provider's list is not in the result; [getBalance](#getbalancechainid-token)
+reads any single token by address. In `5.0.0-beta.1` the Turnkey provider and the Rain wallet leave
+out the registry and registered tokens the wallet backend's service does not report, on the chains
+that service covers; see the [CHANGELOG](../CHANGELOG.md).
+
+- **Returns:** `List<Balance>` — the native balance plus one per listed contract token with a non-zero balance.
 - **Throws:** `RainError` if the request fails.
 - **Suspend:** Yes
 
@@ -721,7 +731,7 @@ Fetches balances across every chain the SDK was initialized with, in parallel, f
 into a single list. Each `Balance` carries its own `chainId`. Per-chain failures are
 tolerated — a chain that errors out contributes no entries rather than failing the whole
 call. It is built from the same per-chain read as [getTokenBalances](#gettokenbalanceschainid),
-so its `5.0.0-beta.1` note applies here too.
+so that section's table and its `5.0.0-beta.1` note apply here too.
 
 - **Returns:** `List<Balance>` — a flat list spanning all healthy configured chains.
 - **Throws:** `RainError` if the SDK was not initialized.
@@ -733,8 +743,8 @@ so its `5.0.0-beta.1` note applies here too.
 
 Registers additional tokens so their metadata (decimals / symbol) resolves without an
 on-chain enrichment call. Retained across `reset()`, since the store is shared by every client the `RainSdk` resolves. Built-in
-registry tokens are trusted and cannot be overridden: a registration naming one is ignored with a
-warning.
+registry tokens are trusted and cannot be overridden: a registration naming one is ignored, with a
+warning when its metadata differs from the built-in entry.
 
 - **Throws:** `RainError.InvalidConfig` (`RAIN_102`) on a malformed entry, validated exactly as
   `RainSdk.registerTokens` validates; the whole list is checked first, so nothing is registered. The

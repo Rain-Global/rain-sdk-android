@@ -5,6 +5,7 @@ import com.rain.sdk.internal.network.chainreader.MinedReceipt
 import com.rain.sdk.models.Balance
 import com.rain.sdk.models.Token
 import com.rain.sdk.models.TokenInfo
+import kotlinx.coroutines.CompletableDeferred
 import java.math.BigDecimal
 import java.math.BigInteger
 
@@ -19,6 +20,10 @@ internal class MockChainReader(
     var nativeBalance: BigDecimal = BigDecimal.ZERO,
     var erc20Balance: BigDecimal = BigDecimal.ZERO,
     var balances: List<Balance> = emptyList(),
+    /** When set, every [getBalances] batch throws it. Models an RPC that is down or rate-limited. */
+    var balancesError: Throwable? = null,
+    /** When set, [getBalances] suspends on it after recording the call. Models a slow RPC, or one that never answers. */
+    var balancesGate: CompletableDeferred<Unit>? = null,
     var balance: Balance? = null,
     var decimals: Int = 18,
     var symbol: String? = null,
@@ -116,6 +121,8 @@ internal class MockChainReader(
         tokens: List<TokenInfo>
     ): List<Balance> {
         balancesCalls += BalancesCall(chainId, walletAddress, tokens)
+        balancesGate?.await()
+        balancesError?.let { throw it }
         return balances
     }
 

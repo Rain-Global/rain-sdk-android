@@ -264,7 +264,9 @@ class TokenMetadataStore(
         // one would rescale every balance and approval against it, so the registration is dropped.
         val trusted = TokenRegistry.tokensFor(token.chainId).firstOrNull { it.address.lowercase() == key }
         if (trusted != null) {
-            if (trusted != token) {
+            // The same metadata under another spelling of the address (an API that lowercases, for
+            // one) is a repeat, not an override, and gets no warning.
+            if (trusted != token.copy(address = trusted.address)) {
                 Timber.w(
                     "Rain SDK: Ignoring registration of %s on chain %d: built-in token %s (%d decimals) cannot be overridden",
                     token.address,
