@@ -63,6 +63,50 @@ class PrivyRpcClientTest {
     }
 
     @Test
+    fun `classifies the node's OutOfFunds wording as InsufficientFunds on a simulation and on a read`() = runBlocking {
+        // Base Sepolia's public node answered a native send over the balance with this on
+        // 2026-10-02 (beta QA PV-SEND-01); the host must hear a funds shortfall, not a node failure.
+        for (purpose in RpcCallPurpose.entries) {
+            server.enqueue(
+                MockResponse().setBody(
+                    """{"jsonrpc":"2.0","id":1,"error":{"code":-32003,"message":"EVM error: OutOfFunds"}}"""
+                )
+            )
+            val error = runCatching {
+                client.callForHexResult(url(), "eth_call", emptyList(), purpose = purpose)
+            }.exceptionOrNull()
+            assertThat(error).isInstanceOf(RainError.InsufficientFunds::class.java)
+        }
+    }
+
+    @Test
+    fun `a funds shortfall next to a rejection marker is still a funds shortfall at a node`() = runBlocking {
+        // No user sits behind a JSON-RPC node, so a "(4001)" in its text cannot be a rejection.
+        server.enqueue(
+            MockResponse().setBody(
+                """{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"insufficient funds for transfer (4001)"}}"""
+            )
+        )
+        val error = runCatching {
+            client.callForHexResult(url(), "eth_call", emptyList(), purpose = RpcCallPurpose.SIMULATION)
+        }.exceptionOrNull()
+        assertThat(error).isInstanceOf(RainError.InsufficientFunds::class.java)
+    }
+
+    @Test
+    fun `a revert that also names a funds shortfall stays a simulation failure`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(
+                """{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted: insufficient funds"}}"""
+            )
+        )
+        val error = runCatching {
+            client.callForHexResult(url(), "eth_call", emptyList(), purpose = RpcCallPurpose.SIMULATION)
+        }.exceptionOrNull()
+        assertThat(error).isInstanceOf(RainError.TransactionSimulationFailed::class.java)
+    }
+
+    @Test
     fun `classifies an execution-reverted simulation error as TransactionSimulationFailed`() = runBlocking {
         server.enqueue(
             MockResponse().setBody(

@@ -177,7 +177,9 @@ class PrivyWalletProviderTest {
         // failure it would escalate to WithdrawalRevertedByNetwork and tell the host not to retry.
         for (classified in listOf(
             RainError.NetworkError("RPC request failed for eth_call"),
-            RainError.TokenExpired()
+            RainError.TokenExpired(),
+            // The node's verdict on the balance is the host's answer as it is (beta QA PV-SEND-01).
+            RainError.InsufficientFunds()
         )) {
             val manager = mockk<PrivyManager>()
             val rpc = mockk<PrivyRpcClient>()
