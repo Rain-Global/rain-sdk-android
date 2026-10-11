@@ -156,7 +156,7 @@ class TurnkeyWalletProviderSessionTest {
         val turnkey = MockTurnkey()
         turnkey.refreshSessionError = RuntimeException("refresh rejected")
         val client = turnkey.turnkeyClient as MockTurnkeyClient
-        client.listEthHistoryError = MockTurnkey.historyHttpError(MockTurnkey.ETH_HISTORY_PATH, 401)
+        client.listEthHistoryError = MockTurnkey.httpError(MockTurnkey.ETH_HISTORY_PATH, 401)
         val provider = makeProvider(turnkey)
 
         assertThrows(RainError.TokenExpired::class.java) {

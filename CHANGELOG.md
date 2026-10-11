@@ -19,6 +19,10 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   `TransactionOutcomeUnknown` wherever your code switches exhaustively on the code or the class,
   never resend on it, and read `RAIN_501` from a Turnkey or Rain wallet send as settled or refused,
   with nothing moved. See [TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md#after-a-send-is-accepted).
+- Rain USD (`0x6122C5964D39416C3F34475d00Ceb37f50700314`) and rUSD
+  (`0x10b5Be494C2962A7B318aFB63f0Ee30b959D000b`), the two collateral tokens Rain's sandbox mints on
+  Base Sepolia, in the built-in token registry, with 6 decimals each. A `registerTokens` entry for
+  either address is ignored from now on, as for every built-in token.
 
 ### Fixed
 
@@ -55,6 +59,18 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   could not complete, is logged with the status and target, or with the activity's id, type, status
   and reason, and the same is what the error's cause carries. 5.0.0-beta.1 logged the backend's
   exception itself, whose message carries the HTTP response body.
+- `getBalance(chainId, Token.Native)`, `getTokenBalances` and `getAllBalances` through
+  `rain-turnkey-android` read the chain when the wallet backend refuses its balance service with
+  HTTP 403, an organization without the balance feature, the way `getTransactions` already falls
+  back to the activity log: the gate is logged once per provider, after which the provider reads the
+  chain without asking the backend again. The native balance also falls back on any other refused
+  status, retried first when transient and logged as a warning each time, because the chain gives
+  the same number; the token list does not, because the backend and the registry each list tokens
+  the other lacks, so such a status surfaces as before for the host to retry. Before, on a Turnkey
+  organization without the feature, every such read on Ethereum, Base, Polygon and their test
+  networks failed with `RAIN_202`, and `getAllBalances` listed nothing for those chains. The chain
+  read lists the SDK's built-in tokens and those passed to `registerTokens`. `rain-wallet-android`
+  shares the code path; Rain's organization has the feature.
 - The SDK clears a Rain wallet or Turnkey session revoked by a login on another device as soon as
   the wallet backend refuses to refresh it: inside any wallet call that refreshes (with
   `autoRefresh` on) and inside `refreshSession()`. `hasActiveSession()`, `currentAuthState()` and
@@ -73,6 +89,19 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   `5.0.0-beta.1` the attach succeeded and replaced the signed-in account's contact with one that
   kept opening the other account. The attach still replaces an existing contact of the same kind
   instead of adding a second one; see Known issues under `5.0.0-beta.1`.
+- `getTokenBalances` and `getAllBalances` through `rain-turnkey-android` and `rain-wallet-android`
+  list every token in the SDK's built-in registry or passed to `registerTokens` that the wallet holds
+  on Ethereum, Base, Polygon and their test networks: one chain read per call runs alongside the
+  wallet backend's balance service call, or alone on an organization whose backend refuses that
+  service (the entry above), and fills in the tokens the service left out. That service reports
+  only the assets it catalogues, so a sandbox collateral token such as Rain USD on Base Sepolia
+  never appeared. The chain read needs an RPC endpoint for the chain; without one, or when it
+  fails or takes longer than five seconds, the list holds the service's rows, said once per chain in
+  the log. The `getTokenBalances` section of [METHODS.md](docs/METHODS.md) has the details.
+- Cancelling a coroutine that waits on an RPC read (balances, token metadata, allowances, receipts)
+  cancels the HTTP call; before, the call ran to its answer or its 10-second timeout first. An RPC
+  that answers with an `error` that is not an object fails as `RainError.InternalError` instead of
+  a JSON exception.
 
 ### Changed
 
@@ -147,7 +176,17 @@ Rain plans to fix each of these in a later beta.
   lists every token the wallet holds. On Base Sepolia, for example, the Rain wallet leaves out
   Rain USD.
   `getBalance(chainId, Token.Contract(address))` reads a single token from the chain and works
-  for any token.
+  for any token. The Unreleased entry above adds the registry and registered tokens on Ethereum,
+  Base, Polygon and their test networks for the Turnkey provider and the Rain wallet; any other
+  token is listed only if the wallet backend reports it, as the `getTokenBalances` section of
+  [METHODS.md](docs/METHODS.md) describes.
+- On a Turnkey organization without the wallet backend's balance feature, `getBalance(chainId,
+  Token.Native)` and `getTokenBalances` through `rain-turnkey-android` fail with `RAIN_202`
+  (`Unauthorized`, "HTTP 403") on Ethereum, Base, Polygon and their test networks, and
+  `getAllBalances` lists nothing for those chains; nothing falls back to the chain.
+  `getBalance(chainId, Token.Contract(address))` reads the chain and works. Rain's own organization
+  has the feature, so `rain-wallet-android` is not affected. The fix is listed under Unreleased
+  above.
 - At launch with a saved session, `RainProvider.authState` and `sessionState`, and
   `TurnkeyProvider.sessionState`, can emit `Unauthenticated` for a few milliseconds between
   `Loading` and the live session. An app that opens its login screen on that `Unauthenticated`

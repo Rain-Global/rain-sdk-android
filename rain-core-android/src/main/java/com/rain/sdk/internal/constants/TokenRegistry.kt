@@ -7,8 +7,8 @@ import com.rain.sdk.models.TokenInfo
 /**
  * Static registry of ERC-20 tokens the SDK knows how to read balances for.
  *
- * Used by `ChainReader` to batch-fetch balances on chains that aren't covered by a
- * wallet provider's native balance API.
+ * Used by `ChainReader` to batch-fetch balances: alone on chains no wallet provider's balance
+ * service covers, and in the Turnkey adapter for the tokens its balance service leaves out.
  *
  * Scope:
  * - EVM chains only. Solana and Stellar entries are intentionally omitted: Solana balances come
@@ -107,9 +107,13 @@ object TokenRegistry {
             TokenInfo(43114, "0x5E817F2AbCCB9095585D26c2a3ce234a440574Fc", "FRNT", 18, "FRNT"),
             TokenInfo(43114, "0xFd56187DCe1A7c5Ad5aaE9cA3A8827267e69E58a", "TenantToken", 18, "TenantToken (Raindrop)")
         ),
-        // Base Sepolia — Auth Pull sandbox
+        // Base Sepolia — Auth Pull sandbox, plus the two collateral tokens Rain's sandbox mints:
+        // "Rain USD" through /v1/simulate/collateral/fund, "rUSD" through the hand-mintable contract
+        // Rain's docs name. Names and decimals read from the chain on 2026-10-06.
         84532 to listOf(
-            TokenInfo(84532, "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "USDC", 6, "USDC")
+            TokenInfo(84532, "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "USDC", 6, "USDC"),
+            TokenInfo(84532, "0x6122C5964D39416C3F34475d00Ceb37f50700314", "rUSD", 6, "Rain USD"),
+            TokenInfo(84532, "0x10b5Be494C2962A7B318aFB63f0Ee30b959D000b", "rUSD", 6, "rUSD")
         ),
         // Arbitrum Sepolia — Auth Pull sandbox
         421614 to listOf(

@@ -9,6 +9,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertThrows
 import org.junit.Test
+import timber.log.Timber
 
 /**
  * Registry-seeded lookups skip enrichment, unknown tokens enrich exactly once and cache, and
@@ -159,6 +160,31 @@ class TokenMetadataStoreTest {
         assertThat(store.decimalsOrNull(chainId = 1, address = usdcEthereum)).isEqualTo(6)
         assertThat(store.registeredTokens(chainId = 1).filter { it.address.lowercase() == usdcEthereum }).hasSize(1)
         assertThat(reader.decimalsCalls).isEmpty()
+    }
+
+    @Test
+    fun `re-registering a built-in token's own metadata under another address case warns about nothing`() = runBlocking {
+        val store = TokenMetadataStore(MockChainReader())
+        val messages = mutableListOf<String>()
+        val tree = object : Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                messages += message
+            }
+        }
+
+        Timber.plant(tree)
+        try {
+            // Lowercase address, the registry's symbol, decimals and name.
+            store.register(listOf(TokenInfo(chainId = 1, address = usdcEthereum, symbol = "USDC", decimals = 6, name = "USDC")))
+            // Same spelling, different decimals: still refused, and said so.
+            store.register(listOf(TokenInfo(chainId = 1, address = usdcEthereum, symbol = "USDC", decimals = 18, name = "USDC")))
+        } finally {
+            Timber.uproot(tree)
+        }
+
+        assertThat(messages.count { it.contains("cannot be overridden") }).isEqualTo(1)
+        assertThat(store.decimalsOrNull(chainId = 1, address = usdcEthereum)).isEqualTo(6)
+        assertThat(store.registeredTokens(chainId = 1).filter { it.address.lowercase() == usdcEthereum }).hasSize(1)
     }
 
     @Test
