@@ -27,8 +27,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * reaches Rain means Privy already tried and the session is truly dead. Terminal auth failures
  * surface as [RainError.TokenExpired] and fire the hook once per session death; the hook
  * re-arms when a live session is seen again. Only a session Privy refuses or has dropped is a
- * death: a call or a [refreshNow] that got no answer from the network leaves as
- * [RainError.NetworkError], with the session and the hook untouched.
+ * death: a read, a signature or a [refreshNow] that got no answer from the network leaves as
+ * [RainError.NetworkError], and a send whose answer was lost after the request left as
+ * [RainError.TransactionOutcomeUnknown], with the session and the hook untouched either way.
  */
 internal class PrivySessionCoordinator(
     private val privy: Privy,
@@ -100,10 +101,19 @@ internal class PrivySessionCoordinator(
     }
 
     /** Idempotent call (address reads, history): transient failures are retried with backoff. */
-    suspend fun <T> executeRead(block: suspend () -> T): T = execute(idempotent = true, block)
+    suspend fun <T> executeRead(block: suspend () -> T): T = execute(PrivyCall.READ, block)
 
-    /** Non-idempotent call (sends, signing): never retried. */
-    suspend fun <T> executeWrite(block: suspend () -> T): T = execute(idempotent = false, block)
+    /**
+     * A signature: never retried, and a request that got no answer leaves as
+     * [RainError.NetworkError], because nothing was broadcast.
+     */
+    suspend fun <T> executeSign(block: suspend () -> T): T = execute(PrivyCall.SIGN, block)
+
+    /**
+     * A send: never retried, and a request that left the device and got no answer leaves as
+     * [RainError.TransactionOutcomeUnknown], see [PrivyErrorMapping.map].
+     */
+    suspend fun <T> executeSend(block: suspend () -> T): T = execute(PrivyCall.SEND, block)
 
     /**
      * Forces a session refresh through Privy (`PrivyUser.refresh`). Throws
@@ -141,7 +151,7 @@ internal class PrivySessionCoordinator(
             isAuthFailure(e) || sessionDropped() -> expireAndThrow(e)
             else -> {
                 Timber.w(e, "Rain SDK: Privy session refresh failed; the session is unchanged")
-                PrivyErrorMapping.map(e, idempotent = true)
+                PrivyErrorMapping.map(e, send = false)
             }
         }
     }
@@ -187,7 +197,7 @@ internal class PrivySessionCoordinator(
             RainError.TokenExpired()
         }
 
-    private suspend fun <T> execute(idempotent: Boolean, block: suspend () -> T): T {
+    private suspend fun <T> execute(call: PrivyCall, block: suspend () -> T): T {
         // Privy restores persisted credentials asynchronously after launch; a call racing that
         // restore must wait it out rather than misreport a valid session as dead.
         awaitAuthReady()
@@ -200,6 +210,7 @@ internal class PrivySessionCoordinator(
             // Unverified proceeds: requireUser asks the vendor to verify it, once per call, and decides.
             else -> Unit
         }
+        val idempotent = call == PrivyCall.READ
         var transientRetries = 0
         var backoffMs = policy.initialRetryDelayMs
         while (true) {
@@ -232,7 +243,7 @@ internal class PrivySessionCoordinator(
                     // Privy exception it cannot classify.
                     else -> {
                         logUnmappedFailure(e)
-                        throw PrivyErrorMapping.map(e, idempotent)
+                        throw PrivyErrorMapping.map(e, send = call == PrivyCall.SEND)
                     }
                 }
             }
@@ -308,3 +319,6 @@ internal class PrivySessionCoordinator(
         const val AUTH_RESTORE_TIMEOUT_MS = 10_000L
     }
 }
+
+/** What a guarded call does, which decides whether it is retried and how a lost answer leaves. */
+internal enum class PrivyCall { READ, SIGN, SEND }

@@ -67,7 +67,7 @@ internal class PrivyManager(
     suspend fun signTypedData(
         walletAddress: String,
         typedDataJson: String,
-    ): String = sessions.executeWrite {
+    ): String = sessions.executeSign {
         val wallet = resolveWallet(walletAddress)
         val privyTypedData = toPrivyTypedDataJson(typedDataJson)
         request(wallet, EthereumRpcRequest.ethSignTypedDataV4(wallet.address, privyTypedData))
@@ -99,7 +99,7 @@ internal class PrivyManager(
         walletAddress: String,
         rpcUrl: String,
         transactionJson: String,
-    ): String = sessions.executeWrite {
+    ): String = sessions.executeSend {
         val wallet = resolveWallet(walletAddress)
         sendMutex.withLock {
             // Privy's EthereumChain.Custom (privy-core 0.15.0) only carries an RPC URL; no chain
@@ -157,7 +157,7 @@ internal class PrivyManager(
         transaction: ByteArray,
         cluster: SolanaCluster,
         rpcUrl: String,
-    ): String = sessions.executeWrite {
+    ): String = sessions.executeSend {
         val wallet = resolveSolanaWallet()
         val result = try {
             wallet.provider.signAndSendTransaction(transaction, cluster, rpcUrl)

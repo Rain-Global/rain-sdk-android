@@ -19,6 +19,8 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   `TransactionOutcomeUnknown` wherever your code switches exhaustively on the code or the class,
   never resend on it, and read `RAIN_501` from a Turnkey or Rain wallet send as settled or refused,
   with nothing moved. See [TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md#after-a-send-is-accepted).
+  The Privy provider raises it too, for a send whose answer was lost after the request left the
+  device; see the Privy entry under Fixed.
 - Rain USD (`0x6122C5964D39416C3F34475d00Ceb37f50700314`) and rUSD
   (`0x10b5Be494C2962A7B318aFB63f0Ee30b959D000b`), the two collateral tokens Rain's sandbox mints on
   Base Sepolia, in the built-in token registry, with 6 decimals each. A `registerTokens` entry for
@@ -93,9 +95,12 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   connection) now leaves as `RAIN_301` instead of `RAIN_501`, as the adapter's own RPC reads
   already did, and a read whose answer was lost is `RAIN_301` after its retries; an on-device
   wallet reports an offline device through its own prose and stays `RAIN_501`. A send whose
-  answer was lost after the request left (a timeout, a reset, or a resend the HTTP client made
-  after a reset that then could not connect) stays `RAIN_501`: Privy signs and broadcasts inside
-  that request, so its fate is unknown and `RAIN_301`'s "retry" would send twice. A cancellation
+  answer was lost after the request left (a timeout, a reset, a 5xx or an answer the vendor could
+  not read, or a resend the HTTP client made after a reset that then could not connect) is
+  `RAIN_305` `TransactionOutcomeUnknown`, the code the entry under Added introduces: Privy signs
+  and broadcasts inside that request, so the send may still land and `RAIN_301`'s "retry" would
+  send twice; in 5.0.0-beta.1 it was `RAIN_501`, the code a refused send carries too. A signature
+  whose answer was lost is `RAIN_301`: nothing was broadcast. A cancellation
   the vendor wrapped in its own failure now leaves a Privy call as the cancellation.
 - The SDK clears a Rain wallet or Turnkey session revoked by a login on another device as soon as
   the wallet backend refuses to refresh it: inside any wallet call that refreshes (with

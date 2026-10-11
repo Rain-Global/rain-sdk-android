@@ -20,8 +20,8 @@ import java.net.UnknownHostException
  *   a prior credit") maps to [RainError.InsufficientFunds], and a revert a wallet-API answer
  *   relays maps to [RainError.TransactionSimulationFailed]
  * - missing wallet / failed wallet creation maps to [RainError.WalletUnavailable]
- * - a request that got no answer from the network maps to [RainError.NetworkError] when the host
- *   may safely retry it, see [map]
+ * - a request that got no answer from the network maps to [RainError.NetworkError] when nothing
+ *   was broadcast, and to [RainError.TransactionOutcomeUnknown] when a send may have been, see [map]
  * - any other Privy exception maps to [RainError.ProviderError]
  *
  * The Privy Kotlin SDK carries no structured reason codes on its exceptions
@@ -39,24 +39,27 @@ internal object PrivyErrorMapping {
 
     /**
      * The total mapping for every failure that leaves the adapter. A [RainError] passes through;
-     * a Privy exception maps by type via [mapOrNull]; a request that got no answer from the network
-     * maps to [RainError.NetworkError], the code hosts read as "retry, nothing was signed or
-     * broadcast"; anything else is read by the shared prose rules before flooring at
+     * a Privy exception maps by type via [mapOrNull]; a request the network did not answer maps by
+     * what the call was; anything else is read by the shared prose rules before flooring at
      * [RainError.ProviderError].
      *
-     * [idempotent] says whether the call that failed can be repeated without a second effect: a
-     * read or a session refresh can, a send cannot. On an idempotent call every transport failure
-     * is a [RainError.NetworkError] ([isNetworkFailure]). On a send only a failure that provably
-     * happened before the request left the device is ([neverReachedPrivy]): Privy signs and
-     * broadcasts a send inside the one request that carried it, so a timeout or a reset after it
-     * left may follow a broadcast, and a host that retried on `RAIN_301` would send twice. Those
-     * stay [RainError.ProviderError], an unknown fate, and so does a send the HTTP client resent
-     * after such a failure and then could not connect for.
+     * [send] says whether the call that failed broadcasts: a send does, a read, a session refresh
+     * and a signature do not. On a call that does not broadcast every transport failure is a
+     * [RainError.NetworkError] ([isNetworkFailure]), the code hosts read as "retry, nothing was
+     * broadcast". On a send only a failure that provably happened before the request left the
+     * device is ([neverReachedPrivy]): Privy signs and broadcasts a send inside the one request
+     * that carried it, so any failure after that may follow a broadcast, and a host that retried on
+     * `RAIN_301` would send twice. A transport failure after the request left (a timeout, a reset),
+     * an answer the vendor reports status-less (a 5xx, one it could not read; only a 4xx keeps its
+     * status, see [isNetworkFailure]) and a send the HTTP client resent after such a failure and
+     * then could not connect for leave as [RainError.TransactionOutcomeUnknown] ([answerLost]): the
+     * send may still land, so the host reads history or the balance before sending again. A 4xx is
+     * a refusal, mapped by type before this rule, and nothing moved.
      */
-    fun map(e: Throwable, idempotent: Boolean): RainError =
+    fun map(e: Throwable, send: Boolean): RainError =
         e as? RainError
             ?: mapOrNull(e)
-            ?: mapNetworkOrNull(e, idempotent)
+            ?: mapNetworkOrNull(e, send)
             ?: VendorErrorClassifier.fromVendorError(e)
             ?: RainError.ProviderError(e)
 
@@ -110,9 +113,26 @@ internal object PrivyErrorMapping {
     private fun networkVerdict(e: Throwable): Throwable? =
         e.causeChain().firstOrNull { it.isHttpAnswer() || it.isNoAnswer() }
 
-    private fun mapNetworkOrNull(e: Throwable, idempotent: Boolean): RainError? {
-        val retryable = if (idempotent) isNetworkFailure(e) else neverReachedPrivy(e)
-        return if (retryable) RainError.NetworkError(e.message, e) else null
+    /**
+     * Whether [e], or a cause of it, shows that a request left the device and its answer was lost
+     * or unreadable: a transport failure ([isNetworkFailure]), or the vendor's status-less wrapper,
+     * which only its request helper puts around the failure of a request it made. The vendor's
+     * confirmed-offline refusal wears the same wrapper but is refused before any request, so a send
+     * reads [neverReachedPrivy] first.
+     */
+    fun answerLost(e: Throwable): Boolean =
+        isNetworkFailure(e) || e.causeChain().any { it is PrivyApiException && it.statusCode == null }
+
+    private fun mapNetworkOrNull(e: Throwable, send: Boolean): RainError? = when {
+        !send -> if (isNetworkFailure(e)) RainError.NetworkError(e.message, e) else null
+        neverReachedPrivy(e) -> RainError.NetworkError(e.message, e)
+        answerLost(e) -> RainError.TransactionOutcomeUnknown(
+            "The send's answer was lost after the request left the device " +
+                "(${e.causeChain().last().javaClass.simpleName}); the send may have been broadcast " +
+                "and may still land",
+            e,
+        )
+        else -> null
     }
 
     private fun mapAuthenticationException(e: AuthenticationException): RainError {

@@ -120,9 +120,12 @@ sealed class RainError(
      * [TransactionPending]. NOT a settled failure: the transaction may still land, and resending it
      * risks a duplicate transfer. Read the wallet's history or balance before sending again. A
      * [ProviderError] on the same send paths means the provider settled the send as failed, or
-     * refused it, and nothing moved. Raised today by the Turnkey provider and the Rain wallet, on
-     * EVM and Solana sends alike; `docs/TURNKEY_SUPPORT.md`, "After a send is accepted", lists the
-     * cases. Reported as `RAIN_305`.
+     * refused it, and nothing moved; the one exception is a wallet on Privy's on-device stack,
+     * whose failures arrive as prose the SDK cannot read. Raised by the Turnkey provider and the
+     * Rain wallet, on EVM and Solana sends alike (`docs/TURNKEY_SUPPORT.md`, "After a send is
+     * accepted", lists the cases), and by the Privy provider for a send whose request left the
+     * device and got no answer, or none the vendor could read (the `RAIN_305` row in
+     * `docs/METHODS.md`). Reported as `RAIN_305`.
      */
     class TransactionOutcomeUnknown(details: String, cause: Throwable? = null) :
         RainError(RainErrorCode.TRANSACTION_OUTCOME_UNKNOWN, details, cause)

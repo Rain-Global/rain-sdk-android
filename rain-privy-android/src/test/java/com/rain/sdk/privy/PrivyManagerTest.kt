@@ -77,9 +77,9 @@ class PrivyManagerTest {
     }
 
     @Test
-    fun `a send whose answer was lost after the request left leaves as ProviderError`() = runBlocking {
-        // Privy signs and broadcasts inside the one request, so the fate is unknown and the host
-        // must not read a retry hint into it.
+    fun `a send whose answer was lost after the request left leaves as TransactionOutcomeUnknown`() = runBlocking {
+        // Privy signs and broadcasts inside the one request, so the send may still land: the host
+        // must read neither a retry hint nor a settled failure into it.
         val provider = mockk<EmbeddedEthereumWalletProvider>()
         every { provider.switchChain(any()) } just Runs
         val lost = PrivyApiException(null, null, "Something went wrong", SocketTimeoutException("timeout"))
@@ -90,12 +90,12 @@ class PrivyManagerTest {
             manager.sendTransaction(walletAddress = WALLET, rpcUrl = RPC, transactionJson = "{}")
         }.exceptionOrNull()
 
-        assertThat(error).isInstanceOf(RainError.ProviderError::class.java)
+        assertThat(error).isInstanceOf(RainError.TransactionOutcomeUnknown::class.java)
         assertThat(error?.cause).isSameInstanceAs(lost)
     }
 
     @Test
-    fun `a send the client resent after a reset and then could not connect for leaves as ProviderError`() = runBlocking {
+    fun `a send the client resent after a reset and then could not connect for leaves as TransactionOutcomeUnknown`() = runBlocking {
         val provider = mockk<EmbeddedEthereumWalletProvider>()
         every { provider.switchChain(any()) } just Runs
         val resent = UnknownHostException("api.privy.io").apply { addSuppressed(SocketException("Connection reset")) }
@@ -107,14 +107,14 @@ class PrivyManagerTest {
             manager.sendTransaction(walletAddress = WALLET, rpcUrl = RPC, transactionJson = "{}")
         }.exceptionOrNull()
 
-        assertThat(error).isInstanceOf(RainError.ProviderError::class.java)
+        assertThat(error).isInstanceOf(RainError.TransactionOutcomeUnknown::class.java)
     }
 
     @Test
-    fun `a signature request maps a lost answer and a refused connection the same way as a send`() = runBlocking {
+    fun `a signature request maps a lost answer and a refused connection as NetworkError, nothing was broadcast`() = runBlocking {
         val lost = PrivyApiException(null, null, "Something went wrong", SocketTimeoutException("timeout"))
         val refused = PrivyApiException(null, null, "Something went wrong", ConnectException("Failed to connect"))
-        for ((failure, expected) in listOf(lost to RainError.ProviderError::class.java, refused to RainError.NetworkError::class.java)) {
+        for ((failure, expected) in listOf(lost to RainError.NetworkError::class.java, refused to RainError.NetworkError::class.java)) {
             val provider = mockk<EmbeddedEthereumWalletProvider>()
             coEvery { provider.request(any()) } returns Result.failure(failure)
             val manager = PrivyManager(privyWith(listOf(wallet(WALLET, provider))))
@@ -127,10 +127,10 @@ class PrivyManagerTest {
     }
 
     @Test
-    fun `a Solana send maps a lost answer and a refused connection the same way, thrown or returned`() = runBlocking {
+    fun `a Solana send maps a lost answer and a refused connection like the EVM send, thrown or returned`() = runBlocking {
         val lost = PrivyApiException(null, null, "Something went wrong", SocketTimeoutException("timeout"))
         val refused = PrivyApiException(null, null, "Something went wrong", ConnectException("Failed to connect"))
-        for ((failure, expected) in listOf(lost to RainError.ProviderError::class.java, refused to RainError.NetworkError::class.java)) {
+        for ((failure, expected) in listOf(lost to RainError.TransactionOutcomeUnknown::class.java, refused to RainError.NetworkError::class.java)) {
             for (thrown in listOf(true, false)) {
                 val privy = privyWith(emptyList())
                 val user = privy.getUser()!!

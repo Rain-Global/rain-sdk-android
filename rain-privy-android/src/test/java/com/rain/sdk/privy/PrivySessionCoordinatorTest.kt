@@ -182,7 +182,7 @@ class PrivySessionCoordinatorTest {
 
         assertThrows(RainError.TokenExpired::class.java) {
             runBlocking {
-                coordinator.executeWrite {
+                coordinator.executeSend {
                     attempts++
                     throw AuthenticationException("not logged in")
                 }
@@ -274,7 +274,7 @@ class PrivySessionCoordinatorTest {
 
         val thrown = assertThrows(RainError.NetworkError::class.java) {
             runBlocking {
-                coordinator.executeWrite<String> {
+                coordinator.executeSend<String> {
                     attempts++
                     throw NoNetworkException
                 }
@@ -285,9 +285,9 @@ class PrivySessionCoordinatorTest {
     }
 
     @Test
-    fun `a transport failure after a send left the device is ProviderError, never a retry hint`() {
+    fun `a transport failure after a send left the device is TransactionOutcomeUnknown, never a retry hint`() {
         // Privy signs and broadcasts inside the request, so a lost answer may follow a broadcast:
-        // RAIN_301 would invite a host to send twice.
+        // RAIN_301 would invite a host to send twice, and RAIN_501 would read as settled.
         val user = mockk<PrivyUser>()
         val auth = MutableStateFlow<AuthState>(AuthState.Authenticated(user))
         val privy = authenticatedPrivy(auth, user)
@@ -295,9 +295,30 @@ class PrivySessionCoordinatorTest {
         val coordinator = coordinator(privy)
         val failure = lostAnswer()
 
-        val thrown = assertThrows(RainError.ProviderError::class.java) {
+        val thrown = assertThrows(RainError.TransactionOutcomeUnknown::class.java) {
             runBlocking {
-                coordinator.executeWrite<String> {
+                coordinator.executeSend<String> {
+                    attempts++
+                    throw failure
+                }
+            }
+        }
+        assertThat(thrown.cause).isSameInstanceAs(failure)
+        assertThat(attempts).isEqualTo(1)
+    }
+
+    @Test
+    fun `a transport failure on a signature is NetworkError after one attempt, nothing was broadcast`() {
+        val user = mockk<PrivyUser>()
+        val auth = MutableStateFlow<AuthState>(AuthState.Authenticated(user))
+        val privy = authenticatedPrivy(auth, user)
+        var attempts = 0
+        val coordinator = coordinator(privy)
+        val failure = lostAnswer()
+
+        val thrown = assertThrows(RainError.NetworkError::class.java) {
+            runBlocking {
+                coordinator.executeSign<String> {
                     attempts++
                     throw failure
                 }
@@ -316,7 +337,7 @@ class PrivySessionCoordinatorTest {
 
         for (failure in listOf(wrappedTransportFailure(), offlineRefusal())) {
             val thrown = assertThrows(RainError.NetworkError::class.java) {
-                runBlocking { coordinator.executeWrite<String> { throw failure } }
+                runBlocking { coordinator.executeSend<String> { throw failure } }
             }
             assertThat(thrown.cause).isSameInstanceAs(failure)
         }
@@ -355,7 +376,7 @@ class PrivySessionCoordinatorTest {
 
         assertThrows(RainError.TokenExpired::class.java) {
             runBlocking {
-                coordinator.executeWrite<String> {
+                coordinator.executeSend<String> {
                     auth.value = AuthState.Unauthenticated
                     throw apiException(400)
                 }
@@ -412,7 +433,7 @@ class PrivySessionCoordinatorTest {
         val wrapped = PrivyApiException(null, null, "Something went wrong", cancel)
 
         val thrown = assertThrows(kotlinx.coroutines.CancellationException::class.java) {
-            runBlocking { coordinator.executeWrite<String> { throw wrapped } }
+            runBlocking { coordinator.executeSend<String> { throw wrapped } }
         }
         assertThat(thrown).isSameInstanceAs(cancel)
         assertThat(hookCalls).isEqualTo(0)

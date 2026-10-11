@@ -145,10 +145,10 @@ class PrivyErrorMappingTest {
         // An API call on a device the vendor can confirm offline comes back as
         // ApiResult.Error.NoNetworkError, which toResult() wraps as a status-less PrivyApiException
         // carrying the same sentence; a wallet call fails with NoNetworkException itself.
-        for (idempotent in listOf(true, false)) {
-            assertThat(PrivyErrorMapping.map(offlineApiCall(), idempotent))
+        for (send in listOf(false, true)) {
+            assertThat(PrivyErrorMapping.map(offlineApiCall(), send))
                 .isInstanceOf(RainError.NetworkError::class.java)
-            assertThat(PrivyErrorMapping.map(NoNetworkException, idempotent))
+            assertThat(PrivyErrorMapping.map(NoNetworkException, send))
                 .isInstanceOf(RainError.NetworkError::class.java)
         }
     }
@@ -162,10 +162,10 @@ class PrivyErrorMappingTest {
             ConnectTimeoutException("Connect timeout has expired"),
         )) {
             val failure = wrapped(cause)
-            val mapped = PrivyErrorMapping.map(failure, idempotent = false)
+            val mapped = PrivyErrorMapping.map(failure, send = true)
             assertThat(mapped).isInstanceOf(RainError.NetworkError::class.java)
             assertThat(mapped.cause).isSameInstanceAs(failure)
-            assertThat(PrivyErrorMapping.map(cause, idempotent = false)).isInstanceOf(RainError.NetworkError::class.java)
+            assertThat(PrivyErrorMapping.map(cause, send = true)).isInstanceOf(RainError.NetworkError::class.java)
         }
     }
 
@@ -174,41 +174,42 @@ class PrivyErrorMappingTest {
         // OkHttp resends a request after a recoverable send-time failure and, when the retry cannot
         // connect, throws that failure with the earlier one attached as suppressed.
         val resent = UnknownHostException("api.privy.io").apply { addSuppressed(SocketException("Connection reset")) }
-        assertThat(PrivyErrorMapping.map(wrapped(resent), idempotent = false)).isInstanceOf(RainError.ProviderError::class.java)
-        assertThat(PrivyErrorMapping.map(wrapped(resent), idempotent = true)).isInstanceOf(RainError.NetworkError::class.java)
+        assertThat(PrivyErrorMapping.map(wrapped(resent), send = true)).isInstanceOf(RainError.TransactionOutcomeUnknown::class.java)
+        assertThat(PrivyErrorMapping.map(wrapped(resent), send = false)).isInstanceOf(RainError.NetworkError::class.java)
         // Two connect failures in a row never left the device.
         val neverLeft = UnknownHostException("api.privy.io").apply { addSuppressed(ConnectException("Failed to connect")) }
-        assertThat(PrivyErrorMapping.map(wrapped(neverLeft), idempotent = false)).isInstanceOf(RainError.NetworkError::class.java)
+        assertThat(PrivyErrorMapping.map(wrapped(neverLeft), send = true)).isInstanceOf(RainError.NetworkError::class.java)
     }
 
     @Test
-    fun `a transport failure after the request left is NetworkError only on a call that can be repeated`() {
+    fun `a transport failure after the request left is NetworkError off a send and TransactionOutcomeUnknown on one`() {
         // A read timeout or a reset may follow a broadcast Privy already made inside the request,
-        // so on a send it is an unknown fate, never the "retry" that RAIN_301 means.
+        // so on a send it is RAIN_305, never the "retry" that RAIN_301 means nor the settled RAIN_501.
         for (cause in listOf<Throwable>(SocketTimeoutException("timeout"), IOException("connection reset"))) {
             val failure = wrapped(cause)
-            assertThat(PrivyErrorMapping.map(failure, idempotent = true)).isInstanceOf(RainError.NetworkError::class.java)
-            assertThat(PrivyErrorMapping.map(cause, idempotent = true)).isInstanceOf(RainError.NetworkError::class.java)
-            val onSend = PrivyErrorMapping.map(failure, idempotent = false)
-            assertThat(onSend).isInstanceOf(RainError.ProviderError::class.java)
+            assertThat(PrivyErrorMapping.map(failure, send = false)).isInstanceOf(RainError.NetworkError::class.java)
+            assertThat(PrivyErrorMapping.map(cause, send = false)).isInstanceOf(RainError.NetworkError::class.java)
+            val onSend = PrivyErrorMapping.map(failure, send = true)
+            assertThat(onSend).isInstanceOf(RainError.TransactionOutcomeUnknown::class.java)
             assertThat(onSend.cause).isSameInstanceAs(failure)
-            assertThat(PrivyErrorMapping.map(cause, idempotent = false)).isInstanceOf(RainError.ProviderError::class.java)
+            assertThat(PrivyErrorMapping.map(cause, send = true)).isInstanceOf(RainError.TransactionOutcomeUnknown::class.java)
         }
     }
 
     @Test
-    fun `a status-less failure that is not the network stays ProviderError`() {
+    fun `a status-less failure that is not the network is ProviderError off a send and TransactionOutcomeUnknown on one`() {
         // A response the vendor could not decode, and a 5xx, which ktor raises as a
         // ServerResponseException (an IllegalStateException) and the vendor's catch-all reports
-        // status-less: neither is a transport failure, on a read or on a send.
+        // status-less: neither is a transport failure, but both answer a request that left, so a
+        // send reads them as an unknown fate.
         for (cause in listOf<Throwable>(
             IllegalStateException("no body"),
             IllegalStateException("Server error(https://auth.privy.io/api/v1/sessions: 503 Service Unavailable"),
         )) {
-            for (idempotent in listOf(true, false)) {
+            for (send in listOf(false, true)) {
                 val failure = wrapped(cause)
-                val mapped = PrivyErrorMapping.map(failure, idempotent)
-                assertThat(mapped).isInstanceOf(RainError.ProviderError::class.java)
+                val mapped = PrivyErrorMapping.map(failure, send)
+                assertThat(mapped).isInstanceOf(expectedStatusLess(send))
                 assertThat(mapped.cause).isSameInstanceAs(failure)
             }
         }
@@ -221,7 +222,12 @@ class PrivyErrorMappingTest {
         val answered = PrivyApiException(404, null, "Not found", IOException("x"))
         assertThat(PrivyErrorMapping.mapOrNull(answered)).isInstanceOf(RainError.ProviderError::class.java)
         assertThat(PrivyErrorMapping.isNetworkFailure(answered)).isFalse()
+        assertThat(PrivyErrorMapping.answerLost(answered)).isFalse()
     }
+
+    /** A status-less failure that is not the network: a provider failure off a send, an unknown fate on one. */
+    private fun expectedStatusLess(send: Boolean): Class<out RainError> =
+        if (send) RainError.TransactionOutcomeUnknown::class.java else RainError.ProviderError::class.java
 
     @Test
     fun `a cancellation the vendor wrapped is found in the chain`() {
@@ -273,7 +279,7 @@ class PrivyErrorMappingTest {
     }
 
     @Test
-    fun `a failure with no HTTP status maps to ProviderError through map, whatever its cause says`() {
+    fun `a failure with no HTTP status never reads its cause for a funds verdict`() {
         // privy-core 0.15.0 keeps a status and the body text only for a 4xx. A request that got no
         // answer, a 3xx and a 5xx arrive as a status-less PrivyApiException with the vendor's fixed
         // sentence and the client's exception as the cause, so the funds read never sees a cause
@@ -285,10 +291,10 @@ class PrivyErrorMappingTest {
             IllegalStateException("503 Service Unavailable"),
             IllegalStateException("EVM error: OutOfFunds"),
         )) {
-            for (idempotent in listOf(true, false)) {
+            for (send in listOf(false, true)) {
                 val failure = PrivyApiException(null, null, "Something went wrong", cause)
-                val mapped = PrivyErrorMapping.map(failure, idempotent)
-                assertThat(mapped).isInstanceOf(RainError.ProviderError::class.java)
+                val mapped = PrivyErrorMapping.map(failure, send)
+                assertThat(mapped).isInstanceOf(expectedStatusLess(send))
                 assertThat(mapped.cause).isSameInstanceAs(failure)
             }
         }
