@@ -149,8 +149,11 @@ internal class PrivySessionCoordinator(
     /**
      * The Privy user for a call, or the failure for a call that has none, after one attempt to
      * settle an unverified session through [verifiedAuthState]. A session the vendor still cannot
-     * verify is a [RainError.NetworkError], not a death; any other state without a user is
-     * [RainError.TokenExpired], which the guarded call turns into a death.
+     * verify is a [RainError.NetworkError], not a death, and a guarded call does not retry it: the
+     * attempt is a vendor request that can wait out the vendor's HTTP timeout (60 s in privy-core
+     * 0.15.0), so a read, and the `create()` probe that is one, asks once and leaves, and the
+     * host's next call asks again. Any other state without a user is [RainError.TokenExpired],
+     * which the guarded call turns into a death.
      */
     suspend fun requireUser(): PrivyUser {
         val state = verifiedAuthState()
@@ -194,7 +197,7 @@ internal class PrivySessionCoordinator(
             // Re-arming happens on the watcher's transition back to Active (a real re-login).
             is AuthState.Authenticated -> sawSession.set(true)
             is AuthState.Unauthenticated -> expireAndThrow()
-            // Unverified proceeds: requireUser asks the vendor to verify it and decides.
+            // Unverified proceeds: requireUser asks the vendor to verify it, once per call, and decides.
             else -> Unit
         }
         var transientRetries = 0
@@ -288,7 +291,10 @@ internal class PrivySessionCoordinator(
     /**
      * A request that got no answer (the network), or an HTTP answer that asks for a retry. Of the
      * statuses below only 408 and 429 ever arrive with their status: privy-core 0.15.0 reports a
-     * 5xx status-less (see [PrivyErrorMapping.isNetworkFailure]), so a 5xx is not retried today.
+     * 5xx status-less (see [PrivyErrorMapping.isNetworkFailure]), so a 5xx is not retried today. A
+     * [RainError] raised inside the block is the coordinator's own verdict and never transient; the
+     * one such error, [requireUser]'s on a session the vendor cannot verify, stands for a vendor
+     * request already made, which is not repeated within the call.
      */
     private fun isTransient(e: Throwable): Boolean =
         PrivyErrorMapping.isNetworkFailure(e) ||

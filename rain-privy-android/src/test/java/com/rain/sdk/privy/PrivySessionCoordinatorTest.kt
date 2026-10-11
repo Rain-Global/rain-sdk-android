@@ -365,7 +365,10 @@ class PrivySessionCoordinatorTest {
     }
 
     @Test
-    fun `a read on an unverified session asks the vendor to verify on every attempt`() {
+    fun `a read on an unverified session asks the vendor to verify once per call and is not retried`() {
+        // The attempt is a vendor request that can wait out the vendor's 60 s HTTP timeout, so a
+        // read the vendor still cannot verify leaves at once instead of asking twice more with
+        // backoff; the host's next call asks again.
         val user = mockk<PrivyUser>()
         val auth = MutableStateFlow<AuthState>(mockk<AuthState.AuthenticatedUnverified>())
         val privy = mockk<Privy>()
@@ -377,13 +380,26 @@ class PrivySessionCoordinatorTest {
             if (verifications == 2) auth.value = AuthState.Authenticated(user)
         }
         val delays = RecordingDelay()
+        var attempts = 0
         val coordinator = coordinator(privy, delayRecorder = delays)
+
+        assertThrows(RainError.NetworkError::class.java) {
+            runBlocking {
+                coordinator.executeRead {
+                    attempts++
+                    coordinator.requireUser()
+                }
+            }
+        }
+        assertThat(attempts).isEqualTo(1)
+        assertThat(verifications).isEqualTo(1)
+        assertThat(delays.delays).isEmpty()
 
         val resolved = runBlocking { coordinator.executeRead { coordinator.requireUser() } }
 
         assertThat(resolved).isSameInstanceAs(user)
         assertThat(verifications).isEqualTo(2)
-        assertThat(delays.delays).containsExactly(500L).inOrder()
+        assertThat(delays.delays).isEmpty()
     }
 
     @Test

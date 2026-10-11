@@ -187,7 +187,6 @@ private fun Throwable.isHttpAnswer(): Boolean = this is PrivyApiException && sta
 private fun Throwable.isNoAnswer(): Boolean =
     this is NoNetworkException ||
         this is IOException ||
-        this is RainError.NetworkError ||
         isVendorOfflineAnswer()
 
 /**
