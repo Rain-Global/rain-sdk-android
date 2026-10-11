@@ -527,7 +527,13 @@ class TurnkeyManagedPasskeyTest {
     @Test
     fun `a failed registration activity is ProviderError and a 403 is Unauthorized`() = runTest {
         val failed = MockTurnkey()
-        failed.registerAuthenticatorError = RuntimeException("No result found from /public/v1/submit/create_authenticators")
+        // The vendor's typed error for a registration activity Turnkey failed (http 2.2.0): the provider's failure, nothing to retry.
+        failed.registerAuthenticatorError = MockTurnkey.activityNotCompleted(
+            path = "/public/v1/submit/create_authenticators",
+            type = com.turnkey.types.V1ActivityType.ACTIVITY_TYPE_CREATE_AUTHENTICATORS_V2,
+            status = com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_FAILED,
+            failureMessage = "authenticator limit reached"
+        )
         expectThrows<RainError.ProviderError> { controller(failed).addPasskey(activity) }
         assertThat(failed.createPasskeyCalls).hasSize(1)
         assertThat(failed.refreshSessionCallCount).isEqualTo(0)

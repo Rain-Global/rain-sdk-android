@@ -66,6 +66,8 @@ interface RainClient {
      * @throws RainError.WithdrawalRevertedByNetwork (`RAIN_405`) when the network rejected the withdrawal,
      *   in the dry run or after broadcast
      * @throws RainError.InsufficientFunds (`RAIN_402`) when the wallet cannot pay the amount, the fee or the rent
+     * @throws RainError.TransactionOutcomeUnknown (`RAIN_305`) when the provider may have accepted the
+     *   withdrawal and its answer was then lost; not a settled failure, read history before sending again
      * @throws RainError.ProviderError (`RAIN_501`) for a provider failure; [RainError.InternalError] (`RAIN_502`)
      *   for one nothing mapped
      */
@@ -201,6 +203,8 @@ interface RainClient {
      * @throws RainError.InvalidRecipient (`RAIN_102`) when [to] is not a valid EVM address or its
      *   mixed-case EIP-55 checksum doesn't match; nothing is sent. The full `RAIN_102` table is
      *   `## Errors` in `docs/METHODS.md`
+     * @throws RainError.TransactionOutcomeUnknown (`RAIN_305`) when the provider may have accepted the
+     *   send and its answer was then lost; not a settled failure, read history before sending again
      */
     @Throws(RainError::class)
     suspend fun sendNative(
@@ -232,6 +236,8 @@ interface RainClient {
      *   mixed-case EIP-55 checksum doesn't match, and [RainError.InvalidConfig] (`RAIN_102`) when the
      *   same is true of [contractAddress]; nothing is sent. The full `RAIN_102` table is `## Errors`
      *   in `docs/METHODS.md`
+     * @throws RainError.TransactionOutcomeUnknown (`RAIN_305`) when the provider may have accepted the
+     *   send and its answer was then lost; not a settled failure, read history before sending again
      */
     @Throws(RainError::class)
     suspend fun sendToken(
@@ -255,11 +261,14 @@ interface RainClient {
     suspend fun getBalance(chainId: Int, token: Token): Balance
 
     /**
-     * Fetches all non-zero balances for the current wallet on the given network. The native
-     * balance is always included; zero-balance contract tokens are omitted.
+     * Fetches the current wallet's balances on the given network: the native balance, always, plus
+     * one entry per contract token the wallet holds that the provider lists. Zero-balance contract
+     * tokens are omitted. Which contract tokens each provider lists, and what the SDK reads from the
+     * chain for it, is stated once under `getTokenBalances` in `docs/METHODS.md`; [getBalance] reads
+     * any single token by address, listed or not.
      *
      * @param chainId The numeric chain ID.
-     * @return One [Balance] per non-zero token plus the native balance.
+     * @return The native balance plus one [Balance] per listed contract token with a non-zero balance.
      * @throws RainError if no wallet provider is set, or if the request fails.
      */
     @Throws(RainError::class)

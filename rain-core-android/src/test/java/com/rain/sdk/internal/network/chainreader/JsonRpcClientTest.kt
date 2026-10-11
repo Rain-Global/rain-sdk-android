@@ -2,6 +2,9 @@ package com.rain.sdk.internal.network.chainreader
 
 import com.google.common.truth.Truth.assertThat
 import com.rain.sdk.error.RainError
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -10,6 +13,7 @@ import org.junit.After
 import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.TimeUnit
 
 /** The shared JSON-RPC client's wire behaviour: response shapes, node errors, empty bodies and timeouts. */
 class JsonRpcClientTest {
@@ -63,6 +67,35 @@ class JsonRpcClientTest {
         }
         assertThat(error.message).contains("-32000")
         assertThat(error.message).contains("boom")
+    }
+
+    @Test
+    fun `an RPC error that is not an object maps to InternalError, not a JSON failure`() {
+        server.enqueue(MockResponse().setBody("""{"jsonrpc":"2.0","id":1,"error":"rate limited"}"""))
+
+        val error = assertThrows(RainError.InternalError::class.java) {
+            runBlocking { client.call(url(), "eth_call", emptyList()) }
+        }
+
+        assertThat(error).hasMessageThat().contains("rate limited")
+    }
+
+    @Test
+    @Suppress("InjectDispatcher") // a real thread is the point: takeRequest blocks the test thread while the call is in flight
+    fun `cancelling the caller cancels the request instead of waiting for the answer`() = runBlocking<Unit> {
+        server.enqueue(
+            MockResponse().setBody("""{"jsonrpc":"2.0","id":1,"result":"0x2a"}""").setHeadersDelay(5, TimeUnit.SECONDS)
+        )
+
+        // On another thread: takeRequest below blocks this one, and the call has to be in flight first.
+        val read = async(Dispatchers.IO) { client.call(url(), "eth_blockNumber", emptyList()) }
+        assertThat(server.takeRequest(2, TimeUnit.SECONDS)).isNotNull()
+        val started = System.nanoTime()
+        read.cancelAndJoin()
+
+        assertThat(read.isCancelled).isTrue()
+        // Well under the 5 s the server would have taken, and the client's 10 s call timeout.
+        assertThat((System.nanoTime() - started) / 1_000_000).isLessThan(2_000L)
     }
 
     @Test

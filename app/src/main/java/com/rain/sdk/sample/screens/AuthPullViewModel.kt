@@ -285,6 +285,19 @@ class AuthPullViewModel(
                         errorText = "Not confirmed yet. Tap Refresh to re-read the allowance; do not re-approve."
                     )
                 }
+            } catch (e: RainError.TransactionOutcomeUnknown) {
+                // Not a settled failure either: the backend may have accepted the approval before its
+                // answer was lost, and there is no hash or status id to resume from. The allowance read
+                // says whether it landed; re-approving here would double-spend gas or set it twice.
+                SampleLog.w("AuthPull.approve", "outcome unknown: ${e.message}")
+                if (requestGeneration != generation) return@launch
+                _state.update {
+                    it.copy(
+                        isApproving = false,
+                        approvalStatus = "Submitted, outcome unknown",
+                        errorText = "The approval may still land. Tap Refresh to re-read the allowance; do not re-approve."
+                    )
+                }
             } catch (e: Exception) {
                 SampleLog.e("AuthPull.approve", "failed: ${e.message}", e)
                 if (requestGeneration != generation) return@launch

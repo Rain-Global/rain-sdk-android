@@ -314,7 +314,7 @@ class TurnkeyAdapterTest {
     // ---- ethSendTransaction error propagation -----------------------------------
 
     @Test
-    fun `sendTransaction surfaces an ethSendTransaction failure as ProviderError`() {
+    fun `sendTransaction surfaces an ethSendTransaction failure as TransactionOutcomeUnknown`() {
         stubSendTransactionRPCs()
         val turnkey = MockTurnkey()
         (turnkey.turnkeyClient as MockTurnkeyClient).ethSendTransactionError =
@@ -332,11 +332,14 @@ class TurnkeyAdapterTest {
                 )
             }
         }.exceptionOrNull()
-        // The vendor failure leaves the adapter as a RainError, never raw: the session coordinator
-        // maps it, and core passes a RainError through untouched. Nothing recognizes this one, so
-        // it floors at ProviderError with the vendor exception as its cause.
-        assertThat(ex).isInstanceOf(RainError.ProviderError::class.java)
-        assertThat(ex?.cause?.message).contains("turnkey rejected send")
+        // The vendor failure leaves the adapter as a RainError, never raw. It is neither a refusal of
+        // the submit nor the vendor's typed not-completed error, so it may have followed acceptance and
+        // lost the activity: the host sees TransactionOutcomeUnknown (RAIN_305), built around the
+        // vendor's message but not its exception, so no layer reads a status off it and retries.
+        assertThat(ex).isInstanceOf(RainError.TransactionOutcomeUnknown::class.java)
+        assertThat(ex?.message).contains("turnkey rejected send")
+        assertThat(ex?.message).contains("the send may still land")
+        assertThat(ex?.cause).isNull()
     }
 
     // ---- estimateTransactionFee via RPC -----------------------------------------

@@ -6,6 +6,24 @@ Notable changes to the Rain Android SDK, newest first. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Breaking:** `RAIN_305` `RainError.TransactionOutcomeUnknown`, a new `RainErrorCode` case and a
+  new `RainError` subclass: a send through `rain-turnkey-android` or `rain-wallet-android`, EVM or
+  Solana, that the wallet backend may have accepted before its answer was lost (a 5xx answer to the
+  submit, a failed poll read, a transport failure, an answer that did not decode). The SDK has no
+  activity id to resume from, so the error says the send may still land and names the backend's
+  failure; read history or the balance before sending again. In 5.0.0-beta.1 that case was
+  `RAIN_501`, the code a send the backend settled as failed carries too, so a host could not tell a
+  send it may retry from one it must not. Migration: add a branch for `RAIN_305` or
+  `TransactionOutcomeUnknown` wherever your code switches exhaustively on the code or the class,
+  never resend on it, and read `RAIN_501` from a Turnkey or Rain wallet send as settled or refused,
+  with nothing moved. See [TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md#after-a-send-is-accepted).
+- Rain USD (`0x6122C5964D39416C3F34475d00Ceb37f50700314`) and rUSD
+  (`0x10b5Be494C2962A7B318aFB63f0Ee30b959D000b`), the two collateral tokens Rain's sandbox mints on
+  Base Sepolia, in the built-in token registry, with 6 decimals each. A `registerTokens` entry for
+  either address is ignored from now on, as for every built-in token.
+
 ### Fixed
 
 - Sends and collateral withdrawals refuse an EVM address written in mixed case whose EIP-55
@@ -26,8 +44,43 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   the registry's own spelling of those two tokens, and the check above would have refused them on
   `sendToken` as well.
 - Solana sends and collateral withdrawals through `rain-turnkey-android` and `rain-wallet-android`
-  reach the chain: the wallet backend's client is `com.turnkey:sdk-kotlin` 2.0.2 with
-  `com.turnkey:http` 2.1.1, which post the activity type the request body requires.
+  reach the chain: the wallet backend's client is `com.turnkey:sdk-kotlin` 2.1.0 with
+  `com.turnkey:http` 2.2.0, which post the activity type the request body requires.
+- A send through `rain-turnkey-android` or `rain-wallet-android`, EVM or Solana, whose activity the
+  wallet backend had not finished executing when its client stopped waiting (about four seconds),
+  or which the backend failed or rejected, is no longer a bare `RAIN_501` with no activity id. The
+  SDK reads the activity again by id, up to ten reads one polling interval apart, then reports
+  `RAIN_302` `TransactionPending` carrying the activity id while it is still pending, and `RAIN_501`
+  carrying the backend's reason when it failed or was rejected, in which case nothing moved. In
+  5.0.0-beta.1 an EVM send in that state surfaced as `RAIN_501` with no activity id and no reason,
+  which read as a failed send and invited a second one; Solana sends never got that far (the entry
+  above). See [TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md#after-a-send-is-accepted).
+- A wallet backend call that fails with an HTTP status, or with an activity the backend's client
+  could not complete, is logged with the status and target, or with the activity's id, type, status
+  and reason, and the same is what the error's cause carries. 5.0.0-beta.1 logged the backend's
+  exception itself, whose message carries the HTTP response body.
+- `getBalance(chainId, Token.Native)`, `getTokenBalances` and `getAllBalances` through
+  `rain-turnkey-android` read the chain when the wallet backend refuses its balance service with
+  HTTP 403, an organization without the balance feature, the way `getTransactions` already falls
+  back to the activity log: the gate is logged once per provider, after which the provider reads the
+  chain without asking the backend again. The native balance also falls back on any other refused
+  status, retried first when transient and logged as a warning each time, because the chain gives
+  the same number; the token list does not, because the backend and the registry each list tokens
+  the other lacks, so such a status surfaces as before for the host to retry. Before, on a Turnkey
+  organization without the feature, every such read on Ethereum, Base, Polygon and their test
+  networks failed with `RAIN_202`, and `getAllBalances` listed nothing for those chains. The chain
+  read lists the SDK's built-in tokens and those passed to `registerTokens`. `rain-wallet-android`
+  shares the code path; Rain's organization has the feature.
+- With Privy, two refusals for a shortfall of the native currency that arrived with the wrong code
+  are `RAIN_402` `InsufficientFunds`: an EVM send over the balance, which the `eth_call` preflight
+  now reads through the shared classifier (it knows "EVM error: OutOfFunds", Base Sepolia's node's
+  wording), and a Solana `sendNative` from a wallet holding no SOL, which Privy's wallet API
+  refuses with the node's "found no record of a prior credit". Every 4xx from that API other than
+  a 401 or 403, on any wallet-API call, is now read as the preflight reads a node answer before it
+  floors at `RAIN_501`: a revert is `RAIN_403`, then a funds shortfall is `RAIN_402`. A Solana
+  `sendNative` from a wallet that holds some SOL but not the amount plus the fee is refused with a
+  bare program error the SDK cannot read, so it still arrives as `RAIN_501`; core runs no native
+  SOL preflight of its own.
 - `PrivyProvider.refreshSession()` no longer reports a live session as dead because the device was
   offline. Only a refresh Privy refuses, or one it drops the session on, throws `RAIN_201` and
   fires `onSessionExpired`. A refresh that got no answer from the network throws `RAIN_301`
@@ -62,6 +115,19 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   `5.0.0-beta.1` the attach succeeded and replaced the signed-in account's contact with one that
   kept opening the other account. The attach still replaces an existing contact of the same kind
   instead of adding a second one; see Known issues under `5.0.0-beta.1`.
+- `getTokenBalances` and `getAllBalances` through `rain-turnkey-android` and `rain-wallet-android`
+  list every token in the SDK's built-in registry or passed to `registerTokens` that the wallet holds
+  on Ethereum, Base, Polygon and their test networks: one chain read per call runs alongside the
+  wallet backend's balance service call, or alone on an organization whose backend refuses that
+  service (the entry above), and fills in the tokens the service left out. That service reports
+  only the assets it catalogues, so a sandbox collateral token such as Rain USD on Base Sepolia
+  never appeared. The chain read needs an RPC endpoint for the chain; without one, or when it
+  fails or takes longer than five seconds, the list holds the service's rows, said once per chain in
+  the log. The `getTokenBalances` section of [METHODS.md](docs/METHODS.md) has the details.
+- Cancelling a coroutine that waits on an RPC read (balances, token metadata, allowances, receipts)
+  cancels the HTTP call; before, the call ran to its answer or its 10-second timeout first. An RPC
+  that answers with an `error` that is not an object fails as `RainError.InternalError` instead of
+  a JSON exception.
 
 ### Changed
 
@@ -73,10 +139,15 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   spelling, because the user is the sub-organization's only root. Before upgrading, have such users
   sign in on the current build and export the recovery phrase or move their funds out. Sandbox test
   accounts can simply be recreated.
-- On a Solana send through `rain-turnkey-android` or `rain-wallet-android`, `RAIN_302`
+- On a send through `rain-turnkey-android` or `rain-wallet-android`, EVM or Solana, `RAIN_302`
   `TransactionPending` may carry the wallet backend's activity id when the backend accepted the send
   without a readable status id, and the activity-log history lists Solana sends under both of the
-  backend's send activity types. See [TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md#solana-notes).
+  backend's send activity types. See
+  [TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md#after-a-send-is-accepted).
+- On a Turnkey or Rain wallet organization without indexed history, the activity-log history that
+  `getTransactions` falls back to leaves out sends the backend failed or rejected, on EVM and
+  Solana, since nothing was broadcast. 5.0.0-beta.1 listed them as rows with the activity id as the
+  hash.
 
 ## [5.0.0-beta.1] - 2026-09-30
 
@@ -115,6 +186,13 @@ Rain plans to fix each of these in a later beta.
   the user out on the hook logs them out after a moment offline. Until the fix, check connectivity
   before acting on the hook, or confirm the death with a second `refreshSession()` once the device
   is online. The fix is listed under Unreleased above.
+- With Privy, a send the chain refuses for a shortfall of the native currency can arrive with the
+  wrong code: an EVM send over the balance as `RAIN_502` (`InternalError`, "EVM error:
+  OutOfFunds") and a Solana `sendNative` from a wallet holding no SOL as `RAIN_501`
+  (`ProviderError`). Both mean `RAIN_402` (`InsufficientFunds`). A Solana `sendNative` from a
+  wallet holding some SOL but less than the amount plus the fee also arrives as `RAIN_501`, and
+  stays so after the fix. An app that retries on `RAIN_501` or `RAIN_502` resends a transfer that
+  cannot succeed. The fix is listed under Unreleased above.
 - The Rain wallet's contact attach, `sendContactVerificationCode` followed by
   `confirmContactVerification`, replaces the account's email address or phone number instead of
   adding a second one. The old contact then no longer logs in to the account. The attach also
@@ -137,7 +215,17 @@ Rain plans to fix each of these in a later beta.
   lists every token the wallet holds. On Base Sepolia, for example, the Rain wallet leaves out
   Rain USD.
   `getBalance(chainId, Token.Contract(address))` reads a single token from the chain and works
-  for any token.
+  for any token. The Unreleased entry above adds the registry and registered tokens on Ethereum,
+  Base, Polygon and their test networks for the Turnkey provider and the Rain wallet; any other
+  token is listed only if the wallet backend reports it, as the `getTokenBalances` section of
+  [METHODS.md](docs/METHODS.md) describes.
+- On a Turnkey organization without the wallet backend's balance feature, `getBalance(chainId,
+  Token.Native)` and `getTokenBalances` through `rain-turnkey-android` fail with `RAIN_202`
+  (`Unauthorized`, "HTTP 403") on Ethereum, Base, Polygon and their test networks, and
+  `getAllBalances` lists nothing for those chains; nothing falls back to the chain.
+  `getBalance(chainId, Token.Contract(address))` reads the chain and works. Rain's own organization
+  has the feature, so `rain-wallet-android` is not affected. The fix is listed under Unreleased
+  above.
 - At launch with a saved session, `RainProvider.authState` and `sessionState`, and
   `TurnkeyProvider.sessionState`, can emit `Unauthenticated` for a few milliseconds between
   `Loading` and the live session. An app that opens its login screen on that `Unauthenticated`

@@ -35,3 +35,13 @@ internal suspend fun tokensWithMetadata(
 
 private fun CollateralToken.withMetadata(info: TokenInfo?): CollateralToken =
     if (info == null) this else copy(name = info.name, symbol = info.symbol, decimals = info.decimals)
+
+/**
+ * [tokens] as [TokenInfo] entries for `RainSdk.registerTokens`, so the wallet's balance list names
+ * and includes the collateral contract's tokens. Only a token whose decimals resolved qualifies: the
+ * SDK has no registration without decimals, and a guessed scale would misstate every balance.
+ */
+internal fun registrableTokenInfos(chainId: Int, tokens: List<CollateralToken>): List<TokenInfo> =
+    tokens.mapNotNull { token ->
+        token.decimals?.let { decimals -> TokenInfo(chainId, token.address, token.symbol, decimals, token.name) }
+    }

@@ -196,6 +196,16 @@ enum class WalletChain(
         "$explorerAddressPrefix$address$explorerSuffix"
 
     companion object {
+        /**
+         * A transaction hash on an EVM chain, `0x` and 64 hex digits. A wallet backend's status or
+         * activity id is not one, and an explorer link to it is dead.
+         */
+        fun isEvmTransactionHash(value: String): Boolean =
+            value.length == EVM_TX_HASH_LENGTH && value.startsWith("0x") &&
+                value.substring(2).all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+
+        private const val EVM_TX_HASH_LENGTH = 66
+
         private const val BASE58_ALPHABET =
             "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 

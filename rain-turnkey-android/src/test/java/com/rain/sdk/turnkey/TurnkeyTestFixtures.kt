@@ -10,6 +10,7 @@ import com.rain.sdk.internal.tokenstore.TokenMetadataStore
 import com.turnkey.core.models.errors.TurnkeyKotlinError
 import okhttp3.OkHttpClient
 import org.junit.Assume.assumeTrue
+import timber.log.Timber
 
 /**
  * Test doubles and fixtures for the Turnkey adapter's own suites.
@@ -37,10 +38,27 @@ internal fun assumeJdk24() {
     )
 }
 
+/** Runs [block] with a Timber tree planted and returns every (priority, message) it logged, in order. */
+internal fun capturingLogs(block: () -> Unit): List<Pair<Int, String>> {
+    val entries = mutableListOf<Pair<Int, String>>()
+    val tree = object : Timber.Tree() {
+        override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+            entries += priority to message
+        }
+    }
+    Timber.plant(tree)
+    try {
+        block()
+    } finally {
+        Timber.uproot(tree)
+    }
+    return entries
+}
+
 /**
  * The vendor's failure for a refresh Turnkey refused. `TurnkeyContext.refreshSession` (sdk-kotlin
- * 2.0.2) wraps the stamp-login failure in `FailedToRefreshSession`, and the typed client's message
- * (http 2.1.1 `TurnkeyClient`) carries the status in the shape `TurnkeyErrorMapping.turnkeyHttpStatus`
+ * 2.1.0) wraps the stamp-login failure in `FailedToRefreshSession`, and the typed client's message
+ * (http 2.2.0 `TurnkeyClient`) carries the status in the shape `TurnkeyErrorMapping.turnkeyHttpStatus`
  * reads. `PUBLIC_KEY_NOT_FOUND` is the answer a session revoked by a login on another device gets.
  */
 internal fun revokedSessionRefreshFailure(): Exception = TurnkeyKotlinError.FailedToRefreshSession(
@@ -79,7 +97,8 @@ internal fun turnkeyWalletProvider(
     solanaChainReader: ChainReader? = null,
     tokenStore: TokenMetadataStore? = null,
     sessionCoordinator: TurnkeySessionCoordinator? = null,
-    sponsorGas: Boolean = false
+    sponsorGas: Boolean = false,
+    registryReadTimeoutMs: Long = TurnkeyWalletProvider.REGISTRY_READ_TIMEOUT_MS
 ): TurnkeyWalletProvider {
     val jsonRpcClient = JsonRpcClient(httpClient)
     val solanaRpcClient = SolanaRpcClient(jsonRpcClient)
@@ -102,5 +121,6 @@ internal fun turnkeyWalletProvider(
             ?: SolanaChainReader(rpcEndpoints = rpcEndpoints, solanaRpcClient = solanaRpcClient),
         solanaTransferComposer = SolanaTransferComposer(solanaRpcClient, rpcEndpoints::get),
         tokenStore = tokenStore ?: TokenMetadataStore(evmReader),
+        registryReadTimeoutMs = registryReadTimeoutMs,
     )
 }

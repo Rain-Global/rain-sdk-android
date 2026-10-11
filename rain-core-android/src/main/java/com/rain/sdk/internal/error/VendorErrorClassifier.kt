@@ -26,6 +26,9 @@ object VendorErrorClassifier {
         "insufficient funds",
         "insufficient balance",
         "insufficient lamports",
+        // Base Sepolia's public node, on a native send over the balance: "RPC error [-32003]:
+        // EVM error: OutOfFunds". [normalize] splits the camel case.
+        "out of funds",
         // Solana: "Attempt to debit an account but found no record of a prior credit".
         "found no record of a prior credit"
     )
@@ -47,9 +50,18 @@ object VendorErrorClassifier {
         return when {
             USER_REJECTED_CODE_REGEX.containsMatchIn(text) -> RainError.UserRejected()
             USER_REJECTED_PHRASES.any { text.contains(it) } -> RainError.UserRejected()
-            INSUFFICIENT_FUNDS_PHRASES.any { text.contains(it) } -> RainError.InsufficientFunds()
-            else -> null
+            else -> insufficientFundsOrNull(message)
         }
+    }
+
+    /**
+     * The funds-shortfall verdict alone: [RainError.InsufficientFunds] when [message] names one by
+     * the phrases above, null otherwise. For prose a node or a server wallet relays, where no user
+     * ever saw a prompt and a rejection marker in the text can only be noise.
+     */
+    fun insufficientFundsOrNull(message: String?): RainError.InsufficientFunds? {
+        val text = normalize(message ?: return null)
+        return if (INSUFFICIENT_FUNDS_PHRASES.any { text.contains(it) }) RainError.InsufficientFunds() else null
     }
 
     /**

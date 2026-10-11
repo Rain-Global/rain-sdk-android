@@ -22,7 +22,6 @@ import okhttp3.OkHttpClient
 import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
-import timber.log.Timber
 import java.io.IOException
 import java.math.BigDecimal
 
@@ -580,7 +579,7 @@ class TurnkeyWalletProviderHistoryTest {
                 )
             )
         )
-        client.listEthHistoryError = MockTurnkey.historyHttpError(MockTurnkey.ETH_HISTORY_PATH, 403)
+        client.listEthHistoryError = MockTurnkey.httpError(MockTurnkey.ETH_HISTORY_PATH, 403)
         val provider = makeProvider(MockTurnkey(turnkeyClient = client))
 
         val txs = provider.getTransactions(1, null, null, null)
@@ -589,6 +588,37 @@ class TurnkeyWalletProviderHistoryTest {
         assertThat(client.getActivitiesCalls).hasSize(1)
         assertThat(txs.single().uniqueId).isEqualTo("activity-1")
         assertThat(txs.single().value).isEqualTo(BigDecimal("1"))
+    }
+
+    /** An activity Turnkey failed or rejected broadcast nothing, so the activity-log history leaves it out; a pending one stays. */
+    @Test
+    fun `the activity log leaves out a send the backend failed or rejected`() = runBlocking {
+        fun activity(id: String, status: com.turnkey.types.V1ActivityStatus, statusId: String?) = MockTurnkey.makeActivity(
+            id = id,
+            from = MockTurnkey.DEFAULT_WALLET_ADDRESS,
+            to = recipient,
+            caip2 = "eip155:1",
+            value = "1000000000000000000",
+            data = "0x",
+            sendTransactionStatusId = statusId,
+            status = status,
+            failureMessage = "policy engine denied the request".takeIf { status != com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_COMPLETED }
+        )
+        val client = MockTurnkeyClient(
+            mockActivities = listOf(
+                activity("activity-sent", com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_COMPLETED, "status-1"),
+                activity("activity-rejected", com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_REJECTED, null),
+                activity("activity-failed", com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_FAILED, null),
+                activity("activity-pending", com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_PENDING, null)
+            )
+        )
+        client.listEthHistoryError = MockTurnkey.httpError(MockTurnkey.ETH_HISTORY_PATH, 403)
+        val provider = makeProvider(MockTurnkey(turnkeyClient = client))
+
+        val txs = provider.getTransactions(1, null, null, null)
+
+        assertThat(txs.map { it.uniqueId }).containsExactly("activity-sent", "activity-pending")
+        assertThat(txs.single { it.uniqueId == "activity-pending" }.hash).isEqualTo("activity-pending")
     }
 
     @Test
@@ -606,7 +636,7 @@ class TurnkeyWalletProviderHistoryTest {
                 )
             )
         )
-        client.listEthHistoryError = MockTurnkey.historyHttpError(MockTurnkey.ETH_HISTORY_PATH, 503)
+        client.listEthHistoryError = MockTurnkey.httpError(MockTurnkey.ETH_HISTORY_PATH, 503)
         val provider = makeProvider(MockTurnkey(turnkeyClient = client))
 
         val txs = provider.getTransactions(1, null, null, null)
@@ -651,18 +681,11 @@ class TurnkeyWalletProviderHistoryTest {
     fun `the history feature gate is logged once at info level, not once per page`() = runBlocking {
         // The default mock client answers the way an organization without the feature does: HTTP 403.
         val provider = makeProvider(MockTurnkey())
-        val entries = mutableListOf<Pair<Int, String>>()
-        val tree = object : Timber.Tree() {
-            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
-                entries += priority to message
+        val entries = capturingLogs {
+            runBlocking {
+                provider.getTransactions(1, null, null, null)
+                provider.getTransactions(1, null, null, null)
             }
-        }
-        Timber.plant(tree)
-        try {
-            provider.getTransactions(1, null, null, null)
-            provider.getTransactions(1, null, null, null)
-        } finally {
-            Timber.uproot(tree)
         }
 
         val gate = entries.filter { it.second.contains("indexed transaction history is not enabled") }

@@ -294,7 +294,7 @@ println("${native.formatted} ${native.symbol}") // e.g. "1.5 AVAX"
 // itself, so you only pass the contract address (case-insensitive).
 val usdc = client.getBalance(chainId = 43114, token = Token.Contract("0x..."))
 
-// All non-zero balances on a chain (native always included)
+// The native balance plus the contract tokens the provider lists (see METHODS.md, getTokenBalances)
 val balances: List<Balance> = client.getTokenBalances(chainId = 43114)
 
 // Every configured chain, flattened into one list — each Balance carries its own chainId

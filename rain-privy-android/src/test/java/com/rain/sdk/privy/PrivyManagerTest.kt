@@ -294,6 +294,34 @@ class PrivyManagerTest {
     }
 
     @Test
+    fun `a Solana send the wallet RPC refused for a funds shortfall leaves as InsufficientFunds`() = runBlocking {
+        val privy = privyWith(emptyList())
+        val user = privy.getUser()!!
+        // Privy's answer to a SOL send from an empty wallet, 2026-10-02 (beta QA PV-SEND-01).
+        val refusal = PrivyApiException(
+            400,
+            null,
+            "Error broadcasting transaction with message: Error: Transaction simulation failed: " +
+                "Attempt to debit an account but found no record of a prior credit.",
+            RuntimeException("HTTP 400"),
+        )
+        val solanaProvider = mockk<EmbeddedSolanaWalletProvider>()
+        coEvery { solanaProvider.signAndSendTransaction(any(), any(), any()) } returns Result.failure(refusal)
+        val solanaWallet = mockk<EmbeddedSolanaWallet>().also {
+            every { it.address } returns SOLANA_WALLET
+            every { it.provider } returns solanaProvider
+        }
+        every { user.embeddedSolanaWallets } returns listOf(solanaWallet)
+        val manager = PrivyManager(privy)
+
+        val error = runCatching {
+            manager.signAndSendSolanaTransaction(ByteArray(8), SolanaCluster.DevNet, RPC)
+        }.exceptionOrNull()
+
+        assertThat(error).isInstanceOf(RainError.InsufficientFunds::class.java)
+    }
+
+    @Test
     fun `getTransactions unwraps the page from the resolved wallet`() = runBlocking {
         val provider = mockk<EmbeddedEthereumWalletProvider>()
         val w = wallet(WALLET, provider)

@@ -16,7 +16,9 @@ import java.net.UnknownHostException
  * Classifies Privy vendor exceptions into specific [RainError] cases at the adapter boundary:
  * - authentication failures (not logged in / invalid or expired JWT) map to [RainError.TokenExpired]
  * - user cancellation / rejection maps to [RainError.UserRejected]
- * - "insufficient funds / balance / lamports" node messages map to [RainError.InsufficientFunds]
+ * - a funds shortfall in a node or wallet-RPC message ("insufficient funds", "found no record of
+ *   a prior credit") maps to [RainError.InsufficientFunds], and a revert a wallet-API answer
+ *   relays maps to [RainError.TransactionSimulationFailed]
  * - missing wallet / failed wallet creation maps to [RainError.WalletUnavailable]
  * - a request that got no answer from the network maps to [RainError.NetworkError] when the host
  *   may safely retry it, see [map]
@@ -156,13 +158,27 @@ internal object PrivyErrorMapping {
 
     /**
      * An HTTP answer from Privy's API, or a request that got none, which the vendor reports through
-     * the same type with no status. 401 and 403 are the session; another status is a provider
-     * failure; no status is left to [map], which knows whether the request may have left.
+     * the same type with no status, on any wallet-API call (a send, a signature, history). No status
+     * is left to [map], which knows whether the request may have left. 401 and 403 are the session,
+     * whatever the body says. Any other 4xx, the one shape the vendor keeps a status and the
+     * response body's `error` text for, is read the way the preflight reads a node answer before it
+     * floors at [RainError.ProviderError]: a revert first, as [RainError.TransactionSimulationFailed],
+     * then a funds shortfall. For a send Privy's server wallet refused the text is the node's own
+     * sentence ("Error broadcasting transaction with message: Error: Transaction simulation failed:
+     * Attempt to debit an account but found no record of a prior credit."). Only those two verdicts
+     * are asked for, because a server wallet never prompts the user, so a rejection marker in
+     * relayed text is noise.
      */
     private fun mapApiException(e: PrivyApiException): RainError? = when (e.statusCode) {
         null -> null
         401, 403 -> RainError.TokenExpired()
-        else -> RainError.ProviderError(e)
+        else -> relayedNodeVerdict(e) ?: RainError.ProviderError(e)
+    }
+
+    /** The preflight's reading of a node answer, for text a 4xx relays: a revert, then a funds shortfall. */
+    private fun relayedNodeVerdict(e: PrivyApiException): RainError? = when {
+        e.message?.contains("revert", ignoreCase = true) == true -> RainError.TransactionSimulationFailed(e)
+        else -> VendorErrorClassifier.insufficientFundsOrNull(e.message)
     }
 }
 

@@ -320,10 +320,12 @@ accounts are supported; the wallet must be the account's owner.
   `WithdrawalRevertedByNetwork` (the transaction hash rides on `transactionId`, and in the cause's message, once included), and a
   failed status without them is `ProviderError`. On Solana, a recipient
   without a token account costs the owner rent, checked up front (`InsufficientFunds`). A raw
-  provider failure during the Solana wallet-address read or send passes through the adapter's
-  session coordinator on Turnkey and Privy and arrives as its mapping: `ProviderError` (`RAIN_501`), `Unauthorized`
-  (`RAIN_202`) for a Turnkey 403, or a code the shared prose rules assign. One that nothing mapped
-  floors at `InternalError` (`RAIN_502`).
+  provider failure during the Solana wallet-address read, or a refusal of the send itself, passes
+  through the adapter's session coordinator on Turnkey and Privy and arrives as its mapping:
+  `ProviderError` (`RAIN_501`), `Unauthorized` (`RAIN_202`) for a Turnkey 403, or a code the shared
+  prose rules assign. One that nothing mapped floors at `InternalError` (`RAIN_502`). On Turnkey and
+  the Rain wallet, a failure after the send was submitted is `TransactionOutcomeUnknown` (`RAIN_305`),
+  never a re-submit; see the Errors table.
 - **Suspend:** Yes
 
 | Parameter | Type | Description |
@@ -706,12 +708,22 @@ Fetches a single balance (native or a contract token) for the current wallet.
 
 ### getTokenBalances(chainId)
 
-Fetches all non-zero balances for the current wallet on the given network. The native
-balance is always included; zero-balance contract tokens are omitted. In `5.0.0-beta.1` the list
-can leave out a token the wallet holds. The [CHANGELOG](../CHANGELOG.md) says which tokens each
-provider lists, and [getBalance](#getbalancechainid-token) reads any single token.
+Fetches the current wallet's balances on the given network: the native balance, always, plus one
+entry per contract token the wallet holds that the provider lists. Zero-balance contract tokens are
+omitted. Which contract tokens a provider lists:
 
-- **Returns:** `List<Balance>` — one per non-zero token plus the native balance.
+| Provider | EVM chains | Solana |
+|----------|------------|--------|
+| Turnkey provider, Rain wallet | On Ethereum, Base, Polygon and their test networks: every token the wallet backend's balance service reports, plus every token in the SDK's built-in registry or passed to `registerTokens` that the service left out. Each call on these chains also sends one Multicall3 `eth_call` batch for the registry and registered tokens to the chain's RPC endpoint, alongside the service call; the service's row wins where both answer, and a chain with no endpoint, or a read that fails or takes longer than five seconds, leaves the service's rows and is logged once per chain. On an organization whose wallet backend has no balance service (HTTP 403, see [TURNKEY_SUPPORT.md](TURNKEY_SUPPORT.md)): the registry and registered tokens, read from the chain, with no service call after the first refusal. On other EVM chains: the registry and registered tokens, read from the chain. | The wallet backend's list where it indexes the cluster; otherwise every token account the node reports. See [Solana notes](TURNKEY_SUPPORT.md#solana-notes). |
+| Privy | The registry and registered tokens, read from the chain. | Every token account the node reports. |
+| Portal | The tokens Portal's own service reports. | No Solana account; a Solana chain id is not supported. |
+
+A token outside the provider's list is not in the result; [getBalance](#getbalancechainid-token)
+reads any single token by address. In `5.0.0-beta.1` the Turnkey provider and the Rain wallet leave
+out the registry and registered tokens the wallet backend's service does not report, on the chains
+that service covers; see the [CHANGELOG](../CHANGELOG.md).
+
+- **Returns:** `List<Balance>` — the native balance plus one per listed contract token with a non-zero balance.
 - **Throws:** `RainError` if the request fails.
 - **Suspend:** Yes
 
@@ -727,7 +739,7 @@ Fetches balances across every chain the SDK was initialized with, in parallel, f
 into a single list. Each `Balance` carries its own `chainId`. Per-chain failures are
 tolerated — a chain that errors out contributes no entries rather than failing the whole
 call. It is built from the same per-chain read as [getTokenBalances](#gettokenbalanceschainid),
-so its `5.0.0-beta.1` note applies here too.
+so that section's table and its `5.0.0-beta.1` note apply here too.
 
 - **Returns:** `List<Balance>` — a flat list spanning all healthy configured chains.
 - **Throws:** `RainError` if the SDK was not initialized.
@@ -739,8 +751,8 @@ so its `5.0.0-beta.1` note applies here too.
 
 Registers additional tokens so their metadata (decimals / symbol) resolves without an
 on-chain enrichment call. Retained across `reset()`, since the store is shared by every client the `RainSdk` resolves. Built-in
-registry tokens are trusted and cannot be overridden: a registration naming one is ignored with a
-warning.
+registry tokens are trusted and cannot be overridden: a registration naming one is ignored, with a
+warning when its metadata differs from the built-in entry.
 
 - **Throws:** `RainError.InvalidConfig` (`RAIN_102`) on a malformed entry, validated exactly as
   `RainSdk.registerTokens` validates; the whole list is checked first, so nothing is registered. The
@@ -972,10 +984,11 @@ Format: `"RainSDK Error [CODE]: message"`
 | `RAIN_202` | `RainError.Unauthorized` | Wallet backends: a request refused with HTTP 403, such as a feature the organization lacks, the registration behind `addPasskey` or the contact update behind `confirmContactVerification` included; a contact another account already signs in with, on `confirmContactVerification`; or an empty Portal session token. |
 | `RAIN_203` | `RainError.InvalidLoginCode` | The one-time login code was refused (mistyped, expired, or already used) — the Rain wallet's and Turnkey's managed login only. Ask the user to re-enter it or request a new one; the existing session, if any, is untouched. A wrong code on `confirmContactVerification` arrives the same way, with the challenge kept. A rejection the auth proxy wraps in an HTTP 500 cannot be classified, because Turnkey's Kotlin SDK drops the response body that carries the real status, so the same wrong code arrives as `RAIN_501`; treat `RAIN_501` from `confirmLoginCode` as retryable. The challenge is kept, so the same remedies apply. An expired code (5 minutes by default) or one locked after 3 wrong attempts arrives the same way; only `sendLoginCode` again gets the user past those. |
 | `RAIN_301` | `RainError.NetworkError` | Network/connectivity failure. |
-| `RAIN_302` | `RainError.TransactionPending` | Submitted, not yet confirmed. `statusId` is what to resume from (status id, UserOperation hash, or transaction hash). On a Turnkey or Rain wallet Solana send whose activity the backend accepted without a readable status id it is the backend's activity id, which no call takes and which matches `uniqueId` on the activity-log history row for the send. Do not resend. |
+| `RAIN_302` | `RainError.TransactionPending` | Submitted, not yet confirmed. `statusId` is what to resume from (status id, UserOperation hash, or transaction hash). On a Turnkey or Rain wallet send, EVM or Solana, whose activity the backend accepted without a readable status id it is the backend's activity id, which no call takes and which matches `uniqueId` on the activity-log history row for the send. Do not resend. |
+| `RAIN_305` | `RainError.TransactionOutcomeUnknown` | The send was handed to the wallet provider and the SDK then lost track of it: a server error, a transport failure or an unreadable answer after the provider may already have accepted it, so there is no identifier to resume from. Not a settled failure: the transaction may still land, and resending risks a duplicate transfer. Read history or the balance before sending again. Raised today by the Turnkey provider and the Rain wallet, EVM and Solana, in the cases under [After a send is accepted](TURNKEY_SUPPORT.md#after-a-send-is-accepted); `RAIN_501` from one of those sends means the send settled as failed or was refused, and nothing moved. |
 | `RAIN_401` | `RainError.UserRejected` | User cancelled the signing request in the wallet, or ended the passkey sheet without a passkey (dismissed it, or the device holds none for the domain). |
-| `RAIN_402` | `RainError.InsufficientFunds` / `RainError.InsufficientTokenBalance` / `RainError.TokenAccountNotFound` | Balance too low for the requested amount or gas; a token balance below the requested amount (`InsufficientTokenBalance`, with `requested` and `available` as `BigDecimal` in the token's units); a Solana sender with no token account for the mint (`TokenAccountNotFound`). `InsufficientFunds` carries `required` and `available` as `BigDecimal?` in the native currency's human units: the Solana preflight fills them (fee plus token-account rent, or rent alone when the fee is sponsored), and every EVM path, which maps vendor prose without amounts, leaves them null. `currency` names the unit when the amounts are known (`SOL`). A Solana send the wallet backend refused for a fee or rent shortfall arrives here too, with `required`, `available` and `currency` null. |
-| `RAIN_403` | `RainError.TransactionSimulationFailed` | Preflight `eth_call` simulation failed (e.g. contract revert, insufficient funds), or the wallet backend's send status carried decoded revert details (an EVM revert chain, whether the transaction failed before inclusion or was included and reverted, or a Solana `InstructionError` or the runtime's `Program <id> failed` log line), with `transactionId` set once the transaction was included; a failed status without them is `ProviderError`, and a Solana fee or rent shortfall is `InsufficientFunds`. |
+| `RAIN_402` | `RainError.InsufficientFunds` / `RainError.InsufficientTokenBalance` / `RainError.TokenAccountNotFound` | Balance too low for the requested amount or gas; a token balance below the requested amount (`InsufficientTokenBalance`, with `requested` and `available` as `BigDecimal` in the token's units); a Solana sender with no token account for the mint (`TokenAccountNotFound`). `InsufficientFunds` carries `required` and `available` as `BigDecimal?` in the native currency's human units: the Solana preflight fills them (fee plus token-account rent, or rent alone when the fee is sponsored), and every EVM path, which maps vendor prose without amounts, leaves them null. `currency` names the unit when the amounts are known (`SOL`). A Solana send the Turnkey or Rain wallet backend refused for a fee or rent shortfall, or a Solana `sendNative` Privy's wallet API refused for a sender holding no SOL, arrives here too, with `required`, `available` and `currency` null. A Privy `sendNative` from a wallet holding some SOL but less than the amount plus the fee is refused with a bare program error the SDK cannot read and arrives as `RAIN_501`, because core runs no native SOL preflight. In `5.0.0-beta.1`, a Privy send the chain refuses for a shortfall of the native currency can arrive as `RAIN_502` (EVM) or `RAIN_501` (Solana) instead; the [CHANGELOG](../CHANGELOG.md) has both. |
+| `RAIN_403` | `RainError.TransactionSimulationFailed` | Preflight `eth_call` simulation failed (a contract revert; on Portal, an insufficient-funds answer too), or Privy's wallet API answered a send with a 4xx naming a revert, or the wallet backend's send status carried decoded revert details (an EVM revert chain, whether the transaction failed before inclusion or was included and reverted, or a Solana `InstructionError` or the runtime's `Program <id> failed` log line), with `transactionId` set once the transaction was included; a failed status without them is `ProviderError`, and a Solana fee or rent shortfall is `InsufficientFunds`. |
 | `RAIN_404` | `RainError.WalletUnavailable` | The backing provider returned no usable wallet address (e.g. Turnkey context has no Ethereum account), or, for a Turnkey or Rain wallet key export, the cases under [Key export errors](TURNKEY_SUPPORT.md#key-export-errors). |
 | `RAIN_405` | `RainError.WithdrawalRevertedByNetwork` | Withdrawal reverted on-chain (e.g. duplicate withdrawal, already-used signature). A fee-sponsored withdrawal skips the dry run; a send status carrying decoded revert details maps here too, with the transaction hash on `transactionId` (and in the cause's message) once the transaction was included, and one without them is `RAIN_501`. |
 | `RAIN_406` | `RainError.InvalidAmount` | The amount is invalid for the token — negative, more decimal places than the token supports, or past `uint256` max. |

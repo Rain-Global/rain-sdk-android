@@ -133,10 +133,13 @@ interface WalletProvider {
     suspend fun getBalance(chainId: Int, token: Token): Balance
 
     /**
-     * Fetches all non-zero balances for the current wallet on the given network.
+     * Fetches the current wallet's balances on the given network: the native balance, always, plus
+     * one entry per contract token the wallet holds that this provider lists; zero-balance contract
+     * tokens are omitted. Which tokens each shipped provider lists is stated under
+     * `getTokenBalances` in `docs/METHODS.md`.
      *
      * @param chainId The target blockchain network identifier.
-     * @return One [Balance] per non-zero token plus the native balance (always included).
+     * @return The native balance plus one [Balance] per listed contract token with a non-zero balance.
      */
     suspend fun getBalances(chainId: Int): List<Balance>
 

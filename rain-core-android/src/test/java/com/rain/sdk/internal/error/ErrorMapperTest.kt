@@ -85,11 +85,22 @@ class ErrorMapperTest {
             "insufficient funds for gas * price + value",
             "Insufficient balance for transfer",
             "Transfer: insufficient lamports 100, need 5000",
-            "Attempt to debit an account but found no record of a prior credit."
+            "Attempt to debit an account but found no record of a prior credit.",
+            // Base Sepolia's node on a native send over the balance; the camel case is split.
+            "RPC error [-32003]: EVM error: OutOfFunds"
         )) {
             val mapped = mapper.mapSigningError(RuntimeException(message))
             assertThat(mapped).isInstanceOf(RainError.InsufficientFunds::class.java)
         }
+    }
+
+    @Test
+    fun `a gas exhaustion is not a funds shortfall, even though the camel case is split the same way`() {
+        val mapped = mapper.mapSigningError(RuntimeException("RPC error [-32003]: EVM error: OutOfGas"))
+        assertThat(mapped).isInstanceOf(RainError.ProviderError::class.java)
+        assertThat(VendorErrorClassifier.insufficientFundsOrNull("EVM error: OutOfGas")).isNull()
+        assertThat(VendorErrorClassifier.insufficientFundsOrNull("EVM error: OutOfFunds"))
+            .isInstanceOf(RainError.InsufficientFunds::class.java)
     }
 
     @Test

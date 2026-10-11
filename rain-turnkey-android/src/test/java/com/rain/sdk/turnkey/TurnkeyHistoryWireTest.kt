@@ -5,10 +5,12 @@ import com.rain.sdk.error.RainError
 import com.turnkey.crypto.generateP256KeyPair
 import com.turnkey.http.TurnkeyClient
 import com.turnkey.http.utils.ActivityPollerConfig
+import com.turnkey.http.utils.TurnkeyHttpError
 import com.turnkey.stamper.Stamper
 import com.turnkey.types.TListEthTransactionHistoryBody
 import com.turnkey.types.TListSolTransactionHistoryBody
 import com.turnkey.types.TSolSendTransactionBody
+import com.turnkey.types.V1ActivityStatus
 import com.turnkey.types.V1Pagination
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.SerializationException
@@ -114,17 +116,16 @@ class TurnkeyHistoryWireTest {
     }
 
     /**
-     * The vendor behaviour the manager's activity lookup exists for: when the activity is not completed
-     * after the vendor's poll, `solSendTransaction` throws a bare `RuntimeException` that names the path
-     * and not the activity. When a vendor release returns or wraps the activity instead, this test
-     * fails, and `TurnkeySendFailures.isMissingResultFailure` with the single-read branch of
-     * `TurnkeyManager.readBackSolanaSendActivity` can go; the read-back itself stays for the other
-     * dropped failures. The request count
-     * pins the vendor's poll loop as well (the submit, one poll, the final read): a count mismatch alone
-     * means the loop changed, not the throw.
+     * The vendor behaviour the manager's send path rests on since `com.turnkey:http` 2.2.0: when the
+     * activity is not completed after the vendor's poll, `solSendTransaction` throws
+     * `TurnkeyHttpError.ActivityNotCompleted` carrying the activity it polled, so the send reads the id
+     * and the status off it instead of looking the activity up. A bump below 2.2.0 throws a bare
+     * `RuntimeException` without the activity and fails here. The request count pins the vendor's poll
+     * loop as well (the submit, one poll, the final read): a count mismatch alone means the loop
+     * changed, not the throw.
      */
     @Test
-    fun `the vendor client still throws a bare exception on a Solana send activity without a result`() {
+    fun `the vendor client throws its typed error carrying the activity on a Solana send without a result`() {
         val vendor = TurnkeyClient(
             apiBaseUrl = server.url("/").toString().trimEnd('/'),
             stamper = stamper,
@@ -134,12 +135,16 @@ class TurnkeyHistoryWireTest {
         // The submit, one delayed poll (numRetries 0 runs the loop once) and the vendor's final read.
         repeat(3) { server.enqueue(MockResponse().setBody(solanaActivityJson("ACTIVITY_STATUS_PENDING", "{}"))) }
 
-        val error = assertThrows(RuntimeException::class.java) { runBlocking { vendor.solSendTransaction(solanaSendBody()) } }
+        val error = assertThrows(TurnkeyHttpError.ActivityNotCompleted::class.java) {
+            runBlocking { vendor.solSendTransaction(solanaSendBody()) }
+        }
 
-        assertThat(TurnkeySendFailures.isMissingResultFailure(error)).isTrue()
+        assertThat(error.activity.id).isEqualTo("activity-1")
+        assertThat(error.activity.status).isEqualTo(V1ActivityStatus.ACTIVITY_STATUS_PENDING)
+        assertThat(error.path).isEqualTo("/public/v1/submit/sol_send_transaction")
         assertThat(TurnkeySendFailures.isSubmitRefusal(error)).isFalse()
-        assertThat(error.message).doesNotContain("activity-1")
-        // The vendor held the activity, it polled it by id, and still threw without it.
+        assertThat(TurnkeySendFailures.leavesTheSendAsItself(error)).isFalse()
+        // The vendor held the activity and polled it by id before it threw it.
         assertThat(server.requestCount).isEqualTo(3)
         assertThat(server.takeRequest().path).isEqualTo("/public/v1/submit/sol_send_transaction")
         repeat(2) {

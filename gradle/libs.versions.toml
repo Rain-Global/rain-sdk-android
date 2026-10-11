@@ -24,12 +24,8 @@ detekt = "2.0.0-alpha.6"
 
 # -- Core SDK Dependencies --
 portal-android = "9.2.0"
-turnkey = "2.0.2"
-# sdk-kotlin 2.0.2 declares http 2.1.1 and types 2.1.0; they no longer share its version number, and
-# the vendor releases them apart from each other (http 2.1.1 shipped without types), so each has its
-# own key. Gradle takes the higher of this line and sdk-kotlin's pin, so an http fix is one line here
-# as long as it is newer than what sdk-kotlin declares.
-turnkey-http = "2.1.1"
+turnkey = "2.1.0"
+turnkey-http = "2.2.0"
 turnkey-types = "2.1.0"
 # com.turnkey:crypto is versioned separately from sdk-kotlin, whose metadata requires this value
 # without pinning it, so a bump here would win: move it together with the sdk-kotlin version.
