@@ -8,6 +8,17 @@ Notable changes to the Rain Android SDK, newest first. The format follows
 
 ### Added
 
+- **Breaking:** `RAIN_305` `RainError.TransactionOutcomeUnknown`, a new `RainErrorCode` case and a
+  new `RainError` subclass: a send through `rain-turnkey-android` or `rain-wallet-android`, EVM or
+  Solana, that the wallet backend may have accepted before its answer was lost (a 5xx answer to the
+  submit, a failed poll read, a transport failure, an answer that did not decode). The SDK has no
+  activity id to resume from, so the error says the send may still land and names the backend's
+  failure; read history or the balance before sending again. In 5.0.0-beta.1 that case was
+  `RAIN_501`, the code a send the backend settled as failed carries too, so a host could not tell a
+  send it may retry from one it must not. Migration: add a branch for `RAIN_305` or
+  `TransactionOutcomeUnknown` wherever your code switches exhaustively on the code or the class,
+  never resend on it, and read `RAIN_501` from a Turnkey or Rain wallet send as settled or refused,
+  with nothing moved. See [TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md#after-a-send-is-accepted).
 - Rain USD (`0x6122C5964D39416C3F34475d00Ceb37f50700314`) and rUSD
   (`0x10b5Be494C2962A7B318aFB63f0Ee30b959D000b`), the two collateral tokens Rain's sandbox mints on
   Base Sepolia, in the built-in token registry, with 6 decimals each. A `registerTokens` entry for
@@ -33,8 +44,21 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   the registry's own spelling of those two tokens, and the check above would have refused them on
   `sendToken` as well.
 - Solana sends and collateral withdrawals through `rain-turnkey-android` and `rain-wallet-android`
-  reach the chain: the wallet backend's client is `com.turnkey:sdk-kotlin` 2.0.2 with
-  `com.turnkey:http` 2.1.1, which post the activity type the request body requires.
+  reach the chain: the wallet backend's client is `com.turnkey:sdk-kotlin` 2.1.0 with
+  `com.turnkey:http` 2.2.0, which post the activity type the request body requires.
+- A send through `rain-turnkey-android` or `rain-wallet-android`, EVM or Solana, whose activity the
+  wallet backend had not finished executing when its client stopped waiting (about four seconds),
+  or which the backend failed or rejected, is no longer a bare `RAIN_501` with no activity id. The
+  SDK reads the activity again by id, up to ten reads one polling interval apart, then reports
+  `RAIN_302` `TransactionPending` carrying the activity id while it is still pending, and `RAIN_501`
+  carrying the backend's reason when it failed or was rejected, in which case nothing moved. In
+  5.0.0-beta.1 an EVM send in that state surfaced as `RAIN_501` with no activity id and no reason,
+  which read as a failed send and invited a second one; Solana sends never got that far (the entry
+  above). See [TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md#after-a-send-is-accepted).
+- A wallet backend call that fails with an HTTP status, or with an activity the backend's client
+  could not complete, is logged with the status and target, or with the activity's id, type, status
+  and reason, and the same is what the error's cause carries. 5.0.0-beta.1 logged the backend's
+  exception itself, whose message carries the HTTP response body.
 - `getBalance(chainId, Token.Native)`, `getTokenBalances` and `getAllBalances` through
   `rain-turnkey-android` read the chain when the wallet backend refuses its balance service with
   HTTP 403, an organization without the balance feature, the way `getTransactions` already falls
@@ -99,10 +123,15 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   spelling, because the user is the sub-organization's only root. Before upgrading, have such users
   sign in on the current build and export the recovery phrase or move their funds out. Sandbox test
   accounts can simply be recreated.
-- On a Solana send through `rain-turnkey-android` or `rain-wallet-android`, `RAIN_302`
+- On a send through `rain-turnkey-android` or `rain-wallet-android`, EVM or Solana, `RAIN_302`
   `TransactionPending` may carry the wallet backend's activity id when the backend accepted the send
   without a readable status id, and the activity-log history lists Solana sends under both of the
-  backend's send activity types. See [TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md#solana-notes).
+  backend's send activity types. See
+  [TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md#after-a-send-is-accepted).
+- On a Turnkey or Rain wallet organization without indexed history, the activity-log history that
+  `getTransactions` falls back to leaves out sends the backend failed or rejected, on EVM and
+  Solana, since nothing was broadcast. 5.0.0-beta.1 listed them as rows with the activity id as the
+  hash.
 
 ## [5.0.0-beta.1] - 2026-09-30
 

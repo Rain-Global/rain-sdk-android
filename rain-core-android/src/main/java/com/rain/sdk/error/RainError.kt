@@ -5,7 +5,7 @@ import java.math.BigDecimal
 /**
  * The `RAIN_*` codes every [RainError] carries. The values are a published contract hosts switch on, and
  * `RainErrorCodeParityTest` pins them: changing one is a breaking change. RAIN_105, RAIN_303 and RAIN_304 are
- * unassigned and stay so: a new 1xx code starts at RAIN_106 and a new 3xx code at RAIN_305.
+ * unassigned and stay so: a new 1xx code starts at RAIN_106 and a new 3xx code at RAIN_306.
  */
 enum class RainErrorCode(val code: String) {
     SDK_NOT_INITIALIZED("RAIN_101"),
@@ -19,6 +19,7 @@ enum class RainErrorCode(val code: String) {
 
     NETWORK_ERROR("RAIN_301"),
     TRANSACTION_PENDING("RAIN_302"),
+    TRANSACTION_OUTCOME_UNKNOWN("RAIN_305"),
 
     USER_REJECTED("RAIN_401"),
     INSUFFICIENT_FUNDS("RAIN_402"),
@@ -99,10 +100,10 @@ sealed class RainError(
      * confirmation window lapsed. NOT a failure: the transaction may still confirm, and resending it
      * risks a duplicate transfer. Resume from [statusId], the identifier the path had (a provider
      * status id, which getTransactions resolves to the hash once available, or the transaction or
-     * user-operation hash itself), rather than sending again. On a Turnkey or Rain wallet Solana
-     * send whose activity the backend accepted without a readable status id, it is the backend's
-     * activity id: no call takes it, and it matches `uniqueId` on the activity-log history row for
-     * the send. Reported as `RAIN_302`.
+     * user-operation hash itself), rather than sending again. On a Turnkey or Rain wallet send, EVM
+     * or Solana, whose activity the backend accepted without a readable status id, it is the
+     * backend's activity id: no call takes it, and it matches `uniqueId` on the activity-log history
+     * row for the send. Reported as `RAIN_302`.
      */
     class TransactionPending(val statusId: String) :
         RainError(
@@ -110,6 +111,21 @@ sealed class RainError(
             "Transaction submitted but not yet confirmed (statusId=$statusId). " +
                 "Not a failure: resume polling with the status id; do not resend."
         )
+
+    /**
+     * The send was handed to the wallet provider and the SDK then lost track of it: the provider's
+     * answer was a server error, a transport failure or a response the SDK could not read, after
+     * the provider may already have accepted the send. The SDK cannot say whether anything was
+     * broadcast and has no identifier to resume from, which is what separates this from
+     * [TransactionPending]. NOT a settled failure: the transaction may still land, and resending it
+     * risks a duplicate transfer. Read the wallet's history or balance before sending again. A
+     * [ProviderError] on the same send paths means the provider settled the send as failed, or
+     * refused it, and nothing moved. Raised today by the Turnkey provider and the Rain wallet, on
+     * EVM and Solana sends alike; `docs/TURNKEY_SUPPORT.md`, "After a send is accepted", lists the
+     * cases. Reported as `RAIN_305`.
+     */
+    class TransactionOutcomeUnknown(details: String, cause: Throwable? = null) :
+        RainError(RainErrorCode.TRANSACTION_OUTCOME_UNKNOWN, details, cause)
 
     // --- 4xx User Action ---
     class UserRejected : RainError(RainErrorCode.USER_REJECTED)

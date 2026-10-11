@@ -57,8 +57,8 @@ internal fun capturingLogs(block: () -> Unit): List<Pair<Int, String>> {
 
 /**
  * The vendor's failure for a refresh Turnkey refused. `TurnkeyContext.refreshSession` (sdk-kotlin
- * 2.0.2) wraps the stamp-login failure in `FailedToRefreshSession`, and the typed client's message
- * (http 2.1.1 `TurnkeyClient`) carries the status in the shape `TurnkeyErrorMapping.turnkeyHttpStatus`
+ * 2.1.0) wraps the stamp-login failure in `FailedToRefreshSession`, and the typed client's message
+ * (http 2.2.0 `TurnkeyClient`) carries the status in the shape `TurnkeyErrorMapping.turnkeyHttpStatus`
  * reads. `PUBLIC_KEY_NOT_FOUND` is the answer a session revoked by a login on another device gets.
  */
 internal fun revokedSessionRefreshFailure(): Exception = TurnkeyKotlinError.FailedToRefreshSession(

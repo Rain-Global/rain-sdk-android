@@ -421,10 +421,10 @@ class TurnkeySessionCoordinatorTest {
         val raw = RuntimeException("HTTP error from /activities: 403")
         client.getActivitiesError = raw
         val coordinator = coordinator(turnkey)
-        val entries = mutableListOf<Pair<Int, Throwable?>>()
+        val entries = mutableListOf<Triple<Int, Throwable?, String>>()
         val tree = object : timber.log.Timber.Tree() {
             override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
-                entries += priority to t
+                entries += Triple(priority, t, message)
             }
         }
         timber.log.Timber.plant(tree)
@@ -439,7 +439,11 @@ class TurnkeySessionCoordinatorTest {
             }
             assertThat(vendorEntries).hasSize(1)
             assertThat(vendorEntries.single().first).isEqualTo(android.util.Log.WARN)
-            assertThat(vendorEntries.single().second).isSameInstanceAs(raw)
+            // An HTTP failure's message can carry the response body, so the line gets the status and
+            // target and the wrapper's class, never the throwable; the raw exception stays out of the log.
+            assertThat(vendorEntries.single().second).isNull()
+            assertThat(vendorEntries.single().third).contains("HTTP error from /activities: 403")
+            assertThat(vendorEntries.single().third).contains(raw.javaClass.simpleName)
             assertThat(entries).isEmpty()
         } finally {
             timber.log.Timber.uproot(tree)

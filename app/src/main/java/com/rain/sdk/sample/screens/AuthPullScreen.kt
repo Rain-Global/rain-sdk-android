@@ -236,7 +236,8 @@ private fun AuthPullContent(
             TransactionResultCard(
                 title = state.approvalStatus ?: "Approval submitted",
                 hash = txHash,
-                explorerUrl = selectedChain.explorerTxUrl(txHash),
+                // A pending approval's statusId can be a Turnkey status or activity id, which no explorer resolves.
+                explorerUrl = txHash.takeIf(WalletChain::isEvmTransactionHash)?.let(selectedChain::explorerTxUrl),
                 explorerName = selectedChain.explorerName,
                 badge = if (state.isApproving) "Pending" else "Submitted",
                 badgeTone = if (state.isApproving) RainBadgeTone.Neutral else RainBadgeTone.Success,

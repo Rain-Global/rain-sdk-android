@@ -3,10 +3,10 @@ package com.rain.sdk.turnkey
 import com.turnkey.core.models.AuthState
 import com.turnkey.core.models.Session
 import com.turnkey.core.models.Wallet
+import com.turnkey.http.utils.TurnkeyHttpError
 import com.turnkey.types.Externaldatav1Timestamp
 import com.turnkey.types.RpcStatus
 import com.turnkey.types.TEthSendTransactionBody
-import com.turnkey.types.TEthSendTransactionResponse
 import com.turnkey.types.TGetActivitiesBody
 import com.turnkey.types.TGetActivitiesResponse
 import com.turnkey.types.TGetActivityBody
@@ -162,15 +162,21 @@ internal class MockTurnkeyClient(
     /** When set, [ethSendTransaction] throws this instead of producing a response. */
     var ethSendTransactionError: Exception? = null
 
+    /**
+     * When set, [ethSendTransaction] answers with this activity instead of a completed one carrying
+     * [mockSendTransactionStatusId], or throws from it; the Solana twin is [solSendActivity].
+     */
+    var ethSendActivity: ((TEthSendTransactionBody) -> V1Activity)? = null
+
     /** When set, [solSendTransaction] throws this instead of producing a response. */
     var solSendTransactionError: Exception? = null
 
     /**
      * When set, [solSendTransaction] answers with this activity instead of a completed V2-shaped one
      * carrying [mockSolSendTransactionStatusId], or throws from it. The vendor's client returns the
-     * activity only once it completed with its V2 result and throws otherwise, so a hook that records
-     * the activity Turnkey holds in [mockActivities] and then throws models the vendor; the provider
-     * test's `dropActivityAfterSubmit` does that.
+     * activity once it completed with its V2 result and throws `TurnkeyHttpError.ActivityNotCompleted`
+     * carrying it otherwise, so a hook that throws that error with the activity Turnkey holds models
+     * the vendor; the provider test's `notCompletedAfterSubmit` does that.
      */
     var solSendActivity: ((TSolSendTransactionBody) -> V1Activity)? = null
 
@@ -179,12 +185,6 @@ internal class MockTurnkeyClient(
 
     /** When set, [getActivities] throws this instead of producing a response. */
     var getActivitiesError: Exception? = null
-
-    /**
-     * When set, [getActivities] answers with it instead of filtering [mockActivities]: a page that
-     * changes between reads, for example. Checked after [getActivitiesError].
-     */
-    var getActivitiesAnswer: ((TGetActivitiesBody) -> List<V1Activity>)? = null
 
     /** When set, [getActivity] throws this instead of producing a response. */
     var getActivityError: Exception? = null
@@ -245,20 +245,18 @@ internal class MockTurnkeyClient(
 
     override suspend fun ethSendTransaction(
         input: TEthSendTransactionBody
-    ): TEthSendTransactionResponse {
+    ): V1Activity {
         ethSendTransactionCalls += input
         ethSendTransactionError?.let { throw it }
-        return TEthSendTransactionResponse(
-            activity = MockTurnkey.makeActivity(
-                id = UUID.randomUUID().toString(),
-                from = input.from,
-                to = input.to,
-                caip2 = input.caip2,
-                value = input.value,
-                data = input.data,
-                sendTransactionStatusId = mockSendTransactionStatusId
-            ),
-            result = V1EthSendTransactionResult(sendTransactionStatusId = mockSendTransactionStatusId)
+        ethSendActivity?.let { return it(input) }
+        return MockTurnkey.makeActivity(
+            id = UUID.randomUUID().toString(),
+            from = input.from,
+            to = input.to,
+            caip2 = input.caip2,
+            value = input.value,
+            data = input.data,
+            sendTransactionStatusId = mockSendTransactionStatusId
         )
     }
 
@@ -299,7 +297,6 @@ internal class MockTurnkeyClient(
         getActivitiesCalls += input
         getActivitiesError?.let { throw it }
         // The type filter is honoured, as Turnkey's is; a request without one lists everything.
-        getActivitiesAnswer?.let { return TGetActivitiesResponse(activities = it(input)) }
         val wanted = input.filterByType.orEmpty()
         return TGetActivitiesResponse(activities = if (wanted.isEmpty()) mockActivities else mockActivities.filter { it.type in wanted })
     }
@@ -865,6 +862,11 @@ internal class MockTurnkey(
             wallet.copy(accounts = wallet.accounts + solanaAccount(VECTOR_SOLANA_ADDRESS))
         }
 
+        /**
+         * An `eth_send_transaction` activity: completed with its status id by default, a history
+         * fixture or a send's answer; [status], a `null` [sendTransactionStatusId] and [failureMessage]
+         * shape the pending, result-less and failed answers the send tests need.
+         */
         fun makeActivity(
             id: String,
             from: String,
@@ -872,11 +874,14 @@ internal class MockTurnkey(
             caip2: String,
             value: String?,
             data: String?,
-            sendTransactionStatusId: String
+            sendTransactionStatusId: String?,
+            status: V1ActivityStatus = V1ActivityStatus.ACTIVITY_STATUS_COMPLETED,
+            failureMessage: String? = null
         ): V1Activity = V1Activity(
             canApprove = false,
             canReject = false,
             createdAt = Externaldatav1Timestamp(nanos = "0", seconds = "1714521600"),
+            failure = failureMessage?.let { RpcStatus(message = it) },
             fingerprint = "fingerprint",
             id = id,
             intent = V1Intent(
@@ -895,15 +900,43 @@ internal class MockTurnkey(
                 )
             ),
             organizationId = DEFAULT_ORG_ID,
-            result = V1Result(
-                ethSendTransactionResult = V1EthSendTransactionResult(
-                    sendTransactionStatusId = sendTransactionStatusId
-                )
-            ),
-            status = V1ActivityStatus.ACTIVITY_STATUS_COMPLETED,
+            result = sendTransactionStatusId?.let {
+                V1Result(ethSendTransactionResult = V1EthSendTransactionResult(sendTransactionStatusId = it))
+            } ?: V1Result(),
+            status = status,
             type = V1ActivityType.ACTIVITY_TYPE_ETH_SEND_TRANSACTION,
             updatedAt = Externaldatav1Timestamp(nanos = "0", seconds = "1714521600"),
             votes = emptyList()
+        )
+
+        /**
+         * The vendor's typed error for a submit whose activity is not completed after its poll (since
+         * `com.turnkey:http` 2.2.0). It carries the activity, here one of [type] in [status] with
+         * [failureMessage] as Turnkey's reason, and names the submit [path].
+         */
+        fun activityNotCompleted(
+            path: String,
+            type: V1ActivityType,
+            status: V1ActivityStatus,
+            failureMessage: String? = null,
+            intent: V1Intent = V1Intent()
+        ): TurnkeyHttpError.ActivityNotCompleted = TurnkeyHttpError.ActivityNotCompleted(
+            V1Activity(
+                canApprove = false,
+                canReject = false,
+                createdAt = Externaldatav1Timestamp(nanos = "0", seconds = "1714521600"),
+                failure = failureMessage?.let { RpcStatus(message = it) },
+                fingerprint = "fingerprint",
+                id = UUID.randomUUID().toString(),
+                intent = intent,
+                organizationId = DEFAULT_ORG_ID,
+                result = V1Result(),
+                status = status,
+                type = type,
+                updatedAt = Externaldatav1Timestamp(nanos = "0", seconds = "1714521600"),
+                votes = emptyList()
+            ),
+            path
         )
 
         /**

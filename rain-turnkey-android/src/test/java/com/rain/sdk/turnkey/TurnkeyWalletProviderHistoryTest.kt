@@ -590,6 +590,37 @@ class TurnkeyWalletProviderHistoryTest {
         assertThat(txs.single().value).isEqualTo(BigDecimal("1"))
     }
 
+    /** An activity Turnkey failed or rejected broadcast nothing, so the activity-log history leaves it out; a pending one stays. */
+    @Test
+    fun `the activity log leaves out a send the backend failed or rejected`() = runBlocking {
+        fun activity(id: String, status: com.turnkey.types.V1ActivityStatus, statusId: String?) = MockTurnkey.makeActivity(
+            id = id,
+            from = MockTurnkey.DEFAULT_WALLET_ADDRESS,
+            to = recipient,
+            caip2 = "eip155:1",
+            value = "1000000000000000000",
+            data = "0x",
+            sendTransactionStatusId = statusId,
+            status = status,
+            failureMessage = "policy engine denied the request".takeIf { status != com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_COMPLETED }
+        )
+        val client = MockTurnkeyClient(
+            mockActivities = listOf(
+                activity("activity-sent", com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_COMPLETED, "status-1"),
+                activity("activity-rejected", com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_REJECTED, null),
+                activity("activity-failed", com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_FAILED, null),
+                activity("activity-pending", com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_PENDING, null)
+            )
+        )
+        client.listEthHistoryError = MockTurnkey.httpError(MockTurnkey.ETH_HISTORY_PATH, 403)
+        val provider = makeProvider(MockTurnkey(turnkeyClient = client))
+
+        val txs = provider.getTransactions(1, null, null, null)
+
+        assertThat(txs.map { it.uniqueId }).containsExactly("activity-sent", "activity-pending")
+        assertThat(txs.single { it.uniqueId == "activity-pending" }.hash).isEqualTo("activity-pending")
+    }
+
     @Test
     fun `a 5xx on the indexed query is retried and then falls back to the activity log`() = runBlocking {
         val client = MockTurnkeyClient(

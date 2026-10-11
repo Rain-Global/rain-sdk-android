@@ -1,6 +1,7 @@
 package com.rain.sdk.turnkey
 
 import com.rain.sdk.error.RainError
+import com.turnkey.http.utils.TurnkeyHttpError
 import com.turnkey.types.TGetSendTransactionStatusResponse
 import com.turnkey.types.V1Activity
 import com.turnkey.types.V1ActivityStatus
@@ -31,14 +32,6 @@ internal object TurnkeySendFailures {
 
     /** Vendor prose reaches hosts' logs through the cause; bound it as the Rain API client bounds error bodies. */
     internal const val MAX_VENDOR_MESSAGE_LENGTH = 300
-
-    /**
-     * The start of the message the vendor's generated submit methods throw, as a bare `RuntimeException`,
-     * when the activity they polled did not complete: `No result found from <path>`. The vendor's HTTP
-     * refusals are bare `RuntimeException`s as well, so the prefix is what identifies this one; the
-     * class check keeps subclasses (a `RainError`, a cancellation) out.
-     */
-    internal const val VENDOR_NO_RESULT_PREFIX = "No result found"
 
     /**
      * The start of the message the vendor's `activity()` helper throws, as a bare `RuntimeException`,
@@ -95,18 +88,6 @@ internal object TurnkeySendFailures {
     }
 
     /**
-     * True for the vendor's own signal that a submitted activity did not complete within its poll (still
-     * pending, or failed or rejected): a `RuntimeException` of exactly that class whose message starts
-     * with [VENDOR_NO_RESULT_PREFIX]. The vendor had the activity in hand when it threw this (settled in
-     * the submit's answer, or polled for about four seconds), so the activity is listed and the manager
-     * reads the activity log once for this failure where every other dropped failure gets a second read
-     * (see `TurnkeyManager.readBackSolanaSendActivity`); the wire test pins the shape. A subclass, a
-     * `RainError` or a cancellation is never it.
-     */
-    fun isMissingResultFailure(e: Throwable): Boolean =
-        e.javaClass == RuntimeException::class.java && e.message?.startsWith(VENDOR_NO_RESULT_PREFIX) == true
-
-    /**
      * True for a refusal of a submit before anything was executed: the vendor's `HTTP error calling ...`
      * shape with a status below 500, see [VENDOR_SUBMIT_REFUSAL_PREFIX]. A 5xx, or a message without a
      * readable status, may have followed acceptance and is not one.
@@ -117,24 +98,29 @@ internal object TurnkeySendFailures {
 
     /**
      * True for a send failure that says nothing was executed and so leaves the write as itself for the
-     * session coordinator to classify: a [RainError] already decided, or a refusal of the submit (a 401
-     * there is the one refresh-and-retry is safe on). Everything else may follow acceptance, a transport
-     * failure included: the vendor's poll raises the same exception types after an accepted submit, so
-     * nothing in such an exception says which phase threw it.
+     * session coordinator to classify: a [RainError] already decided, the typed client's
+     * `StamperNotInitialized`, which its `activity()` throws before it builds the request when the
+     * client it was handed has no session stamper (a logout landing between the coordinator's session
+     * check and its client read), or a refusal of the submit (a 401 there is the one refresh-and-retry
+     * is safe on). Everything else may follow acceptance, a transport failure included: the vendor's
+     * poll raises the same exception types after an accepted submit, so nothing in such an exception
+     * says which phase threw it, and a connection failure is no exception, since OkHttp's retry on
+     * connection failure can already have sent the request on a pooled connection.
      */
-    fun leavesTheSendAsItself(e: Exception): Boolean = e is RainError || isSubmitRefusal(e)
+    fun leavesTheSendAsItself(e: Exception): Boolean =
+        e is RainError || e is TurnkeyHttpError.StamperNotInitialized || isSubmitRefusal(e)
 
     /**
-     * The error for a Solana send whose activity the vendor's client dropped and the activity log did
-     * not give back: the fate is unknown, so it is a [RainError.ProviderError] whose cause carries the
-     * vendor's message as [Throwable.vendorMessage] renders it, and nothing else. The vendor exception
-     * stays out of the cause chain, so no layer reads an HTTP status off it and retries the send.
+     * The error for a send whose activity the vendor's client lost (a 5xx answer to the submit, a poll
+     * read that failed, a lost or undecodable answer; see `TurnkeyManager.sendOutcome`): the fate is
+     * unknown, so it is a [RainError.TransactionOutcomeUnknown] (`RAIN_305`) whose message carries the
+     * vendor's failure as [Throwable.vendorMessage] renders it, and nothing else. The vendor exception
+     * stays out of the cause chain, so no layer reads an HTTP status off it and retries the send. It
+     * has its own code so a host can tell it from a [RainError.ProviderError], which on this module's
+     * send paths means the send settled as failed or was refused and nothing moved.
      */
-    fun droppedActivity(failure: Throwable): RainError = RainError.ProviderError(
-        IllegalStateException(
-            "Wallet backend did not return the Solana send activity and none could be read back; " +
-                "the send may still land: ${failure.vendorMessage()}"
-        )
+    fun unknownFate(failure: Throwable): RainError.TransactionOutcomeUnknown = RainError.TransactionOutcomeUnknown(
+        "Wallet backend did not return the send activity; the send may still land: ${failure.vendorMessage()}"
     )
 
     /** A structured error naming anything: the backend attaches one only when the send failed. */

@@ -66,6 +66,8 @@ interface RainClient {
      * @throws RainError.WithdrawalRevertedByNetwork (`RAIN_405`) when the network rejected the withdrawal,
      *   in the dry run or after broadcast
      * @throws RainError.InsufficientFunds (`RAIN_402`) when the wallet cannot pay the amount, the fee or the rent
+     * @throws RainError.TransactionOutcomeUnknown (`RAIN_305`) when the provider may have accepted the
+     *   withdrawal and its answer was then lost; not a settled failure, read history before sending again
      * @throws RainError.ProviderError (`RAIN_501`) for a provider failure; [RainError.InternalError] (`RAIN_502`)
      *   for one nothing mapped
      */
@@ -201,6 +203,8 @@ interface RainClient {
      * @throws RainError.InvalidRecipient (`RAIN_102`) when [to] is not a valid EVM address or its
      *   mixed-case EIP-55 checksum doesn't match; nothing is sent. The full `RAIN_102` table is
      *   `## Errors` in `docs/METHODS.md`
+     * @throws RainError.TransactionOutcomeUnknown (`RAIN_305`) when the provider may have accepted the
+     *   send and its answer was then lost; not a settled failure, read history before sending again
      */
     @Throws(RainError::class)
     suspend fun sendNative(
@@ -232,6 +236,8 @@ interface RainClient {
      *   mixed-case EIP-55 checksum doesn't match, and [RainError.InvalidConfig] (`RAIN_102`) when the
      *   same is true of [contractAddress]; nothing is sent. The full `RAIN_102` table is `## Errors`
      *   in `docs/METHODS.md`
+     * @throws RainError.TransactionOutcomeUnknown (`RAIN_305`) when the provider may have accepted the
+     *   send and its answer was then lost; not a settled failure, read history before sending again
      */
     @Throws(RainError::class)
     suspend fun sendToken(

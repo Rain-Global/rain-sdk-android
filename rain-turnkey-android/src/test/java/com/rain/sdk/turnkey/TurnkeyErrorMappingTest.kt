@@ -785,4 +785,30 @@ class TurnkeyErrorMappingTest {
         assertThat(seen.toString()).doesNotContain("example.com")
         assertThat(throwables).isEmpty()
     }
+
+    /**
+     * The vendor's typed error for an activity not completed after its poll (`com.turnkey:http` 2.2.0).
+     * Its message names the status, so a REJECTED activity reads "has status ACTIVITY_STATUS_REJECTED",
+     * which must not be mistaken for a user rejecting a signing request: the classifier wants two-word
+     * phrases such as "rejected by user". The send paths take the activity out of this error before
+     * anything is mapped; anywhere else (export, a registration, a contact update) it is the provider's
+     * failure with the status, and no response body, in the message.
+     */
+    @Test
+    fun `map on the vendor's not-completed error for a rejected activity is ProviderError, never UserRejected`() {
+        val error = MockTurnkey.activityNotCompleted(
+            path = "/public/v1/submit/create_authenticators",
+            type = com.turnkey.types.V1ActivityType.ACTIVITY_TYPE_CREATE_AUTHENTICATORS_V2,
+            status = com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_REJECTED,
+            failureMessage = "rejected by policy"
+        )
+        assertThat(error.message).contains("ACTIVITY_STATUS_REJECTED")
+
+        val mapped = mapping.map(error)
+
+        assertThat(mapped).isInstanceOf(RainError.ProviderError::class.java)
+        assertThat(mapped.errorCode).isEqualTo(RainErrorCode.PROVIDER_ERROR)
+        assertThat(mapped.message).contains("ACTIVITY_STATUS_REJECTED")
+        assertThat(mapping.turnkeyHttpStatus(error)).isNull()
+    }
 }

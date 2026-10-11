@@ -394,7 +394,12 @@ class TurnkeyManagedContactAttachTest {
         expectThrows<RainError.Unauthorized> { forbiddenController.confirmContactVerification("123456") }
 
         val failed = MockTurnkey()
-        failed.setUserContactError = RuntimeException("No result found from /public/v1/submit/update_user_email")
+        // The vendor's typed error for an update activity Turnkey failed (http 2.2.0): the provider's failure.
+        failed.setUserContactError = MockTurnkey.activityNotCompleted(
+            path = "/public/v1/submit/update_user_email",
+            type = com.turnkey.types.V1ActivityType.ACTIVITY_TYPE_UPDATE_USER_EMAIL,
+            status = com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_FAILED
+        )
         val failedController = controller(failed)
         failedController.sendContactVerificationCode(LoginContact.Email("user@example.com"))
         expectThrows<RainError.ProviderError> { failedController.confirmContactVerification("123456") }

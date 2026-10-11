@@ -17,6 +17,7 @@ import com.rain.sdk.models.RainTransactionOrder
 import com.rain.sdk.models.Token
 import com.rain.sdk.models.TokenInfo
 import com.rain.sdk.models.UnsignedSolanaTransfer
+import com.turnkey.http.utils.TurnkeyHttpError
 import com.turnkey.types.TSolSendTransactionBody
 import com.turnkey.types.V1Activity
 import com.turnkey.types.V1AssetBalance
@@ -739,14 +740,14 @@ class TurnkeySolanaProviderTest {
 
     /**
      * A raw failure from Turnkey's send is not a [RainError] and not a refusal of the submit, so it may
-     * have followed acceptance: the send reads the activity log, finds nothing, and the host sees a
-     * `ProviderError` with the send's fate unknown, built around the vendor's message but not its
-     * exception, so no layer reads a status off it and retries. Core's withdrawal wrapper sees
-     * `ProviderError`, not the `InternalError` it puts around anything unmapped. Pins the Solana half
-     * of the error boundary that `withdrawCollateral` relies on for its send.
+     * have followed acceptance and lost the activity: the host sees `TransactionOutcomeUnknown`
+     * (`RAIN_305`), built around the vendor's message but not its exception, so no layer reads a status
+     * off it and retries. Core's withdrawal wrapper sees that `RainError`, not the `InternalError` it
+     * puts around anything unmapped. Pins the Solana half of the error boundary that
+     * `withdrawCollateral` relies on for its send.
      */
     @Test
-    fun `sendSolanaTransaction maps a raw send failure to ProviderError before it leaves the adapter`() {
+    fun `sendSolanaTransaction maps a raw send failure to TransactionOutcomeUnknown before it leaves the adapter`() {
         val raw = RuntimeException("node refused the transaction")
         val client = MockTurnkeyClient().apply { solSendTransactionError = raw }
         val provider = makeProvider(client = client)
@@ -755,28 +756,28 @@ class TurnkeySolanaProviderTest {
             recentBlockhash = MockTurnkey.DEFAULT_SOLANA_ADDRESS
         )
 
-        val ex = assertThrows(RainError.ProviderError::class.java) {
+        val ex = assertThrows(RainError.TransactionOutcomeUnknown::class.java) {
             runBlocking { provider.sendSolanaTransaction(devnet, unsigned) }
         }
 
         assertThat(ex.message).contains("node refused the transaction")
-        assertThat(ex.cause).isNotSameInstanceAs(raw)
-        assertThat(ex.cause?.cause).isNull()
+        assertThat(ex.cause).isNull()
         assertThat(client.solSendTransactionCalls).hasSize(1)
-        // Not the vendor's own no-result throw, so the log is read twice before the send gives up on the activity.
-        assertThat(client.getActivitiesCalls).hasSize(TurnkeyManager.SOLANA_SEND_LOOKUP_READS)
+        // Nothing is read back: the vendor's client lost the activity, and the activity log is not consulted.
+        assertThat(client.getActivitiesCalls).isEmpty()
     }
 
     /**
      * Turnkey may record a completed send's result under the V1 name. The vendor's client never returns
-     * that activity (it insists on the V2 result and throws), so it arrives through the lookup; either
-     * result shape carries the status id, and the send goes on to the status poll.
+     * that activity (it insists on the V2 result and throws its typed error carrying the activity), so
+     * it arrives through the error; either result shape carries the status id, and the send goes on to
+     * the status poll.
      */
     @Test
     fun `sendNativeToken on solana reads the status id from a V1-shaped result`(): Unit = runBlocking {
         stubBlockhash()
         val client = includedStatusClient().apply {
-            dropActivityAfterSubmit { input ->
+            notCompletedAfterSubmit { input ->
                 MockTurnkey.makeSolanaActivity(
                     id = "act-v1-result",
                     signWith = input.signWiths.single(),
@@ -797,18 +798,16 @@ class TurnkeySolanaProviderTest {
     }
 
     /**
-     * The vendor's client throws a bare exception and drops the activity when it is not completed after
-     * its poll; the send reads the activity back by its unsigned transaction. The hook records the
-     * activity Turnkey would hold for the posted body, then fails the way the vendor does.
+     * The vendor's client throws `TurnkeyHttpError.ActivityNotCompleted` carrying the activity when it is
+     * not completed after its poll (since `com.turnkey:http` 2.2.0), and the send takes the activity out
+     * of the error. The hook records the activity Turnkey holds, so `getActivity` finds it, then throws
+     * the way the vendor does.
      */
-    @Suppress("TooGenericExceptionThrown") // the vendor's own failure types, bare RuntimeException included
-    private fun MockTurnkeyClient.dropActivityAfterSubmit(
-        failure: Exception = RuntimeException("No result found from /public/v1/submit/sol_send_transaction"),
-        build: (TSolSendTransactionBody) -> V1Activity
-    ) {
+    private fun MockTurnkeyClient.notCompletedAfterSubmit(build: (TSolSendTransactionBody) -> V1Activity) {
         solSendActivity = { input ->
-            mockActivities = mockActivities + build(input)
-            throw failure
+            val activity = build(input)
+            mockActivities = mockActivities + activity
+            throw TurnkeyHttpError.ActivityNotCompleted(activity, "/public/v1/submit/sol_send_transaction")
         }
     }
 
@@ -831,15 +830,15 @@ class TurnkeySolanaProviderTest {
 
     /**
      * Turnkey completed the activity, but its result carries no status id this build can read, so the
-     * vendor's client throws instead of returning it. Read back, the send may well have gone out: this
-     * is not a failure a host may retry but pending on the activity id, and nothing is polled with a
+     * vendor's client throws instead of returning it. Taken from the error, the send may well have gone
+     * out: this is not a failure a host may retry but pending on the activity id, and nothing is polled with a
      * status id that does not exist.
      */
     @Test
     fun `sendNativeToken on solana ends pending when the completed activity carries no status id`() {
         stubBlockhash()
         val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit { input ->
+            notCompletedAfterSubmit { input ->
                 MockTurnkey.makeSolanaActivity(
                     id = "act-without-result",
                     signWith = input.signWiths.single(),
@@ -859,10 +858,8 @@ class TurnkeySolanaProviderTest {
         assertThat(ex.statusId).isEqualTo("act-without-result")
         assertThat(client.solSendTransactionCalls).hasSize(1)
         assertThat(client.sendTransactionStatusCalls).isEmpty()
-        // The lookup: one page of V2 Solana send activities, Turnkey's maximum page; a completed activity is not read again.
-        val lookup = client.getActivitiesCalls.single()
-        assertThat(lookup.filterByType).containsExactly(com.turnkey.types.V1ActivityType.ACTIVITY_TYPE_SOL_SEND_TRANSACTION_V2)
-        assertThat(lookup.paginationOptions?.limit).isEqualTo("100")
+        // The activity came with the vendor's error: nothing is listed, and a completed activity is not read again.
+        assertThat(client.getActivitiesCalls).isEmpty()
         assertThat(client.getActivityCalls).isEmpty()
         // Only the pre-send baseline read the chain; no signature recovery ran for a send with no status id.
         assertThat(rpc.recordedMethods.count { it == "getSignaturesForAddress" }).isEqualTo(1)
@@ -910,12 +907,12 @@ class TurnkeySolanaProviderTest {
         assertThat(rows.map { it.value }).containsExactly(null, null)
     }
 
-    /** Still pending after the vendor's poll: read back, it is pending on the activity id, not a failure. */
+    /** Still pending after the vendor's poll and the SDK's own wait: pending on the activity id, not a failure. */
     @Test
     fun `sendNativeToken on solana ends pending when the activity has not settled within the SDK's own wait`() {
         stubBlockhash()
         val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit { input ->
+            notCompletedAfterSubmit { input ->
                 MockTurnkey.makeSolanaActivity(
                     id = "act-still-pending",
                     signWith = input.signWiths.single(),
@@ -936,21 +933,21 @@ class TurnkeySolanaProviderTest {
         assertThat(ex.statusId).isEqualTo("act-still-pending")
         assertThat(client.sendTransactionStatusCalls).isEmpty()
         // Read again by id at the SDK's own interval until the budget is spent, then pending on the activity id.
-        assertThat(client.getActivityCalls).hasSize(TurnkeyManager.SOLANA_ACTIVITY_POLL_ATTEMPTS)
+        assertThat(client.getActivityCalls).hasSize(TurnkeyManager.SEND_ACTIVITY_POLL_ATTEMPTS)
         assertThat(client.getActivityCalls.map { it.activityId }.distinct()).containsExactly("act-still-pending")
     }
 
     /**
      * An activity Turnkey failed before it broadcast anything (a policy denial, a transaction it
      * could not sign) has no status id and moved no money, so it is the one failure after
-     * acceptance the host may retry. The vendor's client throws the same bare exception for it; read
-     * back, Turnkey's reason travels with the error.
+     * acceptance the host may retry. The vendor's client throws its typed error carrying the activity,
+     * and Turnkey's reason travels with the error.
      */
     @Test
     fun `sendNativeToken on solana reports a failed activity as a provider failure with the reason`() {
         stubBlockhash()
         val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit { input ->
+            notCompletedAfterSubmit { input ->
                 MockTurnkey.makeSolanaActivity(
                     id = "act-failed",
                     signWith = input.signWiths.single(),
@@ -978,7 +975,7 @@ class TurnkeySolanaProviderTest {
     fun `sendNativeToken on solana names a rejected activity that carries no reason`() {
         stubBlockhash()
         val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit { input ->
+            notCompletedAfterSubmit { input ->
                 MockTurnkey.makeSolanaActivity(
                     id = "act-rejected",
                     signWith = input.signWiths.single(),
@@ -999,80 +996,6 @@ class TurnkeySolanaProviderTest {
         assertThat(ex.message).contains("rejected the Solana send")
     }
 
-    /**
-     * The activity completed after the vendor's poll gave up: read back with its status id, the send
-     * goes on to the status poll and the signature exactly as if the vendor had returned it.
-     */
-    @Test
-    fun `sendNativeToken on solana recovers a completed activity's status id after the vendor's throw`(): Unit = runBlocking {
-        stubBlockhash()
-        val client = includedStatusClient().apply {
-            dropActivityAfterSubmit { input ->
-                MockTurnkey.makeSolanaActivity(
-                    id = "act-late",
-                    signWith = input.signWiths.single(),
-                    caip2 = input.caip2,
-                    unsignedTransaction = input.unsignedTransaction,
-                    sendTransactionStatusId = "status-recovered",
-                    shape = MockTurnkey.SolanaSendShape.V2
-                )
-            }
-        }
-        val provider = makeProvider(client = client)
-
-        val result = provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5"))
-
-        assertThat(result).isEqualTo(SIGNATURE)
-        assertThat(client.sendTransactionStatusCalls.single().sendTransactionStatusId).isEqualTo("status-recovered")
-    }
-
-    /** The lookup matches on the unsigned transaction: another send's activity is not this one. */
-    @Test
-    fun `sendNativeToken on solana surfaces the vendor's failure when no activity matches the send`() {
-        stubBlockhash()
-        val client = MockTurnkeyClient().apply {
-            solSendTransactionError = RuntimeException("No result found from /public/v1/submit/sol_send_transaction")
-            mockActivities = listOf(
-                MockTurnkey.makeSolanaActivity(
-                    id = "someone-elses",
-                    signWith = MockTurnkey.DEFAULT_SOLANA_ADDRESS,
-                    caip2 = devnetCaip2,
-                    unsignedTransaction = "00",
-                    sendTransactionStatusId = null,
-                    shape = MockTurnkey.SolanaSendShape.V2,
-                    status = com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_PENDING
-                )
-            )
-        }
-        val provider = makeProvider(client = client)
-
-        val ex = assertThrows(RainError.ProviderError::class.java) {
-            runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
-        }
-
-        assertThat(ex.message).contains("No result found")
-        assertThat(client.getActivitiesCalls).hasSize(1)
-        assertThat(client.sendTransactionStatusCalls).isEmpty()
-    }
-
-    /** A lookup that fails keeps the vendor's own failure as the one the host sees. */
-    @Test
-    fun `sendNativeToken on solana keeps the vendor's failure when the lookup itself fails`() {
-        stubBlockhash()
-        val client = MockTurnkeyClient().apply {
-            solSendTransactionError = RuntimeException("No result found from /public/v1/submit/sol_send_transaction")
-            getActivitiesError = RuntimeException("activities unavailable")
-        }
-        val provider = makeProvider(client = client)
-
-        val ex = assertThrows(RainError.ProviderError::class.java) {
-            runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
-        }
-
-        assertThat(ex.message).contains("No result found")
-        assertThat(ex.message).doesNotContain("activities unavailable")
-    }
-
     /** A refusal of the submit itself happened before anything was executed: no lookup, the failure maps as before. */
     @Test
     fun `sendNativeToken on solana does not look the activity up when the submit itself was refused`() {
@@ -1091,32 +1014,32 @@ class TurnkeySolanaProviderTest {
 
     /**
      * A 5xx answer to the submit says nothing about the send: Turnkey executes activities synchronously
-     * and a gateway can fail after the activity was created. It is not a refusal, so the activity is
-     * read back like any other dropped send.
+     * and a gateway can fail after the activity was created. It is not a refusal, and the vendor's client
+     * has no activity to hand back, so the host is told the fate is unknown rather than that nothing was
+     * sent; nothing is listed and nothing is resent.
      */
     @Test
-    fun `sendNativeToken on solana reads the activity back when the submit answered 5xx`() {
+    fun `sendNativeToken on solana reports a 5xx submit answer as a send of unknown fate`() {
         stubBlockhash()
         val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit(
-                failure = RuntimeException("HTTP error calling ACTIVITY_TYPE_SOL_SEND_TRANSACTION_V2 request\nError: {}\nCode: 504")
-            ) { input -> pendingActivity(input, "act-after-504") }
+            solSendTransactionError = RuntimeException("HTTP error calling ACTIVITY_TYPE_SOL_SEND_TRANSACTION_V2 request\nError: {}\nCode: 504")
         }
         val provider = makeProvider(client = client)
 
-        val ex = assertThrows(RainError.TransactionPending::class.java) {
+        val ex = assertThrows(RainError.TransactionOutcomeUnknown::class.java) {
             runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
         }
 
-        assertThat(ex.statusId).isEqualTo("act-after-504")
+        assertThat(ex.message).contains("the send may still land")
         assertThat(client.solSendTransactionCalls).hasSize(1)
-        assertThat(client.getActivitiesCalls).hasSize(1)
+        assertThat(client.getActivitiesCalls).isEmpty()
+        assertThat(client.sendTransactionStatusCalls).isEmpty()
     }
 
     /**
      * A transport failure during the vendor call says nothing about the send: the vendor's poll after an
      * accepted submit raises the same exception types as a submit that never left the device. With no
-     * activity to read back, the host is told the fate is unknown rather than that nothing was sent.
+     * activity in hand, the host is told the fate is unknown rather than that nothing was sent.
      */
     @Test
     fun `sendNativeToken on solana treats a transport failure during the send as a send of unknown fate`() {
@@ -1126,15 +1049,15 @@ class TurnkeySolanaProviderTest {
         }
         val provider = makeProvider(client = client)
 
-        val ex = assertThrows(RainError.ProviderError::class.java) {
+        val ex = assertThrows(RainError.TransactionOutcomeUnknown::class.java) {
             runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
         }
 
         assertThat(ex.message).contains("may still land")
-        assertThat(client.getActivitiesCalls).hasSize(TurnkeyManager.SOLANA_SEND_LOOKUP_READS)
+        assertThat(client.getActivitiesCalls).isEmpty()
     }
 
-    /** A 5xx answer to the submit carries the response body; with nothing to read back the host sees status and target only. */
+    /** A 5xx answer to the submit carries the response body; the host sees status and target only. */
     @Test
     fun `sendNativeToken on solana keeps a 5xx submit answer's body out of the host's error`() {
         stubBlockhash()
@@ -1145,14 +1068,14 @@ class TurnkeySolanaProviderTest {
         }
         val provider = makeProvider(client = client)
 
-        val ex = assertThrows(RainError.ProviderError::class.java) {
+        val ex = assertThrows(RainError.TransactionOutcomeUnknown::class.java) {
             runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
         }
 
         assertThat(ex.message).contains("504")
         assertThat(ex.message).doesNotContain("gateway-body-7f3a")
         assertThat(TurnkeyErrorMapping.turnkeyHttpStatus(ex)).isNull()
-        assertThat(client.getActivitiesCalls).hasSize(TurnkeyManager.SOLANA_SEND_LOOKUP_READS)
+        assertThat(client.getActivitiesCalls).isEmpty()
     }
 
     /** A failed read during the wait ends the wait, not the send: the last activity read is what gets classified. */
@@ -1160,7 +1083,7 @@ class TurnkeySolanaProviderTest {
     fun `sendNativeToken on solana ends the wait on a failed activity read and reports the send pending`() {
         stubBlockhash()
         val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit { input -> pendingActivity(input, "act-read-failed") }
+            notCompletedAfterSubmit { input -> pendingActivity(input, "act-read-failed") }
             // A 404 is not a transient status, so the coordinator's read does not retry it.
             getActivityError = RuntimeException("HTTP error from /public/v1/query/get_activity: 404")
         }
@@ -1180,7 +1103,7 @@ class TurnkeySolanaProviderTest {
     fun `sendNativeToken on solana propagates a cancellation from the activity wait`() {
         stubBlockhash()
         val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit { input -> pendingActivity(input, "act-cancelled-wait") }
+            notCompletedAfterSubmit { input -> pendingActivity(input, "act-cancelled-wait") }
             getActivityError = kotlinx.coroutines.CancellationException("caller went away")
         }
         val provider = makeProvider(client = client)
@@ -1198,7 +1121,7 @@ class TurnkeySolanaProviderTest {
     fun `sendNativeToken on solana does not wait for an activity that needs consensus`() {
         stubBlockhash()
         val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit { input ->
+            notCompletedAfterSubmit { input ->
                 MockTurnkey.makeSolanaActivity(
                     id = "act-consensus",
                     signWith = input.signWiths.single(),
@@ -1265,17 +1188,17 @@ class TurnkeySolanaProviderTest {
     }
 
     /**
-     * Turnkey was still executing the activity when the vendor's client gave up on it. The send reads it
-     * again by id at the SDK's own interval, and once it completes with a status id the normal status
-     * poll takes over: the host gets the signature, not an activity id.
+     * Turnkey was still executing the activity when the vendor's client gave up on it and threw it. The
+     * send reads it again by id at the SDK's own interval, and once it completes with a status id the
+     * normal status poll takes over: the host gets the signature, not an activity id.
      */
     @Test
-    fun `sendNativeToken on solana waits for a read-back activity still being executed`(): Unit = runBlocking {
+    fun `sendNativeToken on solana waits for the activity the vendor's error carries while Turnkey executes it`(): Unit = runBlocking {
         stubBlockhash()
         var posted: TSolSendTransactionBody? = null
         var reads = 0
         val client = includedStatusClient().apply {
-            dropActivityAfterSubmit { input ->
+            notCompletedAfterSubmit { input ->
                 posted = input
                 pendingActivity(input, "act-settling")
             }
@@ -1306,9 +1229,8 @@ class TurnkeySolanaProviderTest {
     }
 
     /**
-     * kotlinx quotes the input it could not decode, and for a Turnkey answer that is the activity. When
-     * the activity cannot be read back either, the host-visible error carries the vendor's message cut
-     * before that quote.
+     * kotlinx quotes the input it could not decode, and for a Turnkey answer that is the activity. The
+     * host-visible error carries the vendor's message cut before that quote.
      */
     @Test
     fun `sendNativeToken on solana keeps the undecodable answer's body out of the host's error`() {
@@ -1320,194 +1242,44 @@ class TurnkeySolanaProviderTest {
         }
         val provider = makeProvider(client = client)
 
-        val ex = assertThrows(RainError.ProviderError::class.java) {
+        val ex = assertThrows(RainError.TransactionOutcomeUnknown::class.java) {
             runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
         }
 
         assertThat(ex.message).contains("Unexpected JSON token at offset 12")
         assertThat(ex.message).doesNotContain("JSON input")
         assertThat(ex.message).doesNotContain("act-secret")
-        // Not the vendor's own no-result throw, so the activity log is read twice before the send gives up on it.
-        assertThat(client.getActivitiesCalls).hasSize(TurnkeyManager.SOLANA_SEND_LOOKUP_READS)
-    }
-
-    /** A caller cancelled during the read-back leaves as a cancellation, not as a classified send. */
-    @Test
-    fun `sendNativeToken on solana propagates a cancellation from the read-back`() {
-        stubBlockhash()
-        val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit { input -> pendingActivity(input, "act-cancelled-lookup") }
-            getActivitiesError = kotlinx.coroutines.CancellationException("caller went away")
-        }
-        val provider = makeProvider(client = client)
-
-        assertThrows(kotlinx.coroutines.CancellationException::class.java) {
-            runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
-        }
-
-        assertThat(client.solSendTransactionCalls).hasSize(1)
-        assertThat(client.getActivitiesCalls).hasSize(1)
-        assertThat(client.sendTransactionStatusCalls).isEmpty()
-    }
-
-    /**
-     * After a lost answer the activity may not list yet when the first read fires, so the send reads the
-     * log once more one interval later before it gives up on the activity.
-     */
-    @Test
-    fun `sendNativeToken on solana reads the activity log again when a lost answer's activity lists late`(): Unit = runBlocking {
-        stubBlockhash()
-        var lookups = 0
-        val client = includedStatusClient().apply {
-            dropActivityAfterSubmit(failure = java.io.IOException("unexpected end of stream")) { input ->
-                MockTurnkey.makeSolanaActivity(
-                    id = "act-listed-late",
-                    signWith = input.signWiths.single(),
-                    caip2 = input.caip2,
-                    unsignedTransaction = input.unsignedTransaction,
-                    sendTransactionStatusId = "status-listed-late",
-                    shape = MockTurnkey.SolanaSendShape.V2
-                )
-            }
-            getActivitiesAnswer = { if (++lookups == 1) emptyList() else mockActivities }
-        }
-        val provider = makeProvider(client = client)
-
-        val result = provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5"))
-
-        assertThat(result).isEqualTo(SIGNATURE)
-        assertThat(client.getActivitiesCalls).hasSize(2)
-        assertThat(client.sendTransactionStatusCalls.single().sendTransactionStatusId).isEqualTo("status-listed-late")
-    }
-
-    /** Turnkey may echo the unsigned transaction in another hex case; the match ignores case. */
-    @Test
-    fun `sendNativeToken on solana matches the read-back activity whatever the hex case`() {
-        stubBlockhash()
-        val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit { input ->
-                pendingActivity(input, "act-upper", unsignedTransaction = input.unsignedTransaction.uppercase())
-            }
-        }
-        val provider = makeProvider(client = client)
-
-        val ex = assertThrows(RainError.TransactionPending::class.java) {
-            runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
-        }
-
-        assertThat(ex.statusId).isEqualTo("act-upper")
-        // The recorded hex really differs from the posted one, so the match needed to ignore case.
-        val recorded = client.mockActivities.single().intent.solSendTransactionIntentV2!!.unsignedTransaction
-        assertThat(recorded).isNotEqualTo(client.solSendTransactionCalls.single().unsignedTransaction)
+        // Nothing is read back: the vendor's client lost the activity, and the activity log is not consulted.
+        assertThat(client.getActivitiesCalls).isEmpty()
     }
 
     /**
      * The vendor polls `get_activity` after Turnkey accepted the activity; a 401 there is not a refusal
-     * of the send. It must not re-run the submit through the coordinator's refresh-and-retry (a second
-     * activity, a second transfer): the send reads the activity back and reports it pending.
+     * of the send, and the vendor's client loses the activity with it. It must not re-run the submit
+     * through the coordinator's refresh-and-retry (a second activity, a second transfer): the send ends
+     * with the fate unknown, one submit, no refresh, and no HTTP status on the error to retry on.
      */
     @Test
     fun `sendNativeToken on solana does not resubmit when the vendor's poll fails with 401 after acceptance`() {
         stubBlockhash()
         val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit(failure = RuntimeException("HTTP error from /public/v1/query/get_activity: 401")) { input ->
-                pendingActivity(input, "act-poll-401")
-            }
-        }
-        val provider = makeProvider(client = client)
-
-        val ex = assertThrows(RainError.TransactionPending::class.java) {
-            runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
-        }
-
-        assertThat(ex.statusId).isEqualTo("act-poll-401")
-        assertThat(client.solSendTransactionCalls).hasSize(1)
-        assertThat(client.getActivitiesCalls).hasSize(1)
-    }
-
-    /** A connection that dropped after the submit leaves the fate unknown; the activity log settles it. */
-    @Test
-    fun `sendNativeToken on solana reads the activity back when the answer to the submit was lost`() {
-        stubBlockhash()
-        val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit(failure = java.io.IOException("unexpected end of stream")) { input ->
-                pendingActivity(input, "act-lost-answer")
-            }
-        }
-        val provider = makeProvider(client = client)
-
-        val ex = assertThrows(RainError.TransactionPending::class.java) {
-            runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
-        }
-
-        assertThat(ex.statusId).isEqualTo("act-lost-answer")
-        assertThat(client.solSendTransactionCalls).hasSize(1)
-    }
-
-    /** An answer the vendor's model could not decode is read back the same way, and a completed one goes on. */
-    @Test
-    fun `sendNativeToken on solana reads the activity back when the vendor could not decode the answer`(): Unit = runBlocking {
-        stubBlockhash()
-        val client = includedStatusClient().apply {
-            dropActivityAfterSubmit(failure = kotlinx.serialization.SerializationException("Unknown enum value")) { input ->
-                MockTurnkey.makeSolanaActivity(
-                    id = "act-undecodable",
-                    signWith = input.signWiths.single(),
-                    caip2 = input.caip2,
-                    unsignedTransaction = input.unsignedTransaction,
-                    sendTransactionStatusId = "status-after-decode-failure",
-                    shape = MockTurnkey.SolanaSendShape.V2
-                )
-            }
-        }
-        val provider = makeProvider(client = client)
-
-        val result = provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5"))
-
-        assertThat(result).isEqualTo(SIGNATURE)
-        assertThat(client.sendTransactionStatusCalls.single().sendTransactionStatusId).isEqualTo("status-after-decode-failure")
-    }
-
-    /** With no activity to read back, the fate is unknown: a ProviderError that carries no HTTP status to retry on. */
-    @Test
-    fun `sendNativeToken on solana reports a lost answer with no activity as a provider failure without a status`() {
-        stubBlockhash()
-        val client = MockTurnkeyClient().apply {
             solSendTransactionError = RuntimeException("HTTP error from /public/v1/query/get_activity: 401")
         }
-        val provider = makeProvider(client = client)
+        val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), turnkeyClient = client)
+        val provider = makeProvider(client = client, turnkey = turnkey)
 
-        val ex = assertThrows(RainError.ProviderError::class.java) {
+        val ex = assertThrows(RainError.TransactionOutcomeUnknown::class.java) {
             runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
         }
 
         assertThat(ex.message).contains("the send may still land")
         assertThat(TurnkeyErrorMapping.turnkeyHttpStatus(ex)).isNull()
         assertThat(client.solSendTransactionCalls).hasSize(1)
-        // Not the vendor's own no-result throw, so the log is read twice before the send gives up on the activity.
-        assertThat(client.getActivitiesCalls).hasSize(TurnkeyManager.SOLANA_SEND_LOOKUP_READS)
+        assertThat(turnkey.refreshSessionCallCount).isEqualTo(0)
+        assertThat(client.getActivitiesCalls).isEmpty()
     }
 
-    /** Two activities with the same unsigned transaction: the newest is this send. */
-    @Test
-    fun `sendNativeToken on solana reads back the newest matching activity`() {
-        stubBlockhash()
-        val client = MockTurnkeyClient().apply {
-            dropActivityAfterSubmit { input ->
-                mockActivities = listOf(pendingActivity(input, "act-older", createdAtSeconds = "1714521600"))
-                pendingActivity(input, "act-newer", createdAtSeconds = "1714521700")
-            }
-        }
-        val provider = makeProvider(client = client)
-
-        val ex = assertThrows(RainError.TransactionPending::class.java) {
-            runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
-        }
-
-        assertThat(ex.statusId).isEqualTo("act-newer")
-    }
-
-    /** A cancelled caller leaves as a cancellation, before any lookup. */
+    /** A cancelled caller leaves as a cancellation, before anything else. */
     @Test
     fun `sendNativeToken on solana propagates a cancellation from the send without looking anything up`() {
         stubBlockhash()
@@ -1535,6 +1307,57 @@ class TurnkeySolanaProviderTest {
         val posted = client.solSendTransactionCalls.single()
         assertThat(posted.timestampMs).isNotNull()
         assertThat(posted.timestampMs!!.toLong()).isGreaterThan(0L)
+    }
+
+    /**
+     * The vendor's client throws `StamperNotInitialized` before it builds the request when it has no
+     * session stamper (a logout landing between the coordinator's session check and its client read).
+     * Nothing left the device, so the send is a provider failure, not one of unknown fate.
+     */
+    @Test
+    fun `sendNativeToken on solana reports a client without a session stamper as a provider failure`() {
+        stubBlockhash()
+        val client = MockTurnkeyClient().apply {
+            solSendTransactionError = TurnkeyHttpError.StamperNotInitialized()
+        }
+        val provider = makeProvider(client = client)
+
+        val ex = assertThrows(RainError.ProviderError::class.java) {
+            runBlocking { provider.sendNativeToken(devnet, MockTurnkey.DEFAULT_SOLANA_RECIPIENT, BigDecimal("0.5")) }
+        }
+
+        assertThat(ex.message).doesNotContain("may still land")
+        assertThat(client.solSendTransactionCalls).hasSize(1)
+        assertThat(client.getActivitiesCalls).isEmpty()
+    }
+
+    /** An activity Turnkey failed or rejected broadcast nothing, so the activity-log history leaves it out; a pending one stays. */
+    @Test
+    fun `getTransactions on solana leaves out a send the backend failed or rejected`(): Unit = runBlocking {
+        fun activity(id: String, status: com.turnkey.types.V1ActivityStatus, statusId: String?) = MockTurnkey.makeSolanaActivity(
+            id = id,
+            signWith = MockTurnkey.DEFAULT_SOLANA_ADDRESS,
+            caip2 = devnetCaip2,
+            unsignedTransaction = "00",
+            sendTransactionStatusId = statusId,
+            shape = MockTurnkey.SolanaSendShape.V2,
+            status = status,
+            failureMessage = "policy engine denied the request".takeIf { status != com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_COMPLETED }
+        )
+        val client = MockTurnkeyClient(
+            mockActivities = listOf(
+                activity("act-sent", com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_COMPLETED, "status-sent"),
+                activity("act-rejected", com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_REJECTED, null),
+                activity("act-failed", com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_FAILED, null),
+                activity("act-pending", com.turnkey.types.V1ActivityStatus.ACTIVITY_STATUS_PENDING, null)
+            )
+        )
+        val provider = makeProvider(client = client)
+
+        val rows = provider.getTransactions(devnet, limit = 10)
+
+        assertThat(rows.map { it.uniqueId }).containsExactly("act-sent", "act-pending")
+        assertThat(rows.single { it.uniqueId == "act-pending" }.hash).isEqualTo("act-pending")
     }
 
     @Test
