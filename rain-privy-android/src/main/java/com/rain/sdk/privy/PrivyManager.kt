@@ -42,7 +42,7 @@ internal class PrivyManager(
      * otherwise the user's first embedded Ethereum wallet.
      */
     suspend fun resolveWallet(addressOverride: String?): EmbeddedEthereumWallet {
-        val user = privy.getUser() ?: throw RainError.TokenExpired()
+        val user = sessions.requireUser()
         val wallets = user.embeddedEthereumWallets
         if (wallets.isEmpty()) {
             throw RainError.WalletUnavailable(
@@ -67,7 +67,7 @@ internal class PrivyManager(
     suspend fun signTypedData(
         walletAddress: String,
         typedDataJson: String,
-    ): String = sessions.executeWrite {
+    ): String = sessions.executeSign {
         val wallet = resolveWallet(walletAddress)
         val privyTypedData = toPrivyTypedDataJson(typedDataJson)
         request(wallet, EthereumRpcRequest.ethSignTypedDataV4(wallet.address, privyTypedData))
@@ -99,7 +99,7 @@ internal class PrivyManager(
         walletAddress: String,
         rpcUrl: String,
         transactionJson: String,
-    ): String = sessions.executeWrite {
+    ): String = sessions.executeSend {
         val wallet = resolveWallet(walletAddress)
         sendMutex.withLock {
             // Privy's EthereumChain.Custom (privy-core 0.15.0) only carries an RPC URL; no chain
@@ -136,7 +136,7 @@ internal class PrivyManager(
      * address override is an Ethereum address, so it does not participate here.
      */
     suspend fun resolveSolanaWallet(): EmbeddedSolanaWallet {
-        val user = privy.getUser() ?: throw RainError.TokenExpired()
+        val user = sessions.requireUser()
         return user.embeddedSolanaWallets.firstOrNull()
             ?: throw RainError.WalletUnavailable(
                 "Privy user has no embedded Solana wallet; call createSolanaWallet() first"
@@ -157,7 +157,7 @@ internal class PrivyManager(
         transaction: ByteArray,
         cluster: SolanaCluster,
         rpcUrl: String,
-    ): String = sessions.executeWrite {
+    ): String = sessions.executeSend {
         val wallet = resolveSolanaWallet()
         val result = try {
             wallet.provider.signAndSendTransaction(transaction, cluster, rpcUrl)

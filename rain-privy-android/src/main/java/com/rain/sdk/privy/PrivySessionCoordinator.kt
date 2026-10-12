@@ -2,7 +2,7 @@ package com.rain.sdk.privy
 
 import com.rain.sdk.error.RainError
 import io.privy.auth.AuthState
-import io.privy.network.NoNetworkException
+import io.privy.auth.PrivyUser
 import io.privy.network.PrivyApiException
 import io.privy.sdk.Privy
 import kotlinx.coroutines.CancellationException
@@ -15,7 +15,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
-import java.io.IOException
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -27,7 +26,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  * its own session refresh internally before every wallet/indexer call, so an auth failure that
  * reaches Rain means Privy already tried and the session is truly dead. Terminal auth failures
  * surface as [RainError.TokenExpired] and fire the hook once per session death; the hook
- * re-arms when a live session is seen again.
+ * re-arms when a live session is seen again. Only a session Privy refuses or has dropped is a
+ * death: a read, a signature or a [refreshNow] that got no answer from the network leaves as
+ * [RainError.NetworkError], and a send whose answer was lost after a request for it left the
+ * device as [RainError.TransactionOutcomeUnknown], with the session untouched either way; the
+ * hook fires only when the session is gone.
  */
 internal class PrivySessionCoordinator(
     private val privy: Privy,
@@ -99,28 +102,115 @@ internal class PrivySessionCoordinator(
     }
 
     /** Idempotent call (address reads, history): transient failures are retried with backoff. */
-    suspend fun <T> executeRead(block: suspend () -> T): T = execute(idempotent = true, block)
+    suspend fun <T> executeRead(block: suspend () -> T): T = execute(PrivyCall.READ, block)
 
-    /** Non-idempotent call (sends, signing): never retried. */
-    suspend fun <T> executeWrite(block: suspend () -> T): T = execute(idempotent = false, block)
+    /**
+     * A signature, or the session refresh made before a send: never retried, and a request that
+     * got no answer leaves as [RainError.NetworkError], because nothing was broadcast.
+     */
+    suspend fun <T> executeSign(block: suspend () -> T): T = execute(PrivyCall.SIGN, block)
+
+    /**
+     * A send: never retried. The vendor refreshes the session inside a send when the JWT is near
+     * expiry, and a refresh that failed there would read as a lost send, so the refresh is made
+     * first, as its own call that broadcasts nothing (`PrivyUser.getAccessToken` runs the vendor's
+     * `refreshSessionIfNeeded`), and the block then runs on a fresh token. A request made for the
+     * send that left the device and got no answer, or one the vendor reports status-less (a 5xx,
+     * an unreadable body), leaves as [RainError.TransactionOutcomeUnknown], see
+     * [PrivyErrorMapping.map], even when the session died meanwhile.
+     */
+    suspend fun <T> executeSend(block: suspend () -> T): T {
+        execute(PrivyCall.SIGN) { requireUser().getAccessToken().getOrThrow() }
+        return execute(PrivyCall.SEND, block)
+    }
 
     /**
      * Forces a session refresh through Privy (`PrivyUser.refresh`). Throws
-     * [RainError.TokenExpired] (after firing the expiry hook) when no user exists or the
-     * refresh fails.
+     * [RainError.TokenExpired], after firing the expiry hook, when Privy has no session, refuses
+     * the refresh on auth grounds, or dropped the session while answering (privy-core 0.15.0 logs
+     * the user out on any 4xx to its token refresh, `RealInternalAuthManager.handleAuthResponse`,
+     * which `PrivyUser.refresh` runs when the JWT has expired). A refresh that failed with the
+     * session still in place says nothing about it, so it leaves as that failure with the session
+     * and the hook untouched: [RainError.NetworkError] when the request got no answer (the device
+     * offline, a transport failure), [RainError.ProviderError] otherwise. A session the vendor
+     * restored without a network answer is verified with it first, see [verifiedAuthState], and
+     * throws [RainError.NetworkError] only if that still fails. The next refresh, by the host or by
+     * Privy before a wallet call, decides.
      */
     suspend fun refreshNow() {
-        val user = privy.getUser() ?: expireAndThrow()
-        sawSession.set(true)
-        user.refresh().exceptionOrNull()?.let { e ->
-            if (e is CancellationException) throw e
-            Timber.w(e, "Rain SDK: Privy session refresh failed")
-            expireAndThrow(e)
+        val state = verifiedAuthState()
+        val user = (state as? AuthState.Authenticated)?.user ?: run {
+            val error = noUserError(state)
+            if (error is RainError.TokenExpired) expireAndThrow() else throw error
         }
+        sawSession.set(true)
+        user.refresh().exceptionOrNull()?.let { e -> throw refreshFailure(e) }
         expiryNotified.set(false)
     }
 
-    private suspend fun <T> execute(idempotent: Boolean, block: suspend () -> T): T {
+    /**
+     * What a refresh that failed with [e] leaves as: the caller's cancellation as itself, bare or
+     * wrapped by the vendor; a death when Privy refused the refresh or, by its own state, dropped
+     * the session while answering; otherwise the mapped failure, with the session untouched.
+     */
+    private suspend fun refreshFailure(e: Throwable): Throwable {
+        val cancellation = if (e is CancellationException) e else e.cancellationInChain()
+        return when {
+            cancellation != null -> cancellation
+            isAuthFailure(e) || sessionDropped() -> expireAndThrow(e)
+            else -> {
+                Timber.w(e, "Rain SDK: Privy session refresh failed; the session is unchanged")
+                PrivyErrorMapping.map(e, send = false)
+            }
+        }
+    }
+
+    /**
+     * The Privy user for a call, or the failure for a call that has none, after one attempt to
+     * settle an unverified session through [verifiedAuthState]. A session the vendor still cannot
+     * verify is a [RainError.NetworkError], not a death, and a guarded call does not retry it: the
+     * attempt is a vendor request that can wait out the vendor's HTTP timeout (60 s in privy-core
+     * 0.15.0), so a read, and the `create()` probe that is one, asks once and leaves, and the
+     * host's next call asks again. Any other state without a user is [RainError.TokenExpired],
+     * which the guarded call turns into a death.
+     */
+    suspend fun requireUser(): PrivyUser {
+        val state = verifiedAuthState()
+        return (state as? AuthState.Authenticated)?.user ?: throw noUserError(state)
+    }
+
+    /**
+     * The vendor's auth state, read once from its source of truth (`Privy.getAuthState`; the
+     * public `authState` flow is a copy that can lag it), after asking the vendor to verify a
+     * session it restored without a network answer. `AuthenticatedUnverified` is what a cold start
+     * offline leaves behind, and also a restore that failed with a 5xx or a timeout while online;
+     * the vendor re-verifies on its own only after the offline start (privy-core 0.15.0
+     * `handleNetworkOfflineAtInit`, a one-shot listener), so every other case waits for
+     * `Privy.onNetworkRestored()`, which the vendor documents for this and which is a no-op once
+     * the state is settled.
+     */
+    private suspend fun verifiedAuthState(): AuthState {
+        val state = privy.getAuthState()
+        if (state !is AuthState.AuthenticatedUnverified) return state
+        privy.onNetworkRestored()
+        return privy.getAuthState()
+    }
+
+    /** A send's request left the device and its answer was lost: the fate the mapper calls unknown. */
+    private fun lostAnswerOnSend(e: Throwable): Boolean =
+        !PrivyErrorMapping.neverReachedPrivy(e) && PrivyErrorMapping.answerLost(e)
+
+    /** Whether the vendor holds no session any more: its own answer to "did the session survive". */
+    private suspend fun sessionDropped(): Boolean = privy.getAuthState() is AuthState.Unauthenticated
+
+    private fun noUserError(state: AuthState): RainError =
+        if (state is AuthState.AuthenticatedUnverified) {
+            RainError.NetworkError("Session not verified yet; retry later")
+        } else {
+            RainError.TokenExpired()
+        }
+
+    private suspend fun <T> execute(call: PrivyCall, block: suspend () -> T): T {
         // Privy restores persisted credentials asynchronously after launch; a call racing that
         // restore must wait it out rather than misreport a valid session as dead.
         awaitAuthReady()
@@ -130,18 +220,20 @@ internal class PrivySessionCoordinator(
             // Re-arming happens on the watcher's transition back to Active (a real re-login).
             is AuthState.Authenticated -> sawSession.set(true)
             is AuthState.Unauthenticated -> expireAndThrow()
-            // Unverified proceeds: Privy's own per-call refresh settles whether it is usable.
+            // Unverified proceeds: requireUser asks the vendor to verify it, once per call, and decides.
             else -> Unit
         }
+        val idempotent = call == PrivyCall.READ
         var transientRetries = 0
         var backoffMs = policy.initialRetryDelayMs
         while (true) {
             try {
                 return block()
-            } catch (e: CancellationException) {
-                throw e
             } catch (e: Exception) {
+                // The caller's cancellation leaves as itself, bare or wrapped by the vendor.
+                val cancellation = if (e is CancellationException) e else e.cancellationInChain()
                 when {
+                    cancellation != null -> throw cancellation
                     // Privy already retried its own internal refresh before this surfaced, so
                     // an auth failure here is terminal — never retried by Rain.
                     isAuthFailure(e) -> expireAndThrow(e)
@@ -156,15 +248,32 @@ internal class PrivySessionCoordinator(
                         retryDelay(backoffMs)
                         backoffMs = (backoffMs * 2).coerceAtMost(policy.maxRetryDelayMs)
                     }
-                    // Neither an auth problem nor retryable. It leaves as a RainError, never as a
-                    // vendor type: core passes a RainError through with its code and would otherwise see a
-                    // Privy exception it cannot classify.
-                    else -> {
-                        logUnmappedFailure(e)
-                        throw PrivyErrorMapping.map(e)
-                    }
+                    else -> throw settledFailure(call, e)
                 }
             }
+        }
+    }
+
+    /**
+     * What a guarded call's failure leaves as once it is neither a cancellation, an auth failure
+     * nor a retry. It leaves as a [RainError], never as a vendor type: core passes a [RainError]
+     * through with its code and would otherwise see a Privy exception it cannot classify.
+     */
+    private suspend fun settledFailure(call: PrivyCall, e: Exception): Throwable = when {
+        // A lost answer on a send is an unknown fate even when the session died meanwhile (a
+        // logout mid-flight, a refresh another call made that was refused): the host must not
+        // resend. The death is still notified.
+        call == PrivyCall.SEND && lostAnswerOnSend(e) -> {
+            if (sessionDropped()) notifyDeath()
+            logUnmappedFailure(e)
+            PrivyErrorMapping.map(e, send = true)
+        }
+        // The vendor drops the session on a 4xx to the token refresh it runs inside a wallet
+        // call, which arrives as neither an auth failure nor a transient one.
+        sessionDropped() -> expireAndThrow(e)
+        else -> {
+            logUnmappedFailure(e)
+            PrivyErrorMapping.map(e, send = call == PrivyCall.SEND)
         }
     }
 
@@ -213,35 +322,31 @@ internal class PrivySessionCoordinator(
         if (e !is RainError) Timber.w(e, "Rain SDK: Privy call failed")
     }
 
-    private fun isAuthFailure(e: Throwable): Boolean = anyInChain(e) {
+    private fun isAuthFailure(e: Throwable): Boolean = e.causeChain().any {
         it is RainError.TokenExpired || PrivyErrorMapping.mapOrNull(it) is RainError.TokenExpired
     }
 
-    private fun isTransient(e: Throwable): Boolean = anyInChain(e) {
-        it is NoNetworkException ||
-            it is IOException ||
-            it is RainError.NetworkError ||
-            (it is PrivyApiException && it.statusCode?.let(::isTransientStatus) == true)
-    }
+    /**
+     * A request that got no answer (the network), or an HTTP answer that asks for a retry. Of the
+     * statuses below only 408 and 429 ever arrive with their status: privy-core 0.15.0 reports a
+     * 5xx status-less (see [PrivyErrorMapping.isNetworkFailure]), so a 5xx is not retried today.
+     * [requireUser]'s [RainError.NetworkError] on a session the vendor cannot verify carries no
+     * transport cause, so it is not transient and the verification is not repeated within the
+     * call; a vendor 408 or 429 that [PrivyErrorMapping.mapOrNull] wrapped in a
+     * [RainError.ProviderError] still is, through its cause.
+     */
+    private fun isTransient(e: Throwable): Boolean =
+        PrivyErrorMapping.isNetworkFailure(e) ||
+            e.causeChain().any { it is PrivyApiException && it.statusCode?.let(::isTransientStatus) == true }
 
     private fun isTransientStatus(status: Int): Boolean =
         status == 408 || status == 429 || status in 500..599
 
-    private inline fun anyInChain(e: Throwable, predicate: (Throwable) -> Boolean): Boolean {
-        var current: Throwable? = e
-        var depth = 0
-        while (current != null && depth < MAX_CAUSE_DEPTH) {
-            if (predicate(current)) return true
-            current = current.cause.takeIf { it !== current }
-            depth++
-        }
-        return false
-    }
-
     private companion object {
-        const val MAX_CAUSE_DEPTH = 8
-
         /** Longest a call waits for Privy's async credential restore before judging the session. */
         const val AUTH_RESTORE_TIMEOUT_MS = 10_000L
     }
 }
+
+/** What a guarded call does, which decides whether it is retried and how a lost answer leaves. */
+internal enum class PrivyCall { READ, SIGN, SEND }
