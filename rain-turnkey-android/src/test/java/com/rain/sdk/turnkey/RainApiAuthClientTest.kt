@@ -29,8 +29,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * The wire contract of the device half of Rain's embedded-wallet auth, against a mock server: paths,
  * headers, bodies, decoding, and the classification the controller keys on. No flow logic here. The
- * cases mirror the sibling SDK's `RainApiAuthClientTests` one for one, plus the ones this client adds
- * on its own rules: no redirect, the timeouts, no body text in a failure, https only. No vendor type
+ * cases pin the cross-platform contract shared by Rain's SDKs (the paths, the bodies, the decoding,
+ * the classification), plus the ones this client adds on its own rules: no redirect, the timeouts,
+ * no body text in a failure, https only. No vendor type
  * is involved, so the suite needs no JDK gate.
  */
 class RainApiAuthClientTest {
@@ -269,7 +270,7 @@ class RainApiAuthClientTest {
         assertThat(gateway.kind).isEqualTo(RainApiAuthFailure.Kind.ServerError)
         assertThat(gateway.status).isEqualTo(502)
 
-        // A plain-text 400 still reads its phrase, as the sibling SDK's body-prefix fallback does.
+        // A plain-text 400 still reads its phrase: a body that is not JSON is read as the message itself.
         server.enqueue(MockResponse().setResponseCode(400).setBody("Invalid or expired code"))
         val plain = assertThrows(RainApiAuthFailure::class.java) { runBlocking { client.verifyOtp("wat", "otp-1", "enc") } }
         assertThat(plain.kind).isEqualTo(RainApiAuthFailure.Kind.InvalidCode)

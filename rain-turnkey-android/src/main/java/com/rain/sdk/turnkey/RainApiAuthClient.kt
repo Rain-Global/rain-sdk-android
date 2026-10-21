@@ -25,7 +25,9 @@ import kotlin.coroutines.resumeWithException
 // everything after a session exists stays device to Turnkey. The host's backend mints the wallet
 // auth token (`wat_` plus 64 hex characters, ten minutes, bound to one tenant and at most one
 // contact) with its Api-Key and hands it to the app. This client only ever carries that token as a
-// bearer and never sends a contact, because the token is bound to one.
+// bearer and takes no contact: the token is bound to one, and the contact the sign-up and login
+// legs forward sits inside the verification token and the signed sign-up message its caller hands
+// it, never in a field of its own.
 //
 // Transport, decoding and classification only. No flow logic lives here: the managed-auth
 // controller decides what a 404 on login means (sign up), when a refused token is fetched again
@@ -389,8 +391,9 @@ internal class RainApiAuthClient(
 private fun HttpUrl.isLoopback(): Boolean = host == "localhost" || host == "127.0.0.1" || host == "::1"
 
 /**
- * A required string field: present, not a JSON null, and a string, as the sibling SDK's decoder
- * reads it. Read through `opt` because the two org.json implementations disagree on `getString`:
+ * A required string field: present, not a JSON null, and a string; a missing field, a JSON null or
+ * a non-string is unreadable, a cross-platform contract shared by Rain's SDKs. Read through `opt`
+ * because the two org.json implementations disagree on `getString`:
  * the device's coerces a number, the library's throws. A missing field is a [JSONException], which
  * [RainApiAuthClient] turns into the unreadable-answer error.
  */
