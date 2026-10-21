@@ -8,6 +8,12 @@ Notable changes to the Rain Android SDK, newest first. The format follows
 
 ### Added
 
+- `RainApiAuthClient`, an internal client in `rain-turnkey-android` for Rain's embedded-wallet auth
+  endpoints (`POST /v1/issuing/embedded-wallets/otp/init`, `otp/verify`, `signup`, `signup/passkey`
+  and `login`) under a wallet auth token the host's backend mints, with a refusal mapped to `RAIN_203`
+  for a wrong code, `RAIN_202` for a refused token or tenant and `RAIN_501` otherwise. Nothing calls it
+  yet: the managed login still runs through Turnkey's auth proxy, and the cutover to it ships
+  separately with its own entry.
 - **Breaking:** `RAIN_305` `RainError.TransactionOutcomeUnknown`, a new `RainErrorCode` case and a
   new `RainError` subclass: a send through `rain-turnkey-android` or `rain-wallet-android`, EVM or
   Solana, that the wallet backend may have accepted before its answer was lost (a 5xx answer to the

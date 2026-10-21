@@ -31,6 +31,9 @@ import timber.log.Timber
  *   in its message it claims only 401 (`TokenExpired`) and 403 (`Unauthorized`); any other status
  *   returns null on purpose so the shared prose rules can read the body, pinned by the test
  *   `an unclassified HTTP status falls through to the prose checks`.
+ * - It is total for a [RainApiAuthFailure], the Rain client's refusal on the managed-auth legs that
+ *   run against Rain's embedded-wallet endpoints instead of the auth proxy, by the kind the client
+ *   read off the status; see [mapRainApiAuthFailure].
  * - It returns null for everything else, which leaves the shared prose fallback in charge.
  *
  * A failed passkey ceremony is the one place the vendor's own type says nothing: the login and
@@ -62,12 +65,40 @@ internal object TurnkeyErrorMapping {
      * runs first, then the HTTP status parsed out of the message, because a typed signal beats
      * prose. The passkey and stamper packages have their own error hierarchies beside
      * [TurnkeyKotlinError]; a bare one arrives from the add-passkey ceremony, which the adapter
-     * runs without the vendor's login or sign-up wrapper around it.
+     * runs without the vendor's login or sign-up wrapper around it. The Rain client's own failure
+     * is claimed here too, before the prose rules can read its message.
      */
     fun classify(t: Throwable): RainError? = when (t) {
         is TurnkeyKotlinError -> mapTurnkeyError(t)
         is TurnkeyPasskeyError, is TurnkeyStamperError -> mapPasskeyCeremonyFailure(t)
+        is RainApiAuthFailure -> mapRainApiAuthFailure(t)
         else -> mapTurnkeyHttpStatus(t)
+    }
+
+    /**
+     * A refusal from Rain's embedded-wallet auth endpoints, by the kind [RainApiAuthClient] read off
+     * the status. A wrong code is [RainError.InvalidLoginCode]. A refused token and a tenant that
+     * cannot use embedded wallets are both [RainError.Unauthorized], the code a wallet-backend 403
+     * carries today, because to a host both mean the same thing: obtain a usable token, or fix the
+     * tenant. Everything else is [RainError.ProviderError] over the failure: a 400 that is not the
+     * code (the code is spent, the attempt restarts), a missing wallet, a conflict, a rate limit, a
+     * 5xx, and a status with no name. The failure carries the status and the path and no body, so
+     * the exit's body rule has nothing to remove; the message names what a host can act on. A 404 on
+     * the login leg is not an error to a host, the controller turns it into a sign-up before anything
+     * is mapped; a 404 from any other leg reaches here and is a provider error.
+     */
+    fun mapRainApiAuthFailure(e: RainApiAuthFailure): RainError = when (e.kind) {
+        RainApiAuthFailure.Kind.InvalidCode -> RainError.InvalidLoginCode()
+        RainApiAuthFailure.Kind.TokenRejected ->
+            RainError.Unauthorized("Rain rejected the wallet auth token on ${e.path}: HTTP ${e.status}")
+        RainApiAuthFailure.Kind.Forbidden ->
+            RainError.Unauthorized("Rain refused embedded-wallet auth for this tenant on ${e.path}: HTTP ${e.status}")
+        RainApiAuthFailure.Kind.VerificationFailed,
+        RainApiAuthFailure.Kind.NoWallet,
+        RainApiAuthFailure.Kind.Conflict,
+        RainApiAuthFailure.Kind.RateLimited,
+        RainApiAuthFailure.Kind.ServerError,
+        RainApiAuthFailure.Kind.Other -> RainError.ProviderError(e)
     }
 
     /**
