@@ -30,9 +30,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * The wire contract of the device half of Rain's embedded-wallet auth, against a mock server: paths,
  * headers, bodies, decoding, and the classification the controller keys on. No flow logic here. The
  * cases pin the cross-platform contract shared by Rain's SDKs (the paths, the bodies, the decoding,
- * the classification), plus the ones this client adds on its own rules: no redirect, the timeouts,
- * no body text in a failure, https only. No vendor type
- * is involved, so the suite needs no JDK gate.
+ * the classification), plus the ones this client adds on its own rules: no redirect, no retry, no
+ * body text in a failure, https only. No vendor type is involved, so the suite needs no JDK gate.
  */
 class RainApiAuthClientTest {
 
@@ -60,6 +59,7 @@ class RainApiAuthClientTest {
         transports = listOf("AUTHENTICATOR_TRANSPORT_INTERNAL", "AUTHENTICATOR_TRANSPORT_HYBRID"),
     )
 
+    /** rain-api's login answer, every field its schema requires; the client reads two of them. */
     private val loginBody =
         """{"provider":"rain","sessionToken":"jwt","expiresAt":"2026-10-20T00:00:00Z","providerUserId":"u",""" +
             """"walletAddress":"0xabc","solanaAddress":"So1"}"""
@@ -86,16 +86,24 @@ class RainApiAuthClientTest {
         server.enqueue(answer(200, """{"subOrganizationId":"sub-2"}"""))
     }
 
+    private fun failedLogin(): RainApiAuthFailure = assertThrows(RainApiAuthFailure::class.java) {
+        runBlocking { client.login("wat", "vt", signature, subOrganizationId = null) }
+    }
+
+    private fun failedInit(): RainApiAuthFailure =
+        assertThrows(RainApiAuthFailure::class.java) { runBlocking { client.initOtp("wat") } }
+
     // ---------- requests ----------
 
     @Test
-    fun `every call POSTs under the embedded-wallets base path with the token as a bearer, and init has no body`() {
+    fun `every call POSTs under the embedded-wallets base path with the token as a bearer, and its answer decodes`() {
         enqueueOneOfEach()
         runBlocking {
             assertThat(client.initOtp("wat_1")).isEqualTo(RainApiOtpChallenge("otp-1", "bundle"))
             assertThat(client.verifyOtp("wat_1", "otp-1", "enc")).isEqualTo(RainApiVerification("vt"))
             assertThat(client.signup("wat_1", "vt", signature)).isEqualTo(RainApiSignup("sub-1"))
-            client.login("wat_1", "vt", signature, subOrganizationId = null)
+            assertThat(client.login("wat_1", "vt", signature, subOrganizationId = null))
+                .isEqualTo(RainApiLogin(sessionToken = "jwt", providerUserId = "u"))
             assertThat(client.signupPasskey("wat_2", "Y2hhbGxlbmdl", attestation)).isEqualTo(RainApiSignup("sub-2"))
         }
 
@@ -119,25 +127,8 @@ class RainApiAuthClientTest {
     }
 
     @Test
-    fun `no request body ever carries a contact`() {
-        // The token is bound to the contact; the device never names it, so no body can leak it.
-        enqueueOneOfEach()
-        runBlocking {
-            client.initOtp("wat")
-            client.verifyOtp("wat", "otp-1", "enc")
-            client.signup("wat", "vt", signature)
-            client.login("wat", "vt", signature, subOrganizationId = "sub-1")
-            client.signupPasskey("wat", "Y2hhbGxlbmdl", attestation)
-        }
-        List(5) { takeRequest().body.readUtf8().lowercase() }.forEach { body ->
-            listOf("contact", "email", "phone", "@").forEach { word ->
-                assertWithMessage(body).that(body).doesNotContain(word)
-            }
-        }
-    }
-
-    @Test
-    fun `the client signature is encoded in the vendor's v1ClientSignature shape`() {
+    fun `the client signature is encoded in the vendor's v1ClientSignature shape, and a null sub-organization id is omitted`() {
+        server.enqueue(answer(200, loginBody))
         server.enqueue(answer(200, loginBody))
         runBlocking {
             client.login(
@@ -146,7 +137,9 @@ class RainApiAuthClientTest {
                 clientSignature = RainApiClientSignature(publicKey = "04pk", message = "{\"tokenId\":1}", signature = "ab"),
                 subOrganizationId = "sub-9",
             )
+            client.login("wat", "vt", signature, subOrganizationId = null)
         }
+
         val body = takeRequest().json()
         assertThat(body.keyList()).containsExactly("verificationToken", "clientSignature", "subOrganizationId")
         val signature = body.getJSONObject("clientSignature")
@@ -158,6 +151,11 @@ class RainApiAuthClientTest {
         assertThat(signature.getString("signature")).isEqualTo("ab")
         assertThat(body.getString("verificationToken")).isEqualTo("vt")
         assertThat(body.getString("subOrganizationId")).isEqualTo("sub-9")
+
+        // The schema declares the field a non-empty string, so a null is left out rather than sent.
+        val withoutSubOrganization = takeRequest().body.readUtf8()
+        assertThat(withoutSubOrganization).doesNotContain("subOrganizationId")
+        assertThat(JSONObject(withoutSubOrganization).keyList()).containsExactly("verificationToken", "clientSignature")
     }
 
     @Test
@@ -180,39 +178,19 @@ class RainApiAuthClientTest {
             .inOrder()
     }
 
-    @Test
-    fun `a login without a sub-organization id omits the key rather than sending null`() {
-        server.enqueue(answer(200, loginBody))
-        runBlocking { client.login("wat", "vt", signature, subOrganizationId = null) }
-
-        val raw = takeRequest().body.readUtf8()
-        assertThat(raw).doesNotContain("subOrganizationId")
-        assertThat(JSONObject(raw).keyList()).containsExactly("verificationToken", "clientSignature")
-    }
-
     // ---------- answers ----------
 
     @Test
-    fun `a login answer decodes every field`() {
-        server.enqueue(
-            answer(
-                200,
-                """{"provider":"rain","sessionToken":"jwt-1","expiresAt":"2026-10-20T10:15:00Z","providerUserId":"user-1",""" +
-                    """"walletAddress":"0xeddf67f4b6ba6da613cc1c24433073d6ab4c885d",""" +
-                    """"solanaAddress":"7YP827Y77YQTU7MS8R9JGMVJKAkvyiBg6sEVJNeRibge"}""",
-            )
-        )
-        val login = runBlocking { client.login("wat", "vt", signature, subOrganizationId = null) }
-        assertThat(login).isEqualTo(
-            RainApiLogin(
-                provider = "rain",
-                sessionToken = "jwt-1",
-                expiresAt = "2026-10-20T10:15:00Z",
-                providerUserId = "user-1",
-                walletAddress = "0xeddf67f4b6ba6da613cc1c24433073d6ab4c885d",
-                solanaAddress = "7YP827Y77YQTU7MS8R9JGMVJKAkvyiBg6sEVJNeRibge",
-            )
-        )
+    fun `the answers that carry a JWT redact it from toString and still compare by value`() {
+        // The verification token names the contact and the session token names the wallet and its user.
+        val verification = RainApiVerification(verificationToken = "vt-naming-the-contact")
+        assertThat(verification.toString()).doesNotContain("vt-naming-the-contact")
+        assertThat(verification).isEqualTo(RainApiVerification("vt-naming-the-contact"))
+
+        val login = RainApiLogin(sessionToken = "jwt-the-log-must-not-see", providerUserId = "sub-1")
+        assertThat(login.toString()).doesNotContain("jwt-the-log-must-not-see")
+        assertThat(login.toString()).contains("sub-1")
+        assertThat(login).isEqualTo(RainApiLogin(sessionToken = "jwt-the-log-must-not-see", providerUserId = "sub-1"))
     }
 
     @Test
@@ -230,6 +208,8 @@ class RainApiAuthClientTest {
             val error = assertThrows(RainError.InternalError::class.java) { runBlocking { client.initOtp("wat") } }
             assertWithMessage(body).that(error.errorCode).isEqualTo(RainErrorCode.INTERNAL_ERROR)
             assertWithMessage(body).that(error).hasMessageThat().contains("/v1/issuing/embedded-wallets/otp/init")
+            // Android's org.json echoes the body in a syntax error's message; the JVM's does not, so the cause check is the real pin.
+            assertWithMessage(body).that(error.cause).isNull()
             assertWithMessage(body).that(error.causeChain().mapNotNull { it.message }.none { marker in it }).isTrue()
         }
     }
@@ -240,55 +220,66 @@ class RainApiAuthClientTest {
     fun `status and message classify into the kinds the controller branches on`() {
         val rows = listOf(
             Triple(400, "Invalid or expired code", RainApiAuthFailure.Kind.InvalidCode),
-            Triple(400, "Verification failed", RainApiAuthFailure.Kind.VerificationFailed),
-            Triple(400, "This contact can't receive a code", RainApiAuthFailure.Kind.VerificationFailed),
-            Triple(400, "Token was issued for a different email or phone", RainApiAuthFailure.Kind.VerificationFailed),
+            Triple(400, "Verification failed", RainApiAuthFailure.Kind.Refused),
+            Triple(400, "This contact can't receive a code", RainApiAuthFailure.Kind.Refused),
+            Triple(400, "Token was issued for a different email or phone", RainApiAuthFailure.Kind.Refused),
             Triple(401, "Token expired", RainApiAuthFailure.Kind.TokenRejected),
             Triple(401, "Bad token", RainApiAuthFailure.Kind.TokenRejected),
             Triple(401, "Invalid tenant", RainApiAuthFailure.Kind.Forbidden),
             Triple(403, "Feature not enabled for tenant", RainApiAuthFailure.Kind.Forbidden),
             Triple(404, "No wallet exists for this contact", RainApiAuthFailure.Kind.NoWallet),
-            Triple(409, "Token already used", RainApiAuthFailure.Kind.Conflict),
-            Triple(409, "Signup in progress", RainApiAuthFailure.Kind.Conflict),
-            Triple(429, "Too many attempts", RainApiAuthFailure.Kind.RateLimited),
-            Triple(503, "Turnkey is not configured", RainApiAuthFailure.Kind.ServerError),
-            Triple(418, "teapot", RainApiAuthFailure.Kind.Other),
+            Triple(409, "Token already used", RainApiAuthFailure.Kind.Refused),
+            Triple(409, "Signup in progress", RainApiAuthFailure.Kind.Refused),
+            Triple(429, "Too many attempts", RainApiAuthFailure.Kind.Refused),
+            Triple(503, "Turnkey is not configured", RainApiAuthFailure.Kind.Refused),
+            Triple(418, "teapot", RainApiAuthFailure.Kind.Refused),
         )
         rows.forEach { (status, message, kind) ->
             server.enqueue(refusal(status, message))
-            val failure = assertThrows(RainApiAuthFailure::class.java) { runBlocking { client.initOtp("wat") } }
+            val failure = failedInit()
             assertWithMessage("$status $message").that(failure.kind).isEqualTo(kind)
             assertWithMessage("$status $message").that(failure.status).isEqualTo(status)
             assertWithMessage("$status $message").that(failure.path).isEqualTo("/v1/issuing/embedded-wallets/otp/init")
+            assertWithMessage("$status $message").that(failure.correlationId).isNull()
         }
-    }
 
-    @Test
-    fun `a non-JSON error body still classifies, read as the message itself`() {
+        // Bodies that are not rain-api's: a gateway's HTML classifies by status, a plain-text 400 is
+        // read as the message itself and still finds its phrase, and an empty body classifies by status alone.
         server.enqueue(MockResponse().setResponseCode(502).setBody("<html>bad gateway</html>"))
-        val gateway = assertThrows(RainApiAuthFailure::class.java) { runBlocking { client.initOtp("wat") } }
-        assertThat(gateway.kind).isEqualTo(RainApiAuthFailure.Kind.ServerError)
-        assertThat(gateway.status).isEqualTo(502)
-
-        // A plain-text 400 still reads its phrase: a body that is not JSON is read as the message itself.
+        assertThat(failedInit().kind).isEqualTo(RainApiAuthFailure.Kind.Refused)
         server.enqueue(MockResponse().setResponseCode(400).setBody("Invalid or expired code"))
         val plain = assertThrows(RainApiAuthFailure::class.java) { runBlocking { client.verifyOtp("wat", "otp-1", "enc") } }
         assertThat(plain.kind).isEqualTo(RainApiAuthFailure.Kind.InvalidCode)
-
-        // An empty body classifies by status alone.
         server.enqueue(MockResponse().setResponseCode(401))
-        val empty = assertThrows(RainApiAuthFailure::class.java) { runBlocking { client.initOtp("wat") } }
-        assertThat(empty.kind).isEqualTo(RainApiAuthFailure.Kind.TokenRejected)
+        assertThat(failedInit().kind).isEqualTo(RainApiAuthFailure.Kind.TokenRejected)
+    }
+
+    @Test
+    fun `a 404 is NoWallet only with rain-api's own body, so one from in front of rain-api is never read as no wallet`() {
+        // Cloud Run has answered a share of requests with Google's HTML 404 before they reached rain-api.
+        // Read as "no wallet", the login leg would sign up and the attach would skip its ownership check.
+        val html = "<!DOCTYPE html><html><head><title>Error 404 (Not Found)</title></head><body>Not Found</body></html>"
+        listOf(
+            MockResponse().setResponseCode(404).setHeader("Content-Type", "text/html").setBody(html),
+            MockResponse().setResponseCode(404),
+            answer(404, """{"error":"not found"}"""),
+            answer(404, """{"statusCode":503,"error":"E","message":"No wallet exists for this contact"}"""),
+        ).forEachIndexed { index, response ->
+            server.enqueue(response)
+            val failure = failedLogin()
+            assertWithMessage("row $index").that(failure.kind).isEqualTo(RainApiAuthFailure.Kind.Refused)
+            assertWithMessage("row $index").that(failure.status).isEqualTo(404)
+        }
+
+        server.enqueue(refusal(404, "No wallet exists for this contact"))
+        assertThat(failedLogin().kind).isEqualTo(RainApiAuthFailure.Kind.NoWallet)
     }
 
     @Test
     fun `through the mapper a wrong code is RAIN_203, a refused token or tenant RAIN_202, the rest RAIN_501`() {
         fun mapped(status: Int, message: String): RainError {
             server.enqueue(refusal(status, message))
-            val failure = assertThrows(RainApiAuthFailure::class.java) {
-                runBlocking { client.login("wat", "vt", signature, subOrganizationId = null) }
-            }
-            return TurnkeyErrorMapping.map(failure)
+            return TurnkeyErrorMapping.map(failedLogin())
         }
 
         val wrongCode = mapped(400, "Invalid or expired code")
@@ -331,13 +322,35 @@ class RainApiAuthClientTest {
     }
 
     @Test
-    fun `a redirect is not followed and surfaces as Other`() {
+    fun `a 500's correlationId is kept when it is a UUID, and nothing else of the body is`() {
+        // rain-api stamps its 500s with the id its server log is searched by; the rest of the body still goes.
+        val uuid = "0f8fad5b-d9cb-469f-a165-70867728950e"
+        server.enqueue(answer(500, """{"statusCode":500,"error":"Internal Server Error","message":"boom","correlationId":"$uuid"}"""))
+        val traced = failedInit()
+        assertThat(traced.correlationId).isEqualTo(uuid)
+        assertThat(traced).hasMessageThat().isEqualTo("Rain API /v1/issuing/embedded-wallets/otp/init: HTTP 500 (correlationId $uuid)")
+        assertThat(traced).hasMessageThat().doesNotContain("boom")
+        assertThat(TurnkeyErrorMapping.map(traced)).hasMessageThat().contains(uuid)
+
+        // Not a UUID, or not a 500: dropped with the rest of the body.
+        server.enqueue(answer(500, """{"statusCode":500,"error":"E","message":"boom","correlationId":"<script>alert(1)</script>"}"""))
+        val tainted = failedInit()
+        assertThat(tainted.correlationId).isNull()
+        assertThat(tainted).hasMessageThat().isEqualTo("Rain API /v1/issuing/embedded-wallets/otp/init: HTTP 500")
+        server.enqueue(answer(503, """{"statusCode":503,"error":"E","message":"boom","correlationId":"$uuid"}"""))
+        val unavailable = failedInit()
+        assertThat(unavailable.correlationId).isNull()
+        assertThat(unavailable).hasMessageThat().doesNotContain(uuid)
+    }
+
+    @Test
+    fun `a redirect is not followed and surfaces as Refused`() {
         server.enqueue(MockResponse().setResponseCode(302).setHeader("Location", server.url("/elsewhere").toString()))
         // What following the redirect would have found: it must never be requested.
         server.enqueue(answer(200, """{"otpId":"otp-1","otpEncryptionTargetBundle":"bundle"}"""))
 
-        val failure = assertThrows(RainApiAuthFailure::class.java) { runBlocking { client.initOtp("wat") } }
-        assertThat(failure.kind).isEqualTo(RainApiAuthFailure.Kind.Other)
+        val failure = failedInit()
+        assertThat(failure.kind).isEqualTo(RainApiAuthFailure.Kind.Refused)
         assertThat(failure.status).isEqualTo(302)
         assertThat(server.requestCount).isEqualTo(1)
     }
@@ -392,12 +405,14 @@ class RainApiAuthClientTest {
     }
 
     @Test
-    fun `the default client gives a whole call 45 seconds, waits as long for each read, and follows no redirect`() {
+    fun `the default client gives a whole call 45 seconds, waits as long for each read, follows no redirect and retries no send`() {
         val http = RainApiAuthClient.defaultHttpClient()
         assertThat(http.callTimeoutMillis).isEqualTo(45_000)
         assertThat(http.readTimeoutMillis).isEqualTo(45_000)
         assertThat(http.followRedirects).isFalse()
         assertThat(http.followSslRedirects).isFalse()
+        // A re-sent POST would send a second code, hit the sign-up lock or re-use a revoked token.
+        assertThat(http.retryOnConnectionFailure).isFalse()
     }
 
     @Test

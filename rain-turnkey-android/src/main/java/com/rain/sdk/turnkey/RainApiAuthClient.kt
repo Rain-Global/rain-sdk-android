@@ -20,18 +20,10 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-// The device half of Rain's embedded-wallet auth, `/v1/issuing/embedded-wallets` on rain-api. It
-// stands in for Turnkey's auth proxy on the code send, code verify, sign-up and login legs;
-// everything after a session exists stays device to Turnkey. The host's backend mints the wallet
-// auth token (`wat_` plus 64 hex characters, ten minutes, bound to one tenant and at most one
-// contact) with its Api-Key and hands it to the app. This client only ever carries that token as a
-// bearer and takes no contact: the token is bound to one, and the contact the sign-up and login
-// legs forward sits inside the verification token and the signed sign-up message its caller hands
-// it, never in a field of its own.
-//
-// Transport, decoding and classification only. No flow logic lives here: the managed-auth
-// controller decides what a 404 on login means (sign up), when a refused token is fetched again
-// and which step spends the code. Nothing calls this client yet; the cutover wires it in.
+// The device half of Rain's embedded-wallet auth, `/v1/issuing/embedded-wallets` on rain-api: the
+// code send, code verify, sign-up and login legs that used to run through Turnkey's auth proxy.
+// Every call carries the wallet auth token the host's backend minted, as a bearer. Transport,
+// decoding and classification only; the managed-auth controller owns the flow.
 
 // ---------- Wire types ----------
 
@@ -40,25 +32,27 @@ internal data class RainApiOtpChallenge(val otpId: String, val otpEncryptionTarg
 
 /**
  * `POST /otp/verify`'s answer: Turnkey's verification token, a JWT good for ten minutes that
- * carries the public key the code was encrypted with.
+ * carries the public key the code was encrypted with and names the contact, so `toString()`
+ * redacts it.
  */
-internal data class RainApiVerification(val verificationToken: String)
+internal data class RainApiVerification(val verificationToken: String) {
+    override fun toString(): String = "RainApiVerification(verificationToken=<redacted>)"
+}
 
 /** `POST /signup` and `POST /signup/passkey`'s answer. */
 internal data class RainApiSignup(val subOrganizationId: String)
 
-/** `POST /login`'s answer, every field rain-api's `RainWalletContextSchema` requires. */
+/**
+ * `POST /login`'s answer: the two fields the SDK reads of the six rain-api's `RainWalletContextSchema`
+ * requires. The session JWT names the wallet and its user, so `toString()` redacts it.
+ */
 internal data class RainApiLogin(
-    /** `rain`, the one value the schema allows. */
-    val provider: String,
     /** The Turnkey session JWT to store under the device key. */
     val sessionToken: String,
-    val expiresAt: String,
     val providerUserId: String,
-    /** Lowercased by the backend; checksum on display, not here. */
-    val walletAddress: String,
-    val solanaAddress: String,
-)
+) {
+    override fun toString(): String = "RainApiLogin(sessionToken=<redacted>, providerUserId=$providerUserId)"
+}
 
 /**
  * The vendor's `v1ClientSignature`, encoded here so the wire shape is pinned in this module:
@@ -104,48 +98,44 @@ internal data class RainApiPasskeyAttestation(
 
 /**
  * A device endpoint's refusal: the status, the request path and a [Kind] the controller branches
- * on. The kind is read off the status and, for 400 and 401, two phrases of rain-api's
+ * on. The kind is read off the status and, for 400, 401 and 404, rain-api's own
  * `{statusCode, error, message}` body; the body is then dropped before this is thrown, so the
- * message names the path and the status and nothing Rain said. Not a vendor failure for
- * `carriesVendorData`: it carries nothing a host may not see, so the mapper's exit passes it through.
+ * message names the path, the status and, on a 500, the `correlationId` that finds Rain's server
+ * log, and nothing else Rain said. Not a vendor failure for `carriesVendorData`: it carries nothing
+ * a host may not see, so the mapper's exit passes it through.
  */
-internal class RainApiAuthFailure(val kind: Kind, val status: Int, val path: String) :
-    RuntimeException("Rain API $path: HTTP $status") {
+internal class RainApiAuthFailure(
+    val kind: Kind,
+    val status: Int,
+    val path: String,
+    /** A 500's `correlationId`, kept only when it is a UUID; null on every other answer. */
+    val correlationId: String? = null,
+) : RuntimeException("Rain API $path: HTTP $status" + correlationId?.let { " (correlationId $it)" }.orEmpty()) {
 
     enum class Kind {
         /** 400 "Invalid or expired code": wrong, expired or locked. Keep the attempt; the user retypes. */
         InvalidCode,
 
-        /**
-         * Any other 400: "Verification failed", a verification for a different contact, a contact
-         * that cannot receive a code. Restart the attempt.
-         */
-        VerificationFailed,
-
         /** 401 for a missing, malformed, unknown, expired or revoked token: ask the host for a new one. */
         TokenRejected,
 
         /**
-         * The tenant cannot use embedded wallets: 403 (flag off, or a token of the wrong kind for the
-         * route) or 401 "Invalid tenant" (no API access, not compliance-approved). A new token does
-         * not help.
+         * 403, or 401 "Invalid tenant": the tenant cannot use embedded wallets (flag off, no API
+         * access) or the token is of the wrong kind for the route. A new token does not help.
          */
         Forbidden,
 
-        /** 404: no wallet for this contact in this tenant. On the login leg the controller signs up. */
+        /**
+         * rain-api's own 404: no wallet for this contact in this tenant. On the login leg the
+         * controller signs up.
+         */
         NoWallet,
 
-        /** 409: the token was already used, a sign-up is in progress, or the passkey already has a wallet. */
-        Conflict,
-
-        /** 429: too many codes requested or too many attempts. */
-        RateLimited,
-
-        /** 5xx: no Turnkey configuration for this environment, codes cannot be sent, or Rain's own failure. */
-        ServerError,
-
-        /** A status the table has no name for, a 3xx included: redirects are off. */
-        Other,
+        /**
+         * Every other refusal, told apart by [status] where it matters: another 400, a 409, a 429,
+         * a 5xx, a 3xx (redirects are off), or a 404 whose body is not rain-api's.
+         */
+        Refused,
     }
 }
 
@@ -229,12 +219,8 @@ internal class RainApiAuthClient(
         if (subOrganizationId != null) body.put("subOrganizationId", subOrganizationId)
         return post(LOGIN, token, body) { json ->
             RainApiLogin(
-                provider = json.requiredString("provider"),
                 sessionToken = json.requiredString("sessionToken"),
-                expiresAt = json.requiredString("expiresAt"),
                 providerUserId = json.requiredString("providerUserId"),
-                walletAddress = json.requiredString("walletAddress"),
-                solanaAddress = json.requiredString("solanaAddress"),
             )
         }
     }
@@ -269,10 +255,8 @@ internal class RainApiAuthClient(
     }
 
     /**
-     * A 2xx body through [decode]. No cause on the error, on purpose: the device's org.json echoes
-     * the whole input in a syntax error's message (`JSONTokener.syntaxError`), and a 2xx body here
-     * is a session or a verification token. The class name says whether the body was not JSON or
-     * lacked a field.
+     * A 2xx body through [decode]. No cause on the error, because org.json echoes the whole input in a
+     * syntax error's message and the input here is a session or a verification token.
      */
     @Suppress("SwallowedException") // the cause is dropped on purpose, see above
     private fun <T> decodeAnswer(body: String, path: String, decode: (JSONObject) -> T): T = try {
@@ -282,32 +266,36 @@ internal class RainApiAuthClient(
     }
 
     /**
-     * The kind for a refusal, from the status and, on 400 and 401, the message. "Invalid or expired
-     * code" is matched whole: `/otp/init`'s "This contact can't receive a code" is also a 400 and must
-     * not read as a wrong code before any code was sent. "Invalid tenant" is a 401 too, but a new token
-     * fails the same way, so it joins the tenant refusals and the controller never loops on the host's
-     * token provider. Everything else is the status alone.
+     * The kind for a refusal, from the status and rain-api's `{statusCode, error, message}` body.
+     * "Invalid or expired code" is matched whole: `/otp/init`'s "This contact can't receive a code" is
+     * also a 400 and must not read as a wrong code before any code was sent. "Invalid tenant" is a
+     * 401 too, but a new token fails the same way, so it joins the tenant refusals and the controller
+     * never loops on the host's token provider. A 404 is [RainApiAuthFailure.Kind.NoWallet] only when
+     * the body is rain-api's own, because a 404 from in front of it (Cloud Run has answered a share of
+     * requests with Google's HTML 404 before they reached rain-api) says nothing about the wallet, and
+     * the controller must neither sign up nor attach on it. Everything else is the status alone.
      */
     private fun classify(status: Int, body: String, path: String): RainApiAuthFailure {
-        val message = errorMessage(body).lowercase()
+        val rainBody = rainApiBody(body)
+        val message = (rainBody?.optString("message")?.takeIf { it.isNotEmpty() } ?: body).lowercase()
         val kind = when (status) {
             HttpURLConnection.HTTP_BAD_REQUEST ->
-                if (INVALID_CODE_PHRASE in message) RainApiAuthFailure.Kind.InvalidCode else RainApiAuthFailure.Kind.VerificationFailed
+                if (INVALID_CODE_PHRASE in message) RainApiAuthFailure.Kind.InvalidCode else RainApiAuthFailure.Kind.Refused
             HttpURLConnection.HTTP_UNAUTHORIZED ->
                 if (INVALID_TENANT_PHRASE in message) RainApiAuthFailure.Kind.Forbidden else RainApiAuthFailure.Kind.TokenRejected
             HttpURLConnection.HTTP_FORBIDDEN -> RainApiAuthFailure.Kind.Forbidden
-            HttpURLConnection.HTTP_NOT_FOUND -> RainApiAuthFailure.Kind.NoWallet
-            HttpURLConnection.HTTP_CONFLICT -> RainApiAuthFailure.Kind.Conflict
-            HTTP_TOO_MANY_REQUESTS -> RainApiAuthFailure.Kind.RateLimited
-            in SERVER_ERRORS -> RainApiAuthFailure.Kind.ServerError
-            else -> RainApiAuthFailure.Kind.Other
+            HttpURLConnection.HTTP_NOT_FOUND ->
+                if (rainBody?.optInt("statusCode") == status) RainApiAuthFailure.Kind.NoWallet else RainApiAuthFailure.Kind.Refused
+            else -> RainApiAuthFailure.Kind.Refused
         }
-        return RainApiAuthFailure(kind, status, path)
+        // A 500's `correlationId` is the one value that finds Rain's server log; kept only when it is a UUID.
+        val correlationId = rainBody?.optString("correlationId")
+            ?.takeIf { status == HttpURLConnection.HTTP_INTERNAL_ERROR && UUID_PATTERN.matches(it) }
+        return RainApiAuthFailure(kind, status, path, correlationId)
     }
 
-    /** rain-api's error body is Fastify's `{statusCode, error, message}`; any other body reads as itself. */
-    private fun errorMessage(body: String): String =
-        runCatching { JSONObject(body).optString("message") }.getOrNull()?.takeIf { it.isNotEmpty() } ?: body
+    /** rain-api's error body is Fastify's `{statusCode, error, message}`; null when the body is not a JSON object. */
+    private fun rainApiBody(body: String): JSONObject? = runCatching { JSONObject(body) }.getOrNull()
 
     /** What a completed call left behind: the status and the body, read on OkHttp's thread. */
     private class Reply(val code: Int, val successful: Boolean, val body: String)
@@ -357,32 +345,18 @@ internal class RainApiAuthClient(
 
         private const val INVALID_CODE_PHRASE = "invalid or expired code"
         private const val INVALID_TENANT_PHRASE = "invalid tenant"
-        private const val HTTP_TOO_MANY_REQUESTS = 429
-        private val SERVER_ERRORS = HttpURLConnection.HTTP_INTERNAL_ERROR..HTTP_LAST_SERVER_ERROR
-        private const val HTTP_LAST_SERVER_ERROR = 599
+        private val UUID_PATTERN = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
-        /**
-         * Whole call, and the wait for each read, above rain-api's 30-second deadline on a
-         * sub-organization create (`CREATE_SUB_ORGANIZATION_TIMEOUT_MS` in `lib/turnkey/activities.ts`),
-         * so the backend's own answer to a slow create reaches the device instead of the client's clock
-         * winning first. The read timeout has to move with it: OkHttp's 10-second default applies to each
-         * read, the first byte of the answer included (`OkHttpClient.Builder.readTimeout`), and would cut
-         * a 30-second create before the call timeout ever applied.
-         */
+        /** Whole call and each read: above rain-api's 30-second sub-organization create, so its own answer reaches the device. */
         private const val TIMEOUT_SECONDS = 45L
 
-        /**
-         * The client used when none is injected. Redirects off: a 3xx from these routes is not an answer
-         * the client can read, and following one would re-send the request, bearer included, wherever the
-         * answer pointed (OkHttp drops `Authorization` only when the redirect changes the scheme, host or
-         * port, `RetryAndFollowUpInterceptor.buildRedirectRequest`). It surfaces as a [RainApiAuthFailure]
-         * of kind [RainApiAuthFailure.Kind.Other] instead.
-         */
+        /** Redirects and connection-failure retries off: either would re-send the bearer, and every leg has a side effect. */
         fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
             .readTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .callTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .followRedirects(false)
             .followSslRedirects(false)
+            .retryOnConnectionFailure(false)
             .build()
     }
 }

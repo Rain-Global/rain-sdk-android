@@ -76,29 +76,22 @@ internal object TurnkeyErrorMapping {
     }
 
     /**
-     * A refusal from Rain's embedded-wallet auth endpoints, by the kind [RainApiAuthClient] read off
-     * the status. A wrong code is [RainError.InvalidLoginCode]. A refused token and a tenant that
-     * cannot use embedded wallets are both [RainError.Unauthorized], the code a wallet-backend 403
-     * carries today, because to a host both mean the same thing: obtain a usable token, or fix the
-     * tenant. Everything else is [RainError.ProviderError] over the failure: a 400 that is not the
-     * code (the code is spent, the attempt restarts), a missing wallet, a conflict, a rate limit, a
-     * 5xx, and a status with no name. The failure carries the status and the path and no body, so
-     * the exit's body rule has nothing to remove; the message names what a host can act on. A 404 on
-     * the login leg is not an error to a host, the controller turns it into a sign-up before anything
-     * is mapped; a 404 from any other leg reaches here and is a provider error.
+     * A refusal from Rain's embedded-wallet endpoints, by [RainApiAuthFailure.Kind]: a wrong code is
+     * [RainError.InvalidLoginCode], a refused token or tenant is [RainError.Unauthorized], and
+     * everything else is [RainError.ProviderError] over the failure, which carries the status, the
+     * path and a 500's correlation id, and no body.
      */
     fun mapRainApiAuthFailure(e: RainApiAuthFailure): RainError = when (e.kind) {
         RainApiAuthFailure.Kind.InvalidCode -> RainError.InvalidLoginCode()
         RainApiAuthFailure.Kind.TokenRejected ->
             RainError.Unauthorized("Rain rejected the wallet auth token on ${e.path}: HTTP ${e.status}")
         RainApiAuthFailure.Kind.Forbidden ->
-            RainError.Unauthorized("Rain refused embedded-wallet auth for this tenant on ${e.path}: HTTP ${e.status}")
-        RainApiAuthFailure.Kind.VerificationFailed,
+            RainError.Unauthorized(
+                "Rain refused embedded-wallet auth on ${e.path}: HTTP ${e.status}; " +
+                    "the tenant cannot use embedded wallets, or the wallet auth token is of the wrong kind for this route",
+            )
         RainApiAuthFailure.Kind.NoWallet,
-        RainApiAuthFailure.Kind.Conflict,
-        RainApiAuthFailure.Kind.RateLimited,
-        RainApiAuthFailure.Kind.ServerError,
-        RainApiAuthFailure.Kind.Other -> RainError.ProviderError(e)
+        RainApiAuthFailure.Kind.Refused -> RainError.ProviderError(e)
     }
 
     /**
