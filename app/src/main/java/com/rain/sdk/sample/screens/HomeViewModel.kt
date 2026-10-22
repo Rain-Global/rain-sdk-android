@@ -926,7 +926,7 @@ class HomeViewModel(
                 throw e
             } catch (e: RainError) {
                 SampleLog.w(area, "failed ${e.describe()}")
-                onRainWalletPasskeyFailed(provider, label, previousOwner, hadSession, e)
+                onRainWalletPasskeyFailed(provider, action, label, previousOwner, hadSession, e)
             } finally {
                 _state.update { it.copy(rainWalletPasskeyInFlight = null) }
             }
@@ -935,26 +935,33 @@ class HomeViewModel(
 
     /**
      * A passkey flow's failure. A closed sheet or a refused request never reached a login, so the
-     * previous owner still owns whatever session is live. When the login went through and a later
-     * step failed, the session is live and the sample carries on signed in, as after a code.
+     * previous owner still owns whatever session is live; on a sign-up the closed sheet may have
+     * been the second one, after Rain created the account, which the error cannot tell from the
+     * first, so the status points at *Sign in with passkey*. When the login went through and a
+     * later step failed, the session is live and the sample carries on signed in, as after a code.
      * Otherwise whose session is live is unknown, so the owner stays unrecorded and the user signs
-     * in again.
+     * in again; a sign-up whose answer was lost, unreadable or refused after the account was
+     * created may have left one, so that status points at *Sign in with passkey* too, ahead of a
+     * second sign-up that would mint a second account.
      */
+    @Suppress("LongParameterList") // one value per thing the status depends on; the flow's kind is the sixth
     private fun onRainWalletPasskeyFailed(
         provider: RainProvider?,
+        action: RainWalletPasskeyAction,
         label: String,
         previousOwner: RainWalletOwnerSnapshot,
         hadSession: Boolean,
         e: RainError,
     ) {
         val code = e.code
+        val signUp = action == RainWalletPasskeyAction.SignUp
         when {
             e is RainError.UserRejected || e is RainError.InvalidConfig -> {
                 restoreRainWalletOwner(previousOwner)
-                val status = if (e is RainError.UserRejected) {
-                    "Passkey sheet closed ($code), no passkey used"
-                } else {
-                    "$label refused ($code)"
+                val status = when {
+                    e !is RainError.UserRejected -> "$label refused ($code)"
+                    signUp -> "Passkey sheet closed ($code); if it was the second sheet the account exists: try Sign in with passkey"
+                    else -> "Passkey sheet closed ($code), no passkey used"
                 }
                 _state.update { it.copy(statusText = status) }
             }
@@ -967,6 +974,10 @@ class HomeViewModel(
                         statusText = "$label signed in; wallet setup finishes when Rain initializes ($code)",
                     )
                 }
+            }
+            // A refused token or tenant (RAIN_202) is the one failure that certainly left no account.
+            signUp && e !is RainError.Unauthorized -> _state.update {
+                it.copy(statusText = "$label failed ($code); the account may exist, so try Sign in with passkey before creating another")
             }
             else -> _state.update { it.copy(statusText = "$label failed ($code)") }
         }
@@ -1719,7 +1730,7 @@ data class HomeUiState(
 
     /**
      * The Rain wallet mints its wallet auth tokens through the demo's Rain API client, so a code
-     * login needs the sandbox Api-Key and user ID on Home; a passkey sign-in, a passkey sign-up,
+     * login and a passkey sign-up need the sandbox Api-Key and user ID on Home; a passkey sign-in,
      * an added passkey and a contact attach need no token. A build pointed at production is not
      * gated here: the SDK refuses `RainWalletEnvironment.Production` at construction, and the card
      * shows that error.

@@ -16,9 +16,9 @@ import com.rain.sdk.turnkey.TurnkeyConfig
  *
  * @param authTokenProvider Returns the wallet auth token your backend mints with its Api-Key
  *                          (`POST /v1/issuing/embedded-wallets/auth-tokens`) for the contact the
- *                          SDK passes, the canonical contact of a code request. Called once per
- *                          code request, and once more for each leg Rain refuses the token on.
- *                          It runs under the
+ *                          SDK passes: the canonical contact of a code request, or null for a
+ *                          passkey sign-up. Called once per code request or sign-up, and once
+ *                          more for each leg Rain refuses the token on. It runs under the
  *                          provider's authentication lock, so it must not call back into the
  *                          provider, and it should carry its own timeout. Throw a `RainError` to
  *                          pass it through; a backend it could not reach arrives as

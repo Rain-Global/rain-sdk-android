@@ -88,13 +88,20 @@ internal fun RainWalletCard(state: HomeUiState, actions: ProviderCardActions) {
 
 /**
  * The two passkey entries while signed out. Both disable while anything is loading, while a passkey
- * call is in flight and where no Activity can present the sheet, which is a preview's case.
+ * call is in flight and where no Activity can present the sheet, which is a preview's case. The
+ * sign-up also needs the Api-Key on Home, since it mints a wallet auth token; the sign-in does not.
  */
 @Composable
 private fun RainWalletPasskeyButtons(state: HomeUiState, actions: ProviderCardActions) {
     RainDivider()
     PasskeyButton("Sign in with passkey", RainWalletPasskeyAction.Login, state, actions.onLoginWithRainWalletPasskey)
-    PasskeyButton("Create wallet with passkey", RainWalletPasskeyAction.SignUp, state, actions.onSignUpWithRainWalletPasskey)
+    PasskeyButton(
+        "Create wallet with passkey",
+        RainWalletPasskeyAction.SignUp,
+        state,
+        actions.onSignUpWithRainWalletPasskey,
+        needsAuthToken = true,
+    )
     RainMuted("Creates a new account. Already have one? Sign in instead.")
 }
 
@@ -108,17 +115,25 @@ private fun RainWalletAddPasskeyStep(state: HomeUiState, actions: ProviderCardAc
 
 /**
  * One passkey entry: a secondary button that spins while its own [action] runs and disables while
- * anything loads, while any passkey call runs, and where no Activity can present the sheet.
+ * anything loads, while any passkey call runs, where no Activity can present the sheet, and, when
+ * the action mints a wallet auth token ([needsAuthToken]), while the Api-Key is missing on Home.
  */
 @Composable
-private fun PasskeyButton(text: String, action: RainWalletPasskeyAction, state: HomeUiState, onClick: () -> Unit) {
+private fun PasskeyButton(
+    text: String,
+    action: RainWalletPasskeyAction,
+    state: HomeUiState,
+    onClick: () -> Unit,
+    needsAuthToken: Boolean = false,
+) {
     val inFlight = state.rainWalletPasskeyInFlight
     RainButton(
         text = text,
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
         style = RainButtonStyle.Secondary,
-        enabled = !state.isLoading && inFlight == null && state.rainWalletActivityAvailable,
+        enabled = !state.isLoading && inFlight == null && state.rainWalletActivityAvailable &&
+            (!needsAuthToken || state.rainWalletAuthAvailable),
         loading = inFlight == action,
     )
 }
@@ -235,7 +250,7 @@ private fun RainWalletCardSharedBackendPreview() {
     RainWalletCardPreview(previewRainWalletState.copy(backendOwner = SessionStore.Provider.Turnkey))
 }
 
-@Preview(name = "Rain Wallet · no Api-Key on Home, code off", showBackground = true)
+@Preview(name = "Rain Wallet · no Api-Key on Home, code and sign-up off", showBackground = true)
 @Composable
 private fun RainWalletCardNoApiKeyPreview() {
     RainWalletCardPreview(previewRainWalletState.copy(rainApiKey = "", userId = ""))

@@ -144,26 +144,28 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   (`/v1/issuing/embedded-wallets`) instead of Turnkey's auth proxy.
   - `RainWalletConfig` gains two parameters. `authTokenProvider`, required and first, is a
     `suspend (RainWalletContact?) -> String` the SDK calls with the canonical contact of a code
-    request; it returns the `token` your backend minted with its Api-Key through
-    `POST /v1/issuing/embedded-wallets/auth-tokens`. `environment` is a
+    request, or with null for a passkey sign-up; it returns the `token` your backend minted
+    with its Api-Key through `POST /v1/issuing/embedded-wallets/auth-tokens`. `environment` is a
     `RainWalletEnvironment`: `Production` by default, which the `RainProvider` constructor refuses
     with `RAIN_102` until the release that turns it on, so pass `Sandbox`; or `Custom(apiBaseUrl)`,
     any https host that forwards to Rain's sandbox, such as your own proxy. `RainProvider(application)`
     with no config no longer compiles. In the managed `TurnkeyConfig` (internal API),
     `rainApiBaseUrl` and `authTokenProvider` follow `authProxyConfigId`, with the
     `managedRainApiBaseUrl` and `managedAuthTokenProvider` accessors beside `managedAuthProxyConfigId`.
-  - The token is the bearer of every call to Rain's endpoints: the code request and the confirm.
-    What else leaves the device is listed under *What leaves the device* in
+  - The token is the bearer of every call to Rain's endpoints: the code request, the confirm and
+    the passkey sign-up. What else leaves the device is listed under *What leaves the device* in
     [rain-wallet-android/README.md](rain-wallet-android/README.md).
   - A code login no longer revokes the user's sessions on other devices (a passkey login still
     does), so other devices stay signed in until their sessions lapse, and a failed switch to the
     new session after a code login keeps the previous session selected, where 5.0.0-beta.1 signed
     the device out.
+  - `signUpWithPasskey` opens the passkey sheet twice. A dismissal of the second sheet arrives as
+    `RAIN_401` with the account already created, so offer `loginWithPasskey` then.
   - New codes on the login methods: a token Rain refuses is fetched once more from
     `authTokenProvider` and then arrives as `RAIN_202`, which a refused tenant also carries; a 404
-    from any leg but the login, a 409 and a 429 arrive as `RAIN_501`; a code request or confirm
-    that cannot reach Rain, or whose `authTokenProvider` could not reach your backend, arrives as
-    `RAIN_301`, where 5.0.0-beta.1 answered `RAIN_501`; any other failure
+    from any leg but the login, a 409 and a 429 arrive as `RAIN_501`; a code request, confirm or
+    passkey sign-up that cannot reach Rain, or whose `authTokenProvider` could not reach
+    your backend, arrives as `RAIN_301`, where 5.0.0-beta.1 answered `RAIN_501`; any other failure
     of `authTokenProvider` is `RAIN_102`. The conditions per method are in the Rain wallet rows of
     [docs/METHODS.md](docs/METHODS.md#rain-wallet-provider).
   - Wallets are per tenant: a user known to another tenant signs up afresh in yours.

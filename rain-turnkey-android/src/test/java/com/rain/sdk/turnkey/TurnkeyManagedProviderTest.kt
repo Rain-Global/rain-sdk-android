@@ -356,7 +356,7 @@ class TurnkeyManagedProviderTest {
         assertThat(login).hasMessageThat().contains("managed mode")
         assertThat(signUp).hasMessageThat().contains("managed mode")
         assertThat(turnkey.passkeyLoginCalls).isEmpty()
-        assertThat(turnkey.passkeySignUpCalls).isEmpty()
+        assertThat(turnkey.createPasskeyCalls).isEmpty()
     }
 
     @Test
@@ -382,14 +382,22 @@ class TurnkeyManagedProviderTest {
         assertThat(loginProvider.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
 
         val signUp = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-        signUp.onPasskeySignUp = { signUp.authenticate() }
-        val signUpProvider = TurnkeyProvider(managedConfig(passkeyDomain = "passkeys.example.com"), contextOverride = signUp)
+        signUp.onPasskeyLogin = { signUp.authenticate() }
+        val rainApi = MockRainApiAuth()
+        rainApi.signupPasskey = { RainApiSignup("sub-passkey") }
+        val signUpProvider = TurnkeyProvider(
+            managedConfig(passkeyDomain = "passkeys.example.com"),
+            contextOverride = signUp,
+            rainApiOverride = rainApi,
+        )
 
         signUpProvider.signUpWithPasskey(activity)
 
-        val call = signUp.passkeySignUpCalls.single()
-        assertThat(call.passkeyName).startsWith("passkey-")
-        assertThat(call.signupWallet.name).isEqualTo("Wallet")
+        assertThat(signUp.createPasskeyCalls.single().name).startsWith("passkey-")
+        assertThat(signUp.createPasskeyCalls.single().rpId).isEqualTo("passkeys.example.com")
+        assertThat(rainApi.signupPasskeyCalls.single().token).isEqualTo("wat_1")
+        assertThat(tokenRequests).containsExactly(null)
+        assertThat(signUp.passkeyLoginCalls.single().organizationId).isEqualTo("sub-passkey")
         assertThat(signUp.awaitReadyCallCount).isAtLeast(1)
         // Same ids as the first provider: the one-shot configuration is not repeated.
         assertThat(initCalls).isEqualTo(1)
@@ -463,7 +471,7 @@ class TurnkeyManagedProviderTest {
         expectThrows<RainError.InvalidConfig> { provider.loginWithPasskey(activity) }
         expectThrows<RainError.InvalidConfig> { provider.signUpWithPasskey(activity) }
         assertThat(turnkey.passkeyLoginCalls).isEmpty()
-        assertThat(turnkey.passkeySignUpCalls).isEmpty()
+        assertThat(turnkey.createPasskeyCalls).isEmpty()
         assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
     }
 }

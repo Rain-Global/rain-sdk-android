@@ -46,10 +46,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Send a one-time login code to the user's email or phone, confirm it (a first login signs the
  * user up and creates one wallet holding an Ethereum and a Solana account on a single seed; a
  * returning login finds the account), then register the provider and resolve
- * `rain.provider(ProviderId.RAIN)`. Every call to Rain's endpoints (the code request and the
- * confirm) runs under a wallet auth token your backend mints with its Api-Key and hands the app
- * through [RainWalletConfig.authTokenProvider]; what leaves the device is listed in the module
- * README. Resolving before a session is live fails with
+ * `rain.provider(ProviderId.RAIN)`. Every call to Rain's endpoints (the code request, the confirm
+ * and the passkey sign-up) runs under a wallet auth token your backend mints with its Api-Key and
+ * hands the app through [RainWalletConfig.authTokenProvider]; what leaves the device is
+ * listed in the module README. Resolving before a session is live fails with
  * `RainError.TokenExpired` (`RAIN_201`). With [RainWalletConfig.passkeyDomain] set, a passkey is
  * the other first login: [signUpWithPasskey] creates the account, [loginWithPasskey] returns to
  * it, [addPasskey] gives a code-created account a passkey too, and [sendContactVerificationCode]
@@ -314,35 +314,39 @@ class RainProvider internal constructor(
     }
 
     /**
-     * Creates a new account with a passkey as its only login method, with one wallet holding an
-     * Ethereum and a Solana account created inside the same request, then signs it in as
-     * [loginWithPasskey] does. Every call mints a fresh account, so a returning user must use
-     * [loginWithPasskey] or a login code, or they end up with a second, empty wallet; accounts are
-     * never merged. Call [logout] first when [hasActiveSession] is true, because a live session
-     * stored as this device's current one is refused with `RainError.InvalidConfig`; one that has
-     * already expired is cleared first, with the `onSessionExpired` hook silent. If the sign-up
-     * request succeeded but the login that followed failed, the account exists and
-     * [loginWithPasskey] reaches it; if the sign-up request itself failed, no account exists and
-     * the passkey the sheet created signs into nothing. Both arrive as `RainError.ProviderError`.
+     * Creates a new account whose only login method is a passkey bound to
+     * [RainWalletConfig.passkeyDomain], with one wallet holding an Ethereum and a Solana account
+     * created inside the same request, then signs it in as [loginWithPasskey] does. Every call
+     * mints a fresh account, so a returning user must use [loginWithPasskey] or a login code, or
+     * they end up with a second, empty wallet; accounts are never merged. The sheet opens twice,
+     * once to create the passkey and once to sign the new account in; the token provider is called
+     * with no contact first. Call [logout] first when [hasActiveSession] is true, because a live
+     * session stored as this device's current one is refused with `RainError.InvalidConfig`; one
+     * that has already expired is cleared first, with the `onSessionExpired` hook silent. What a
+     * failure leaves behind depends on when it happened: before Rain's sign-up answered, no account
+     * exists; once it answered, the account exists and [loginWithPasskey] reaches it, a dismissed
+     * second sheet included; when its answer was lost or could not be read, the account may exist,
+     * so offer [loginWithPasskey] before calling this again. The `signUpWithPasskey` row under
+     * *Rain wallet provider* in `docs/METHODS.md` says which code says which.
      * [exportRecoveryPhrase] is the backup path for an account whose only login is a passkey;
      * [sendContactVerificationCode] adds an email or phone as a second one.
      *
      * @param activity The foreground Activity the sheet is presented from; see [loginWithPasskey]
      *   for its lifetime and what cancellation does.
-     * @throws RainError.InvalidConfig (`RAIN_102`) when [RainWalletConfig.passkeyDomain] is unset,
-     *   when the domain's association file does not vouch for this build, while a session, live or
-     *   dead, is still stored as this device's current one, on a wallet backend configuration
-     *   conflict for this launch, or when this provider was closed.
-     * @throws RainError.UserRejected (`RAIN_401`) when the sheet was dismissed.
-     * @throws RainError.ProviderError (`RAIN_501`) for an interrupted ceremony, a device without a
-     *   passkey provider, a sign-up the backend refused, or any other failure of the ceremony.
-     * @throws RainError.TokenExpired (`RAIN_201`) from the session switch after the sign-up
-     *   succeeded; the account exists and [loginWithPasskey] reaches it.
-     * @throws RainError.Unauthorized (`RAIN_202`) from the account backfill after the login itself
-     *   succeeded; the session is kept and heals at resolution.
+     * @throws RainError.InvalidConfig (`RAIN_102`) without a `passkeyDomain`, when the association
+     *   file does not vouch for this build, while a live session is stored, on a failed token
+     *   provider, a configuration conflict or a closed provider.
+     * @throws RainError.UserRejected (`RAIN_401`) when either sheet was dismissed.
+     * @throws RainError.Unauthorized (`RAIN_202`) when Rain refuses the token or the tenant, or from
+     *   the account backfill.
+     * @throws RainError.NetworkError (`RAIN_301`) when Rain, or your backend behind the token
+     *   provider, cannot be reached.
+     * @throws RainError.ProviderError (`RAIN_501`) for a ceremony, sign-up or login the device or
+     *   Rain refused.
+     * @throws RainError.TokenExpired (`RAIN_201`) from the session switch after the sign-up succeeded.
      * @throws RainError.InternalError (`RAIN_502`) when the backend's initialization failed for
-     *   this launch (relaunch the app), or when the backend answered the ceremony with an unusable
-     *   response; retry the call.
+     *   this launch, or when an answer could not be read.
+     * @see loginWithPasskey
      */
     suspend fun signUpWithPasskey(activity: Activity) {
         backing.signUpWithPasskey(activity)

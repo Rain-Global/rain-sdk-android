@@ -5,8 +5,6 @@ import com.turnkey.core.TurnkeyContext
 import com.turnkey.core.internal.utils.ClientSignature
 import com.turnkey.core.models.AuthState
 import com.turnkey.core.models.ClientSignaturePayload
-import com.turnkey.core.models.CreateSubOrgParams
-import com.turnkey.core.models.CustomWallet
 import com.turnkey.core.models.OtpType
 import com.turnkey.core.models.Session
 import com.turnkey.core.models.Wallet
@@ -261,22 +259,6 @@ internal interface TurnkeyContextProtocol {
     suspend fun completePasskeyLogin(activity: Activity, sessionKey: String, organizationId: String?)
 
     /**
-     * Creates a new organization whose root user holds a passkey bound to the relying-party domain
-     * of the one-shot configuration, named
-     * [passkeyName], with [signupWallet] created inside the same request, then logs in and stores
-     * the session under [sessionKey]. The vendor swaps its process-wide client for a temporary-key
-     * client for the whole call and restores it only by selecting the new session, which it does
-     * only when none is selected: never run this while a session is selected. Same key cleanup as
-     * [completePasskeyLogin].
-     */
-    suspend fun completePasskeySignUp(
-        activity: Activity,
-        sessionKey: String,
-        passkeyName: String,
-        signupWallet: TurnkeyWalletSpec,
-    )
-
-    /**
      * Runs the passkey creation ceremony for [rpId] on [activity], naming the passkey [name] in the
      * credential provider. The domain is explicit here because the vendor's ceremony takes it as a
      * parameter with no configured default; callers pass the one-shot configuration's value. Touches
@@ -522,26 +504,6 @@ internal class TurnkeyContextAdapter(
         }
     }
 
-    override suspend fun completePasskeySignUp(
-        activity: Activity,
-        sessionKey: String,
-        passkeyName: String,
-        signupWallet: TurnkeyWalletSpec,
-    ) {
-        withContext(ioDispatcher) {
-            context.signUpWithPasskey(
-                activity = activity,
-                sessionKey = sessionKey,
-                passkeyDisplayName = passkeyName,
-                // The vendor replaces the authenticators and API keys of these params with the
-                // passkey and its temporary key and keeps the wallet. The relying party comes from
-                // the one-shot configuration's authConfig.
-                createSubOrgParams = signupWallet.toSignupParams(),
-                invalidateExisting = true,
-            )
-        }
-    }
-
     override suspend fun createPasskeyCredential(activity: Activity, rpId: String, name: String): PasskeyRegistration =
         withContext(ioDispatcher) {
             val result = createPasskey(
@@ -688,15 +650,6 @@ internal class TurnkeyContextAdapter(
     } catch (e: Exception) {
         throw TurnkeyExportFailures.rethrowable(e)
     }
-
-    /**
-     * The sign-up request's wallet, created inside the signup request itself so a new organization
-     * never exists without it. `CustomWallet` carries no mnemonic length, so the seed gets the
-     * vendor's default of 12 words, the length the createWallet fallback pins.
-     */
-    private fun TurnkeyWalletSpec.toSignupParams(): CreateSubOrgParams = CreateSubOrgParams(
-        customWallet = CustomWallet(walletName = name, walletAccounts = accounts.toVendorParams()),
-    )
 
     private fun List<TurnkeyAccountSpec>.toVendorParams(): List<V1WalletAccountParams> = map {
         V1WalletAccountParams(

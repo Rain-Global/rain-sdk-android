@@ -61,8 +61,9 @@ val client = rain.provider(ProviderId.RAIN)
 ```
 
 `RainWalletConfig` carries `authTokenProvider`, required: the SDK calls it with the canonical
-contact of a code request (an email trimmed and lowercased, a phone number in E.164), and it
-returns the `token` your backend minted for that contact with an Api-Key holding `embeddedWallets:write` (`POST /v1/issuing/embedded-wallets/auth-tokens`).
+contact of a code request (an email trimmed and lowercased, a phone number in E.164), or with null
+for a passkey sign-up, and it returns the `token` your backend minted for that contact
+with an Api-Key holding `embeddedWallets:write` (`POST /v1/issuing/embedded-wallets/auth-tokens`).
 Keep the Api-Key off the device, and have the mint endpoint authenticate the app user and throttle
 before minting: Rain limits by IP only, and a code is SMS spend. It also carries `environment`
 (`RainWalletEnvironment.Production` by default, which the constructor refuses with `RAIN_102` until
@@ -93,11 +94,12 @@ carries the app statement alone; the sample's file at `passkeys.uptop.xyz` is a 
 because every passkey created against it stops working when it changes, and a passkey made for one
 domain does not work in an app on another. Partners host
 their own file; Rain runs no shared domain. Every call to `signUpWithPasskey` creates a new account,
-so returning users sign in or add a passkey, and accounts are never merged. A passkey-only account
-is meant to get an email or phone as a second login through `sendContactVerificationCode(contact)`
-and `confirmContactVerification(code)`, which attach the verified contact to this account and never
-move wallets (what an attach refuses and what it replaces today is in the
-`confirmContactVerification` row of
+so returning users sign in or add a passkey, and accounts are never merged; the sheet opens twice on
+a sign-up, once for the passkey and once for the login on the new account, and `authTokenProvider`
+is called with no contact first. A passkey-only account is meant to get an email or phone as a
+second login through `sendContactVerificationCode(contact)` and `confirmContactVerification(code)`,
+which attach the verified contact to this account and never move wallets (what an attach refuses
+and what it replaces today is in the `confirmContactVerification` row of
 [docs/METHODS.md](../docs/METHODS.md#rain-wallet-provider) and in the known issues above);
 `exportRecoveryPhrase()` is its backup path either way.
 
@@ -118,11 +120,13 @@ Notes:
   device signs. The email address or phone number passed to `sendContactVerificationCode` is sent
   to the wallet backend to deliver the code; on confirm of an attach, the verified contact and its
   verification token go to the backend's account lookup, which names the account the contact signs
-  in to, and then to its user update. On a passkey sign-up the passkey's attestation, the passkey
-  name `passkey-<unix seconds>` and a temporary session key go to the wallet backend; on a passkey
-  sign-in the passkey's assertion; on `addPasskey` a new passkey's attestation. The session stays
-  on the device in storage the backend SDK owns; wallet keys live in the wallet backend and reach
-  the device only through the export methods. This module sends nothing else.
+  in to, and then to its user update. On a passkey sign-up the passkey's attestation goes to
+  Rain's passkey sign-up, then the passkey's assertion to the wallet backend for the login; the
+  passkey's name, `passkey-<unix seconds>`, goes to the device's credential provider, and Rain names
+  the authenticator it registers itself. On a passkey sign-in the passkey's assertion; on
+  `addPasskey` a new passkey's attestation and that name. The session stays on the device in storage
+  the backend SDK owns; wallet keys live in the wallet backend and reach the device only through
+  the export methods. This module sends nothing else.
 - A code login leaves the user's sessions on other devices alone, so a code login on a new phone
   leaves a lost one signed in until its session lapses; a passkey login revokes them, so the
   signed-out device's `onSessionExpired` fires at its next call.

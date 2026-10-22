@@ -455,26 +455,14 @@ internal class MockTurnkey(
 
     data class PasskeyLoginCall(val sessionKey: String, val organizationId: String?)
 
-    data class PasskeySignUpCall(
-        val sessionKey: String,
-        val passkeyName: String,
-        val signupWallet: TurnkeyWalletSpec,
-    )
-
     val passkeyLoginCalls = mutableListOf<PasskeyLoginCall>()
     var passkeyLoginError: Exception? = null
 
     /** Runs after a recorded [completePasskeyLogin] with the new session key — install the session here. */
     var onPasskeyLogin: (suspend (sessionKey: String) -> Unit)? = null
 
-    val passkeySignUpCalls = mutableListOf<PasskeySignUpCall>()
-    var passkeySignUpError: Exception? = null
-
-    /** Runs after a recorded [completePasskeySignUp] with the new session key — install the session here. */
-    var onPasskeySignUp: (suspend (sessionKey: String) -> Unit)? = null
-
     /**
-     * When true, a failing passkey ceremony stores (and, with nothing selected, selects) its session
+     * When true, a failing passkey login stores (and, with nothing selected, selects) its session
      * *before* throwing — the vendor's shape when its key cleanup fails after `createSession`, or when
      * the caller's cancellation lands after the store.
      */
@@ -622,16 +610,6 @@ internal class MockTurnkey(
     override suspend fun completePasskeyLogin(activity: android.app.Activity, sessionKey: String, organizationId: String?) {
         passkeyLoginCalls += PasskeyLoginCall(sessionKey, organizationId)
         storeLikeVendor(sessionKey, passkeyLoginError, passkeyStoresBeforeThrowing, onPasskeyLogin)
-    }
-
-    override suspend fun completePasskeySignUp(
-        activity: android.app.Activity,
-        sessionKey: String,
-        passkeyName: String,
-        signupWallet: TurnkeyWalletSpec,
-    ) {
-        passkeySignUpCalls += PasskeySignUpCall(sessionKey, passkeyName, signupWallet)
-        storeLikeVendor(sessionKey, passkeySignUpError, passkeyStoresBeforeThrowing, onPasskeySignUp)
     }
 
     /** Runs inside the add-passkey ceremony, after the call is recorded; a gate here holds the sheet open. */

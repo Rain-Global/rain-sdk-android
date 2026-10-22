@@ -32,9 +32,8 @@ internal const val TURNKEY_PROVIDER_CLOSED_MESSAGE = "This provider was closed; 
  *   authenticated [TurnkeyContext] singleton here. The SDK never touches authentication.
  * - **Managed** — `TurnkeyConfig(application, organizationId, authProxyConfigId, rainApiBaseUrl, authTokenProvider)`:
  *   the SDK owns authentication (a one-time code by email or SMS through Rain's embedded-wallet
- *   endpoints under a wallet auth token the host's backend mints, or a passkey; a passkey sign-up
- *   and a contact attach through Turnkey's auth proxy; Ethereum and Solana accounts provisioned on
- *   first login).
+ *   endpoints under a wallet auth token the host's backend mints, or a passkey; a contact attach
+ *   through Turnkey's auth proxy; Ethereum and Solana accounts provisioned on first login).
  *   Internal API, marked
  *   [InternalRainTurnkeyApi]: the building block of the Rain wallet provider (`RainProvider` in `rain-wallet-android`), not a host-facing mode.
  *
@@ -84,11 +83,11 @@ class TurnkeyConfig internal constructor(
     internal class ManagedIds(
         val application: Application,
         val organizationId: String,
-        /** The auth-proxy configuration the passkey sign-up and the contact attach run through; the vendor is initialized with it. */
+        /** The auth-proxy configuration the contact attach runs through; the vendor is initialized with it. */
         val authProxyConfigId: String,
         /** Rain's API host for the device half of the embedded-wallet auth; https, validated at construction. */
         val rainApiBaseUrl: HttpUrl,
-        /** The host's wallet auth token for a contact, the canonical contact of a code flow. */
+        /** The host's wallet auth token for a contact, or for no contact on a passkey sign-up. */
         val authTokenProvider: suspend (LoginContact?) -> String,
         /** The passkey relying-party domain, normalized; null when passkeys are off. */
         val passkeyDomain: String?,
@@ -158,12 +157,12 @@ class TurnkeyConfig internal constructor(
      * @param application The host application; Turnkey's Kotlin SDK needs it for secure storage.
      * @param organizationId Your Turnkey parent organization id.
      * @param authProxyConfigId The auth-proxy configuration id from the Turnkey dashboard; the
-     *   passkey sign-up and the contact attach run through that proxy.
+     *   contact attach runs through that proxy.
      * @param rainApiBaseUrl The Rain API host the authentication runs against, an absolute https
      *   URL such as `https://api-dev.rain.xyz` naming a host and nothing more; validated at construction.
-     * @param authTokenProvider The wallet auth token the host's backend mints for the contact given,
-     *   the canonical contact of a code flow. It runs under the provider's authentication lock, so
-     *   it must not call back into the provider, and it should
+     * @param authTokenProvider The wallet auth token the host's backend mints for the contact given:
+     *   the canonical contact of a code flow, or null for a passkey sign-up. It runs under the
+     *   provider's authentication lock, so it must not call back into the provider, and it should
      *   carry its own timeout. The rules are the Rain wallet's (`RainWalletConfig.authTokenProvider`
      *   in docs/METHODS.md), the retry per refused leg and how a failure surfaces included.
      * @param walletAddress Optional EVM address override, validated and stored in EIP-55 checksum form; null or blank means no override.
@@ -555,23 +554,21 @@ class TurnkeyProvider internal constructor(
     /**
      * Creates a new account with a passkey as its only login method and one wallet holding an
      * Ethereum and a Solana account inside the same request, then signs it in as
-     * [loginWithPasskey] does. Every call mints a fresh account, so a returning user signs in with
-     * [loginWithPasskey] or a login code, or ends up with a second, empty wallet; accounts are
-     * never merged. Refused with `RainError.InvalidConfig` while a live session is stored as this
-     * device's current one, so call [logout] first when [hasActiveSession] is true: the vendor
-     * swaps its process-wide client for the whole ceremony and a wallet call made meanwhile would
-     * read the live session as dead. A stored session that has already expired is cleared first,
-     * with the `onSessionExpired` hook silent, and the sign-up proceeds. If the sign-up request
-     * succeeded but the login that followed failed, the account exists and [loginWithPasskey]
-     * reaches it; if the sign-up request itself failed, no account exists and the passkey the sheet
-     * created signs into nothing. Both arrive as `RainError.ProviderError`.
-     * Throws `RainError.InvalidConfig` when no `passkeyDomain` is configured or the association
-     * file does not vouch for this build, `RainError.UserRejected` when the sheet was dismissed,
-     * `RainError.ProviderError` for a ceremony or sign-up the device or the backend refused for
-     * another reason, and `RainError.InternalError` for an unusable backend response inside the
-     * ceremony. The session switch and the backfill run after the ceremony, so a sign-up that
-     * succeeded can still end in `RainError.TokenExpired` or `RainError.Unauthorized`. Managed mode
-     * only.
+     * [loginWithPasskey] does: `authTokenProvider` is called with no contact, the passkey ceremony
+     * runs, Rain's sign-up creates the account, and a second passkey prompt signs it in. Every call
+     * mints a fresh account, so a returning user signs in with [loginWithPasskey] or a login code, or
+     * ends up with a second, empty wallet; accounts are never merged. Refused with
+     * `RainError.InvalidConfig` while a live session is stored as this device's current one, so
+     * call [logout] first when [hasActiveSession] is true: one account is signed in at a time. A
+     * stored session that has already expired is cleared first, with the `onSessionExpired` hook
+     * silent, and the sign-up proceeds. What a failure leaves behind depends on when it happened:
+     * before Rain's sign-up answered, no account exists; once it answered, the account exists and
+     * [loginWithPasskey] reaches it; when its answer was lost or could not be read, the account may
+     * exist, so the host offers [loginWithPasskey] before another sign-up. Throws
+     * `RainError.InvalidConfig`, `RainError.UserRejected`, `RainError.Unauthorized`,
+     * `RainError.NetworkError`, `RainError.ProviderError`, `RainError.InternalError` or, after the
+     * ceremony, `RainError.TokenExpired`; the `signUpWithPasskey` row under *Members* in
+     * `docs/TURNKEY_SUPPORT.md` says which condition maps to which. Managed mode only.
      *
      * @param activity As for [loginWithPasskey].
      */

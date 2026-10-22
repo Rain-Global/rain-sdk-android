@@ -31,9 +31,10 @@ internal object TurnkeyPasskeys {
     }
 
     /**
-     * The name a passkey is registered under: `passkey-<unix seconds>`, a cross-platform contract
-     * shared by Rain's SDKs. Explicit because the vendor's own default uses milliseconds, and no
-     * character in it needs escaping in the vendor's request JSON.
+     * The name the device's credential provider shows for a passkey, and the name `addPasskey`
+     * registers one under: `passkey-<unix seconds>`, a cross-platform contract shared by Rain's SDKs
+     * (Rain names the authenticator a sign-up registers itself). Explicit because the vendor's own
+     * default uses milliseconds, and no character in it needs escaping in the vendor's request JSON.
      */
     fun authenticatorName(epochSeconds: Double): String = "passkey-${epochSeconds.toLong()}"
 

@@ -42,8 +42,8 @@ import kotlin.concurrent.withLock as withJavaLock
  * the same ids and passkey domain is a no-op; with different ones, or over a foreign
  * configuration, it is an error the provider surfaces on every auth call (the app has to
  * relaunch to change them). The passkey domain is part of the configuration because the vendor
- * reads the relying party for its passkey login and sign-up from there, the cross-platform
- * contract shared by Rain's SDKs; the add-passkey ceremony takes it explicitly.
+ * reads the relying party for its passkey login from there, the cross-platform contract shared
+ * by Rain's SDKs; the add-passkey ceremony takes it explicitly.
  *
  * Known limit: the foreign-configuration probe reads a field the vendor assigns asynchronously,
  * so a host `TurnkeyContext.init` still in flight from `Application.onCreate` can slip past it.
@@ -201,8 +201,8 @@ constructor(
     private val context: TurnkeyContextProtocol,
     private val rainApi: RainApiAuthClientProtocol,
     /**
-     * The host's wallet auth token for a contact, the canonical contact of the flow. See
-     * [authToken] for the contract.
+     * The host's wallet auth token for a contact: the canonical contact of the flow, or null for a
+     * passkey sign-up, whose token binds no contact. See [authToken] for the contract.
      */
     private val authTokenProvider: suspend (LoginContact?) -> String,
     private val coordinator: TurnkeySessionCoordinator,
@@ -368,34 +368,35 @@ constructor(
     }
 
     /**
-     * Creates a new account whose only login method is a passkey bound to the configured domain,
-     * with [MANAGED_WALLET] created inside the same request, then signs it in as [loginWithPasskey]
-     * does. Every call mints a fresh account; returning users sign in or add a passkey instead.
+     * Creates a new account whose only login method is a passkey bound to the configured domain:
+     * a contact-less wallet auth token from the host, the passkey ceremony on the device, then
+     * `POST /signup/passkey` with the challenge and attestation, which creates the account with
+     * [MANAGED_WALLET]; then the vendor's passkey login on the sub-organization Rain answered with,
+     * a second passkey prompt, since Rain's sign-up issues no session yet; then the session steps
+     * [loginWithPasskey] runs. Every call mints a fresh account; returning users sign in or add a
+     * passkey instead.
      *
-     * Refused with [RainError.InvalidConfig] while a live session is selected on this device: the
-     * vendor swaps its process-wide client for a temporary-key client for the whole ceremony and
-     * restores it only by selecting the new session, which it does only when none is selected, so
-     * a wallet call made while the sheet is open would stamp with a key registered on nobody's
-     * organization and read the live session as dead. A selected session that is already dead
-     * carries no such risk and is cleared first, the way [logout] clears one, with the host's
-     * re-auth hook silent; the ceremony then runs and the vendor selects what it creates, and a
-     * ceremony that fails leaves the device signed out, as a logout would. Waiting out a restore in
-     * flight first keeps a session that is still loading from being read as "nothing selected"; one
-     * still loading after the bounded wait is refused like a live one. A failure after the
-     * account exists (the login or the session store) leaves an account the passkey can still sign
-     * into.
+     * Refused with [RainError.InvalidConfig] while a live session is selected on this device: one
+     * account is signed in at a time, and the sample offers the sign-up only while signed out. A
+     * selected session that is already dead carries no such risk and is cleared first, the way
+     * [logout] clears one, with the host's re-auth hook silent; a ceremony that then fails leaves
+     * the device signed out, as a logout would. Waiting out a restore in flight first keeps a
+     * session that is still loading from being read as "nothing selected"; one still loading after
+     * the bounded wait is refused like a live one. A failure after `POST /signup/passkey` answered
+     * (the login prompt, the session store) leaves an account the passkey can still sign into.
      */
     suspend fun signUpWithPasskey(activity: Activity) {
         flowMutex.withLock {
-            requirePasskeysConfigured()
+            val rpId = requirePasskeysConfigured()
             prepare()
             awaitRestoreSettled(TurnkeySessionCoordinator.AUTH_RESTORE_TIMEOUT_MS)
             clearDeadSessionOrRefuse()
+            val token = AuthToken(contact = null, value = authToken(null))
             val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
             val passkeyName = TurnkeyPasskeys.authenticatorName(nowEpochSeconds())
-            ceremony(sessionKey) {
-                context.completePasskeySignUp(activity, sessionKey, passkeyName, MANAGED_WALLET)
-            }
+            val registration = guarded { context.createPasskeyCredential(activity, rpId, passkeyName) }
+            val signup = rainLeg(token) { rainApi.signupPasskey(it, registration.challenge, registration.toRainApi()) }
+            ceremony(sessionKey) { context.completePasskeyLogin(activity, sessionKey, organizationId = signup.subOrganizationId) }
             switchToSession(sessionKey, previousKey = null, previousRevoked = true)
             ensureAccountsLocked()
         }
@@ -619,9 +620,9 @@ constructor(
         checkNotNull(rainLegOrNull(token, consume = { false }, call)) { "a leg that consumes no refusal answered null" }
 
     /**
-     * A wallet auth token from the host for [contact], the canonical contact of the flow; the class
-     * KDoc says what the token binds and carries. A [RainError] from the host passes through as it
-     * is, and so does this coroutine's own cancellation. Any
+     * A wallet auth token from the host for [contact]: the canonical contact of the flow, or null
+     * for a passkey sign-up; the class KDoc says what the token binds and carries. A [RainError]
+     * from the host passes through as it is, and so does this coroutine's own cancellation. Any
      * other throwable, a cancellation the host raised while this coroutine is still active included
      * (its own `withTimeout`, a `Deferred` in a scope of its own), surfaces as
      * [RainError.NetworkError] when an `IOException` is in its cause chain and as
@@ -690,6 +691,14 @@ constructor(
         }
     }
 
+    /** The ceremony's attestation in the shape `POST /signup/passkey` validates: the four fields, the vendor's transport names. */
+    private fun PasskeyRegistration.toRainApi(): RainApiPasskeyAttestation = RainApiPasskeyAttestation(
+        credentialId = attestation.credentialId,
+        clientDataJson = attestation.clientDataJson,
+        attestationObject = attestation.attestationObject,
+        transports = attestation.transports.map { it.name },
+    )
+
     private fun OtpChannel.contactOf(canonical: String): LoginContact = when (this) {
         OtpChannel.EMAIL -> LoginContact.Email(canonical)
         OtpChannel.SMS -> LoginContact.Phone(canonical)
@@ -707,21 +716,21 @@ constructor(
 
     /**
      * The relying-party domain, or [RainError.InvalidConfig] before the vendor is touched. The
-     * vendor holds the same value from the one-shot configuration for its login and sign-up; the
-     * add-passkey ceremony is handed it explicitly.
+     * vendor holds the same value from the one-shot configuration for its passkey login; the
+     * add-passkey ceremony and the passkey sign-up's ceremony are handed it explicitly.
      */
     private fun requirePasskeysConfigured(): String =
         passkeyDomain ?: throw RainError.InvalidConfig(TurnkeyPasskeys.NOT_CONFIGURED_MESSAGE)
 
     /**
      * Makes room for a passkey sign-up. A selected session that is live, or still restoring after
-     * the bounded wait, refuses the call, because the vendor's client swap during the ceremony would
-     * break wallet calls made against it. A selected session that is dead is cleared the way
-     * [logout] clears one, host hook silent, so the ceremony can run and the vendor selects what it
-     * creates; the sample offers the sign-up button in exactly that state, and refusing would tell
-     * the user to log out of an account the screen says they are not in. The pending contact
-     * verification goes with the dead session, since it named that account; a pending login code
-     * binds no device key and survives, as it does across a login.
+     * the bounded wait, refuses the call: one account is signed in at a time, the rule the sample
+     * and the docs state. A selected session that is dead is cleared the way [logout] clears one,
+     * host hook silent, so the ceremony can run and the vendor selects what it creates; the sample
+     * offers the sign-up button in exactly that state, and refusing would tell the user to log out
+     * of an account the screen says they are not in. The pending contact verification goes with
+     * the dead session, since it named that account; a pending login code binds no device key and
+     * survives, as it does across a login.
      */
     private suspend fun clearDeadSessionOrRefuse() {
         if (context.selectedSessionKey == null) return
@@ -855,7 +864,7 @@ constructor(
 
     /**
      * Ensures the authenticated organization holds an Ethereum (secp256k1) and a Solana (ed25519)
-     * account. Idempotent. A sign-up already gets both inside the signup request ([MANAGED_WALLET]);
+     * account. Idempotent. A sign-up already gets both inside Rain's sign-up ([MANAGED_WALLET]);
      * this backfills organizations that predate that or were created outside the flow. Missing
      * accounts are added to the wallet Rain resolves; only an organization with no wallet at all
      * gets a new one — so the user has a single mnemonic to back up either way. Also run at
@@ -1150,12 +1159,11 @@ constructor(
         )
 
         /**
-         * The wallet every managed sign-up gets: one seed carrying both accounts. A passkey sign-up
-         * creates it inside the vendor's signup request; Rain's code sign-up creates it inside the
-         * sign-up itself, from a spec of its own that equals this one; and [ensureAccounts]
-         * completes an older organization to the same shape. Name, mnemonic length (Turnkey's
-         * default of 12) and derivation paths are a cross-platform contract shared by Rain's SDKs
-         * and rain-api — change it everywhere or nowhere.
+         * The wallet every managed sign-up gets: one seed carrying both accounts. Rain's sign-up
+         * endpoints create it inside the sign-up itself, from a spec of their own that equals this
+         * one, and [ensureAccounts] completes an older organization to the same shape. Name,
+         * mnemonic length (Turnkey's default of 12) and derivation paths are a cross-platform
+         * contract shared by Rain's SDKs and rain-api — change it everywhere or nowhere.
          */
         val MANAGED_WALLET = TurnkeyWalletSpec(MANAGED_WALLET_NAME, listOf(ETHEREUM_ACCOUNT, SOLANA_ACCOUNT))
     }
