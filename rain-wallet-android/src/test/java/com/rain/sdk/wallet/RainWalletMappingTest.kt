@@ -2,12 +2,15 @@ package com.rain.sdk.wallet
 
 import android.app.Application
 import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
 import com.rain.sdk.error.RainError
+import com.rain.sdk.error.RainErrorCode
 import com.rain.sdk.turnkey.LoginContact
 import com.rain.sdk.turnkey.TurnkeyAuthState
 import com.rain.sdk.turnkey.TurnkeySessionPolicy
 import com.rain.sdk.turnkey.TurnkeySessionState
 import io.mockk.mockk
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -123,14 +126,16 @@ class RainWalletMappingTest {
     }
 
     @Test
-    fun `the config prints every field and the hook as set or null`() {
-        assertThat(RainWalletConfig().toString()).isEqualTo(
-            "RainWalletConfig(sessionPolicy=${RainWalletSessionPolicy()}, " +
+    fun `the config prints every field, the functions as set or null, and the environment by name`() {
+        assertThat(config().toString()).isEqualTo(
+            "RainWalletConfig(authTokenProvider=set, environment=Sandbox, sessionPolicy=${RainWalletSessionPolicy()}, " +
                 "onSessionExpired=null, sponsorGas=true, passkeyDomain=null)"
         )
-        assertThat(RainWalletConfig(onSessionExpired = {}).toString()).contains("onSessionExpired=set")
-        assertThat(RainWalletConfig(passkeyDomain = "passkeys.example.com").toString())
+        assertThat(config(onSessionExpired = {}).toString()).contains("onSessionExpired=set")
+        assertThat(config(passkeyDomain = "passkeys.example.com").toString())
             .endsWith("passkeyDomain=passkeys.example.com)")
+        assertThat(config(environment = RainWalletEnvironment.Custom("https://staging.example.com")).toString())
+            .contains("environment=Custom(apiBaseUrl=https://staging.example.com)")
     }
 
     @Test
@@ -138,9 +143,9 @@ class RainWalletMappingTest {
         useRealBacking()
         val application = mockk<Application>()
 
-        assertThat(RainWalletConfig().toBacking(application).managedPasskeyDomain).isNull()
-        assertThat(RainWalletConfig(passkeyDomain = "   ").toBacking(application).managedPasskeyDomain).isNull()
-        assertThat(RainWalletConfig(passkeyDomain = " passkeys.example.com ").toBacking(application).managedPasskeyDomain)
+        assertThat(config().toBacking(application).managedPasskeyDomain).isNull()
+        assertThat(config(passkeyDomain = "   ").toBacking(application).managedPasskeyDomain).isNull()
+        assertThat(config(passkeyDomain = " passkeys.example.com ").toBacking(application).managedPasskeyDomain)
             .isEqualTo("passkeys.example.com")
     }
 
@@ -151,11 +156,99 @@ class RainWalletMappingTest {
 
         for (malformed in listOf("https://passkeys.example.com", "passkeys.example.com:443", "passkeys.example.com/app")) {
             val thrown = assertThrows(RainError.InvalidConfig::class.java) {
-                RainProvider(application, RainWalletConfig(passkeyDomain = malformed))
+                RainProvider(application, config(passkeyDomain = malformed))
             }
             assertThat(thrown.message).contains("two labels")
         }
     }
+
+    @Test
+    fun `the environment picks the backend row the backing is built with, and Production, the default, is refused at construction`() {
+        useRealBacking()
+        val application = mockk<Application>()
+
+        val sandbox = config().toBacking(application)
+        assertThat(sandbox.managedOrganizationId).isEqualTo(RainWalletBackend.ORGANIZATION_ID)
+        assertThat(sandbox.managedRainApiBaseUrl).isEqualTo("https://api-dev.rain.xyz")
+
+        // Production is the default and is refused where a host would feel it: at construction, before any login.
+        assertThat(RainWalletConfig(authTokenProvider = { "wat" }).environment).isEqualTo(RainWalletEnvironment.Production)
+        val defaulted = assertThrows(RainError.InvalidConfig::class.java) {
+            RainProvider(application, RainWalletConfig(authTokenProvider = { "wat" }))
+        }
+        assertThat(defaulted.errorCode).isEqualTo(RainErrorCode.INVALID_CONFIG)
+        assertThat(defaulted).hasMessageThat().contains("Production")
+        assertThat(defaulted).hasMessageThat().contains("Sandbox")
+        val production = assertThrows(RainError.InvalidConfig::class.java) {
+            RainProvider(application, config(environment = RainWalletEnvironment.Production))
+        }
+        assertThat(production).hasMessageThat().contains("Production")
+        val disguised = assertThrows(RainError.InvalidConfig::class.java) {
+            RainProvider(application, config(environment = RainWalletEnvironment.Custom("https://api.rain.xyz")))
+        }
+        assertThat(disguised).hasMessageThat().contains("Production")
+
+        val custom = config(environment = RainWalletEnvironment.Custom("https://staging.example.com/")).toBacking(application)
+        assertThat(custom.managedOrganizationId).isEqualTo(RainWalletBackend.ORGANIZATION_ID)
+        assertThat(custom.managedRainApiBaseUrl).isEqualTo("https://staging.example.com")
+    }
+
+    @Test
+    fun `a custom URL that is not https, or names more than a host, is refused when the provider is built`() {
+        useRealBacking()
+        val application = mockk<Application>()
+
+        val refused = listOf(
+            "http://staging.example.com",
+            "staging.example.com",
+            "",
+            "http://localhost:8080",
+            "https://staging.example.com/v1",
+            "https://staging.example.com/?env=1",
+            "https://staging.example.com/#rain",
+            "https://user:secret@staging.example.com",
+        )
+        for (bad in refused) {
+            val thrown = assertThrows(RainError.InvalidConfig::class.java) {
+                RainProvider(application, config(environment = RainWalletEnvironment.Custom(bad)))
+            }
+            assertWithMessage(bad).that(thrown.message).contains("rainApiBaseUrl")
+        }
+    }
+
+    @Test
+    fun `the backing's token supplier hands the host the contact in the wallet's own terms, null included`() {
+        useRealBacking()
+        val asked = mutableListOf<RainWalletContact?>()
+        val backing = config(authTokenProvider = { contact ->
+            asked += contact
+            "wat_${asked.size}"
+        }).toBacking(mockk<Application>())
+        val supplier = checkNotNull(backing.managedAuthTokenProvider)
+
+        val first = runBlocking { supplier(LoginContact.Email("user@example.com")) }
+        val second = runBlocking { supplier(LoginContact.Phone("+13214567890")) }
+        val third = runBlocking { supplier(null) }
+
+        assertThat(listOf(first, second, third)).containsExactly("wat_1", "wat_2", "wat_3").inOrder()
+        assertThat(asked).containsExactly(
+            RainWalletContact.Email("user@example.com"),
+            RainWalletContact.Phone("+13214567890"),
+            null,
+        ).inOrder()
+    }
+
+    private fun config(
+        authTokenProvider: suspend (RainWalletContact?) -> String = { "wat" },
+        environment: RainWalletEnvironment = RainWalletEnvironment.Sandbox,
+        onSessionExpired: (() -> Unit)? = null,
+        passkeyDomain: String? = null,
+    ) = RainWalletConfig(
+        authTokenProvider = authTokenProvider,
+        environment = environment,
+        onSessionExpired = onSessionExpired,
+        passkeyDomain = passkeyDomain,
+    )
 
     private fun useRealBacking() = realBacking.useRealBacking()
 }

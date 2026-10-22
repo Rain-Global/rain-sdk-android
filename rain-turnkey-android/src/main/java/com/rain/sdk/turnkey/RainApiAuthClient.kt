@@ -5,6 +5,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -125,10 +126,7 @@ internal class RainApiAuthFailure(
          */
         Forbidden,
 
-        /**
-         * rain-api's own 404: no wallet for this contact in this tenant. On the login leg the
-         * controller signs up.
-         */
+        /** rain-api's own 404: no wallet for this contact in this tenant. On a code login the controller signs up. */
         NoWallet,
 
         /**
@@ -176,9 +174,7 @@ internal class RainApiAuthClient(
 ) : RainApiAuthClientProtocol {
 
     init {
-        if (!baseUrl.isHttps && !baseUrl.isLoopback()) {
-            throw RainError.InvalidConfig("Rain API base URL must be https, the wallet auth token travels in a header: $baseUrl")
-        }
+        if (!baseUrl.isHttps && !baseUrl.isLoopback()) throw RainError.InvalidConfig(notHttpsMessage(baseUrl.toString()))
     }
 
     /** `POST /otp/init`: a code to the token's contact. No body; the token says where. */
@@ -360,6 +356,48 @@ internal class RainApiAuthClient(
             .build()
     }
 }
+
+/**
+ * [raw] as the Rain API base URL a managed configuration carries: trimmed, parsed by the client's own
+ * parser, https, and nothing but a host and a port (a path other than `/`, a query, a fragment or
+ * userinfo is refused, because the client appends its routes to whatever it is given), or
+ * [RainError.InvalidConfig] (`RAIN_102`) naming the rule. Validated at construction so a typo fails
+ * there and not as a network error on the first login. The loopback exemption the client itself
+ * keeps for its mock-server tests does not apply here: a configuration names a real host.
+ */
+internal fun rainApiBaseUrlOrThrow(raw: String): HttpUrl {
+    val trimmed = raw.trim()
+    val url = trimmed.toHttpUrlOrNull()
+    val refusal = when {
+        url == null -> "rainApiBaseUrl must be an absolute https URL such as https://api-dev.rain.xyz; got '$trimmed'"
+        !url.isHttps -> notHttpsMessage(trimmed)
+        !url.namesHostOnly() ->
+            "rainApiBaseUrl must name a host and nothing more, no path, query, fragment or userinfo, " +
+                "because the SDK appends its routes to it; got '$trimmed'"
+        else -> null
+    }
+    if (refusal != null) throw RainError.InvalidConfig(refusal)
+    return checkNotNull(url)
+}
+
+/** A path of `/`, no query, no fragment and no userinfo: the client appends its routes to the URL as given. */
+private fun HttpUrl.namesHostOnly(): Boolean {
+    val bare = encodedPath == "/" && query == null && fragment == null
+    return bare && username.isEmpty() && password.isEmpty()
+}
+
+/**
+ * The host of [rainApiBaseUrl] as [rainApiBaseUrlOrThrow] parses it, lowercased with a trailing dot
+ * stripped: the one spelling a deployment check compares, so no second parser can read
+ * `https://api%2Erain.xyz` or `https://api.rain.xyz.` differently from the one the configuration
+ * is validated with. Internal API for the Rain wallet; throws as [rainApiBaseUrlOrThrow] does.
+ */
+@InternalRainTurnkeyApi
+fun rainApiBaseUrlHost(rainApiBaseUrl: String): String =
+    rainApiBaseUrlOrThrow(rainApiBaseUrl).host.removeSuffix(".").lowercase()
+
+private fun notHttpsMessage(url: String): String =
+    "rainApiBaseUrl must be https, the wallet auth token travels in a header; got '$url'"
 
 /** The local test server, the one host a plain-http base URL may name. */
 private fun HttpUrl.isLoopback(): Boolean = host == "localhost" || host == "127.0.0.1" || host == "::1"

@@ -22,6 +22,15 @@ import com.rain.sdk.sample.ui.theme.RainTheme
  * the end cover the card's states and each step on its own.
  */
 
+/** The notices above the contact fields: a backend another tab configured, or a missing Api-Key. */
+@Composable
+private fun RainWalletNotices(state: HomeUiState) {
+    // The Turnkey tab configured the shared backend this launch: a login here fails until a relaunch.
+    state.sharedBackendNotice?.let { RainMuted(it) }
+    // The code login mints its wallet auth token with the Api-Key on Home; without it the token minting fails.
+    state.rainWalletAuthNotice?.let { RainMuted(it) }
+}
+
 @Composable
 internal fun RainWalletCard(state: HomeUiState, actions: ProviderCardActions) {
     // The channel and the contact are frozen once a code is out, but the button stays live as
@@ -35,8 +44,7 @@ internal fun RainWalletCard(state: HomeUiState, actions: ProviderCardActions) {
     val passkeyBusy = state.rainWalletPasskeyInFlight != null
     RainCard {
         CardTitle("Rain Wallet", "One-time code by email or SMS, or a passkey")
-        // The Turnkey tab configured the shared backend this launch: a login here fails until a relaunch.
-        state.sharedBackendNotice?.let { RainMuted(it) }
+        RainWalletNotices(state)
         ContactFields(
             state.rainWalletContactInput,
             actions.rainWalletContactActions,
@@ -48,6 +56,7 @@ internal fun RainWalletCard(state: HomeUiState, actions: ProviderCardActions) {
             onClick = actions.onSendRainWalletCode,
             modifier = Modifier.fillMaxWidth(),
             enabled = state.rainWalletContact.isNotBlank() &&
+                state.rainWalletAuthAvailable &&
                 !state.isLoading &&
                 !passkeyBusy &&
                 !state.rainWalletSessionActive,
@@ -170,6 +179,8 @@ private const val PREVIEW_PHONE = "+15551234567"
  */
 private val previewRainWalletState = HomeUiState(
     mode = WalletMode.RainWallet,
+    rainApiKey = "sandbox-api-key",
+    userId = "user-1",
     rainWalletEmail = PREVIEW_EMAIL,
     rainWalletPhone = PREVIEW_PHONE,
     rainWalletActivityAvailable = true,
@@ -178,6 +189,8 @@ private val previewRainWalletState = HomeUiState(
 /** A live passkey session: no code step on screen, the add-passkey and attach steps below Initialize. */
 private val previewRainWalletPasskeyState = HomeUiState(
     mode = WalletMode.RainWallet,
+    rainApiKey = "sandbox-api-key",
+    userId = "user-1",
     rainWalletSessionActive = true,
     rainWalletPasskeySession = true,
     rainWalletActivityAvailable = true,
@@ -220,6 +233,12 @@ private fun RainWalletCardSendingPreview() {
 @Composable
 private fun RainWalletCardSharedBackendPreview() {
     RainWalletCardPreview(previewRainWalletState.copy(backendOwner = SessionStore.Provider.Turnkey))
+}
+
+@Preview(name = "Rain Wallet · no Api-Key on Home, code off", showBackground = true)
+@Composable
+private fun RainWalletCardNoApiKeyPreview() {
+    RainWalletCardPreview(previewRainWalletState.copy(rainApiKey = "", userId = ""))
 }
 
 @Preview(name = "Rain Wallet · code sent by email", showBackground = true, heightDp = 700)

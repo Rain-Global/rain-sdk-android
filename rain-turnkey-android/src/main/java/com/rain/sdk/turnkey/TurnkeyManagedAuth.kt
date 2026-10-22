@@ -25,6 +25,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
+import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
@@ -170,31 +171,56 @@ internal object TurnkeyManagedConfigurator {
 }
 
 /**
- * Owns the one-time-code flow, email or SMS, for a managed-mode [TurnkeyProvider]: send code,
- * confirm code (sign-up or login — the vendor decides), account provisioning, session restore,
- * logout; the passkey flows, sign-in, sign-up and add-passkey, when a relying-party domain is
- * configured; and contact attach, a verified email or phone added to the signed-in account as a
- * login method. Every vendor failure is mapped to a [RainError] before it surfaces; cancellation
+ * Owns the managed authentication of a [TurnkeyProvider]: the one-time-code login, email or SMS,
+ * against Rain's embedded-wallet endpoints (code send, code verify, sign-up and login) with the
+ * vendor's device primitives around them (a device key, the code's encryption, the client
+ * signatures, the session store); account provisioning, session restore and logout; the passkey
+ * flows, sign-in, sign-up and add-passkey, when a relying-party domain is configured; and contact
+ * attach, a verified email or phone added to the signed-in account as a login method, through the
+ * vendor's auth proxy. Every Rain
+ * leg carries a wallet auth token the host's backend mints through [authTokenProvider], bound to
+ * the tenant and to the contact of the flow, so no leg sends a contact as a field of its own: it
+ * reaches Rain inside the verification token and the signed sign-up message, both of which name
+ * it. Every vendor and Rain failure is mapped to a [RainError] before it surfaces; cancellation
  * is never mapped.
  *
  * Sessions: each login stores its session under a fresh key and then selects it. The vendor's
  * `createSession` rejects only a duplicate *key*, so no stored session has to be cleared before a
- * login — a rejected code cannot cost the user the session they already have. Once the switch
- * succeeds the previous session, already revoked server-side by the login, is cleared locally.
+ * login, and a rejected code cannot cost the user the session they already have. Once the switch
+ * succeeds the previous session is cleared locally. A code login leaves the user's sessions on
+ * other devices alone (`POST /login` issues a session and revokes nothing); a passkey login still
+ * revokes them, the vendor's `invalidateExisting`.
  *
  * One auth operation runs at a time: send, confirm, logout and provisioning all read-then-write
  * the same process-wide vendor state.
  */
-@Suppress("TooManyFunctions") // the whole auth flow lives here so one mutex can serialize every step
-internal class TurnkeyManagedAuthController(
+@Suppress("TooManyFunctions", "LargeClass") // one mutex serializes the whole auth flow; the attach's auth-proxy helpers leave with the proxy
+internal class TurnkeyManagedAuthController
+@Suppress("LongParameterList") // the vendor seam, the Rain client, the host's token supplier, the coordinator, the configurator and two knobs
+constructor(
     private val context: TurnkeyContextProtocol,
+    private val rainApi: RainApiAuthClientProtocol,
+    /**
+     * The host's wallet auth token for a contact, the canonical contact of the flow. See
+     * [authToken] for the contract.
+     */
+    private val authTokenProvider: suspend (LoginContact?) -> String,
     private val coordinator: TurnkeySessionCoordinator,
     private val configure: suspend () -> RainError?,
     /** The passkey relying-party domain, already normalized; null means passkeys are off. */
     private val passkeyDomain: String? = null,
     private val nowEpochSeconds: () -> Double = { System.currentTimeMillis() / MILLIS_PER_SECOND },
 ) {
-    private data class PendingOtp(val challenge: OtpChallenge, val contact: String)
+    /**
+     * The host's token for one contact. Replaced in place when Rain refuses it and a fresh one is
+     * fetched, so the legs that follow in the same flow carry the fresh one.
+     */
+    private class AuthToken(val contact: LoginContact?, @Volatile var value: String)
+
+    private class PendingOtp(val challenge: OtpChallenge, val contact: String, val token: AuthToken)
+
+    /** The attach's pending code; no token, because the attach runs through the vendor's auth proxy. */
+    private class PendingContactOtp(val challenge: OtpChallenge, val contact: String)
 
     private val flowMutex = Mutex()
     private val pendingLock = ReentrantLock()
@@ -204,7 +230,7 @@ internal class TurnkeyManagedAuthController(
      * The verification code for a contact being attached, kept apart from [pendingOtp] so a login
      * cannot consume a verification code and a verification cannot consume a login code.
      */
-    private var pendingContactOtp: PendingOtp? = null
+    private var pendingContactOtp: PendingContactOtp? = null
     private val closed = AtomicBoolean(false)
     private val closedFlow = MutableStateFlow(false)
 
@@ -252,45 +278,49 @@ internal class TurnkeyManagedAuthController(
     }
 
     /**
-     * Sends a one-time code to [contact] on its channel. Touches no session. A second call for the
-     * same contact replaces the pending challenge on success and keeps it on failure, so a failed
-     * resend leaves a code the user can still type; a call for another contact or channel retires
-     * the pending challenge before the vendor is asked, so a failed switch leaves nothing
-     * confirmable. The contact becomes the account's identity on sign-up, so it is canonicalized
-     * once here and the very same string is sent on confirm: an email is trimmed and lowercased,
-     * because the vendor matches it case-sensitively and a second spelling would be a second
-     * account; a phone number is trimmed, stripped of separators and checked against E.164. A
-     * blank or malformed contact throws [RainError.InvalidConfig] before the vendor is called and
-     * changes nothing.
+     * Sends a one-time code to [contact] on its channel: a wallet auth token for the canonical
+     * contact from the host, then `POST /otp/init` under it, which delivers the code to the contact
+     * the token is bound to. Touches no session. A second call for the same contact replaces the
+     * pending challenge on success and keeps it on failure, so a failed resend leaves a code the
+     * user can still type; a call for another contact or channel retires the pending challenge
+     * before anything is sent, so a failed switch leaves nothing confirmable. The contact becomes
+     * the account's identity on sign-up, so it is canonicalized once here and the very same string
+     * names the account on sign-up: an email is trimmed and lowercased, because the backend matches
+     * it case-sensitively and a second spelling would be a second account; a phone number is
+     * trimmed, stripped of separators and checked against E.164. A blank or malformed contact
+     * throws [RainError.InvalidConfig] before the host or Rain is called and changes nothing.
      */
     suspend fun sendLoginCode(contact: LoginContact) {
         flowMutex.withLock {
             prepare()
             val (canonical, channel) = canonicalize(contact)
             retirePendingOtpUnlessFor(canonical, channel)
-            val challenge = guarded { context.sendOtp(canonical, channel) }
+            val pending = requestCode(canonical, channel)
             pendingLock.withJavaLock {
-                pendingOtp = PendingOtp(challenge, canonical)
+                pendingOtp = pending
             }
         }
     }
 
     /**
-     * Confirms the code from [sendLoginCode]: signs the user up on first login, stores the session
-     * under a fresh key, selects it, clears the previous session, then ensures the Ethereum and
-     * Solana accounts exist. A sign-up creates [MANAGED_WALLET] inside the signup request itself, so
-     * a new organization never exists without its wallet.
+     * Confirms the code from [sendLoginCode], login first: a fresh device key, the code encrypted
+     * to the challenge's bundle with it, `POST /otp/verify` for the verification token, then
+     * `POST /login`; a 404 there means no wallet for this contact in this tenant, so `POST /signup`
+     * creates the account with [MANAGED_WALLET] and `POST /login` runs again with the
+     * sub-organization it answered with. The session Rain issues is stored under a fresh key and
+     * selected, the previous session is cleared, then the Ethereum and Solana accounts are checked.
      *
      * A rejected code throws [RainError.InvalidLoginCode] and keeps the challenge, so the user can
-     * simply retype it. So does any other failure inside the verify step — the auth proxy has been
-     * seen wrapping a rejection in an HTTP 500 whose body the Kotlin SDK discards, which surfaces
-     * as [RainError.ProviderError] — so the user can retry or request a new code. A failure once
-     * the code was accepted (account lookup, login, session) drops the challenge. A failure while
-     * selecting the new session signs the device out: the login already revoked the previous
-     * session server-side, so keeping it selected would only fail at the next wallet call, and
-     * the host's re-auth hook stays silent because this exception is the signal. A provisioning
-     * failure once the new session is live throws with the session kept: [ensureAccounts] runs
-     * again at provider resolution, so it heals without a new code.
+     * simply retype it. So does any other failure of the verify step, a transport failure or a
+     * 5xx included, so the user can retry or request a new code. A failure once the verify
+     * answered (the login, the sign-up, the session store) drops the challenge, because the
+     * verification token cannot be reused. The device key is deleted on every failure exit before
+     * the session store; a store that failed follows [storeSession]'s rule, which keeps a session
+     * the vendor selected before failing, key included. A failure while selecting the new
+     * session keeps the previous session selected: Rain's login revoked nothing, so that session is
+     * as live as before, and the thrown error is the host's signal. A provisioning failure once the
+     * new session is live throws with the session kept: [ensureAccounts] runs again at provider
+     * resolution, so it heals without a new code.
      */
     suspend fun confirmLoginCode(code: String) {
         flowMutex.withLock {
@@ -299,17 +329,13 @@ internal class TurnkeyManagedAuthController(
             val trimmed = requireCode(code)
             val previousKey = context.selectedSessionKey
             val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
-            guarded(onVendorFailure = ::dropChallengeUnlessVerifyFailed) {
-                context.completeOtp(
-                    challenge = pending.challenge,
-                    otpCode = trimmed,
-                    contact = pending.contact,
-                    sessionKey = sessionKey,
-                    signupWallet = MANAGED_WALLET,
-                )
+            val deviceKey = guarded { context.createDeviceKey() }
+            val login = withDeviceKeyOnFailure(deviceKey) {
+                val verificationToken = verifyCode(pending, trimmed, deviceKey, ::clearPendingOtp)
+                loginOrSignUp(pending, verificationToken)
             }
-            clearPendingOtp()
-            switchToSession(sessionKey, previousKey)
+            storeSession(login.sessionToken, sessionKey, deviceKey)
+            switchToSession(sessionKey, previousKey, previousRevoked = false)
             ensureAccountsLocked()
         }
     }
@@ -320,8 +346,10 @@ internal class TurnkeyManagedAuthController(
      * Signs an existing user in with a passkey bound to the configured domain, through the system
      * passkey sheet presented from [activity]. The account is the one the passkey was created for.
      * A successful login stores the session under a fresh key, selects it, clears the previous
-     * session, revokes the user's other sessions on every device and backfills a missing account,
-     * the same steps as [confirmLoginCode]. A dismissed sheet, a refused passkey or a failed
+     * session, revokes the user's other sessions on every device and backfills a missing account:
+     * the session steps of [confirmLoginCode], with one difference, that this login revoked the
+     * previous session server-side, so a failed switch signs the device out ([abandonSwitch]) where
+     * the code login keeps the previous session. A dismissed sheet, a refused passkey or a failed
      * ceremony leaves the current session untouched; a session the vendor stored under the fresh
      * key without selecting it is cleared. A pending login code survives, because it binds no
      * device key; a pending contact verification does not, because the account it named changed.
@@ -333,8 +361,8 @@ internal class TurnkeyManagedAuthController(
             prepare()
             val previousKey = context.selectedSessionKey
             val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
-            ceremony(sessionKey) { context.completePasskeyLogin(activity, sessionKey) }
-            switchToSession(sessionKey, previousKey)
+            ceremony(sessionKey) { context.completePasskeyLogin(activity, sessionKey, organizationId = null) }
+            switchToSession(sessionKey, previousKey, previousRevoked = true)
             ensureAccountsLocked()
         }
     }
@@ -368,7 +396,7 @@ internal class TurnkeyManagedAuthController(
             ceremony(sessionKey) {
                 context.completePasskeySignUp(activity, sessionKey, passkeyName, MANAGED_WALLET)
             }
-            switchToSession(sessionKey, previousKey = null)
+            switchToSession(sessionKey, previousKey = null, previousRevoked = true)
             ensureAccountsLocked()
         }
     }
@@ -419,7 +447,7 @@ internal class TurnkeyManagedAuthController(
             requireLiveSession()
             val challenge = guarded { context.sendOtp(canonical, channel) }
             pendingLock.withJavaLock {
-                pendingContactOtp = PendingOtp(challenge, canonical)
+                pendingContactOtp = PendingContactOtp(challenge, canonical)
             }
         }
     }
@@ -458,7 +486,11 @@ internal class TurnkeyManagedAuthController(
         }
     }
 
-    /** Mirrors [dropChallengeUnlessVerifyFailed] for the verification slot. */
+    /**
+     * Decides, on the raw vendor failure of the attach's confirm, whether the code is still worth
+     * retrying. The code is spent only once the verify step returned a token, so a failure inside
+     * that step keeps the challenge, while a failure in the lookup or update that follows drops it.
+     */
     private fun dropContactOtpUnlessVerifyFailed(e: Exception) {
         if (!TurnkeyErrorMapping.isLoginCodeVerifyFailure(e)) clearPendingContactOtp()
     }
@@ -471,7 +503,7 @@ internal class TurnkeyManagedAuthController(
      * [RainError.ProviderError] whatever the status. A contact no account signs in with, or this
      * account's own, lets the update run.
      */
-    private suspend fun requireContactFreeOrOurs(pending: PendingOtp, token: String, organizationId: String) {
+    private suspend fun requireContactFreeOrOurs(pending: PendingContactOtp, token: String, organizationId: String) {
         val owner = guarded(map = TurnkeyErrorMapping::mapAccountLookupError) {
             context.lookupContactOwner(pending.challenge.channel, pending.contact, token)
         }
@@ -486,13 +518,184 @@ internal class TurnkeyManagedAuthController(
         }
     }
 
-    private fun requirePendingContactOtp(): PendingOtp =
+    private fun requirePendingContactOtp(): PendingContactOtp =
         pendingLock.withJavaLock { pendingContactOtp }
             ?: throw RainError.InvalidConfig("No verification code was requested; call sendContactVerificationCode first")
 
     private fun clearPendingContactOtp() {
         pendingLock.withJavaLock { pendingContactOtp = null }
     }
+
+    // ---------- the Rain legs ----------
+
+    /** A token for the canonical contact from the host, then `POST /otp/init` under it. */
+    private suspend fun requestCode(canonical: String, channel: OtpChannel): PendingOtp {
+        val contact = channel.contactOf(canonical)
+        val token = AuthToken(contact, authToken(contact))
+        val answer = rainLeg(token) { rainApi.initOtp(it) }
+        val challenge = OtpChallenge(
+            otpId = answer.otpId,
+            encryptionTargetBundle = answer.otpEncryptionTargetBundle,
+            channel = channel,
+        )
+        return PendingOtp(challenge, canonical, token)
+    }
+
+    /**
+     * The verify step: the code encrypted to the challenge's bundle with [deviceKey], then
+     * `POST /otp/verify` under the pending token. The challenge is kept through every failure of
+     * this step, a wrong code first of all, so the user can retype it; [clearPending] runs once the
+     * verify answered, because the code is spent then, whether the answer decoded or not.
+     */
+    private suspend fun verifyCode(pending: PendingOtp, code: String, deviceKey: String, clearPending: () -> Unit): String {
+        val encrypted = guarded { context.encryptOtpCode(code, pending.challenge.encryptionTargetBundle, deviceKey) }
+        val verification = try {
+            rainLeg(pending.token) { rainApi.verifyOtp(it, pending.challenge.otpId, encrypted) }
+        } catch (e: RainError.InternalError) {
+            // The one failure past the answer: a 2xx the client could not read. Rain accepted the
+            // code, so it is spent.
+            clearPending()
+            throw e
+        }
+        clearPending()
+        return verification.verificationToken
+    }
+
+    /**
+     * Login first, sign-up on a 404: `POST /login` with the login signature; when Rain answers that
+     * no wallet exists for this contact in this tenant, `POST /signup` with the sign-up signature
+     * naming the canonical contact, then `POST /login` again with the sub-organization id the
+     * sign-up answered with, which spares Rain its lookup. Every other refusal maps as it comes.
+     */
+    private suspend fun loginOrSignUp(pending: PendingOtp, verificationToken: String): RainApiLogin {
+        val loginSignature = guarded { context.clientSignatureForLogin(verificationToken) }
+        val existing = rainLegOrNull(pending.token, consume = { it.kind == RainApiAuthFailure.Kind.NoWallet }) { token ->
+            rainApi.login(token, verificationToken, loginSignature, subOrganizationId = null)
+        }
+        if (existing != null) return existing
+        val signUpSignature = guarded {
+            context.clientSignatureForSignUp(verificationToken, pending.contact, pending.challenge.channel)
+        }
+        val signup = rainLeg(pending.token) { token -> rainApi.signup(token, verificationToken, signUpSignature) }
+        return rainLeg(pending.token) { token ->
+            rainApi.login(token, verificationToken, loginSignature, subOrganizationId = signup.subOrganizationId)
+        }
+    }
+
+    /**
+     * One leg against Rain under [token], through [guarded], which lets the client's own refusal
+     * through raw so its kind can be read here. A refused token, a 401 other than "invalid tenant",
+     * gets one fresh token from the host and one retry, and the fresh token replaces the old one
+     * for the legs that follow; a second refusal is an error like any other. A refusal [consume]
+     * accepts is returned as null for the caller to act on; every other refusal leaves mapped, with
+     * the authentication log line. A transport failure and an unreadable answer leave as the
+     * [RainError] the client threw; anything else is mapped as a vendor failure.
+     */
+    private suspend fun <T> rainLegOrNull(
+        token: AuthToken,
+        consume: (RainApiAuthFailure) -> Boolean,
+        call: suspend (token: String) -> T,
+    ): T? {
+        var refetched = false
+        while (true) {
+            val refusal = try {
+                return guarded { call(token.value) }
+            } catch (e: RainApiAuthFailure) {
+                e
+            }
+            when {
+                refusal.kind == RainApiAuthFailure.Kind.TokenRejected && !refetched -> {
+                    refetched = true
+                    token.value = authToken(token.contact)
+                }
+                consume(refusal) -> return null
+                else -> throw TurnkeyErrorMapping.mapAuthError(refusal)
+            }
+        }
+    }
+
+    /** [rainLegOrNull] for a leg that consumes no refusal. */
+    private suspend fun <T> rainLeg(token: AuthToken, call: suspend (token: String) -> T): T =
+        checkNotNull(rainLegOrNull(token, consume = { false }, call)) { "a leg that consumes no refusal answered null" }
+
+    /**
+     * A wallet auth token from the host for [contact], the canonical contact of the flow; the class
+     * KDoc says what the token binds and carries. A [RainError] from the host passes through as it
+     * is, and so does this coroutine's own cancellation. Any
+     * other throwable, a cancellation the host raised while this coroutine is still active included
+     * (its own `withTimeout`, a `Deferred` in a scope of its own), surfaces as
+     * [RainError.NetworkError] when an `IOException` is in its cause chain and as
+     * [RainError.InvalidConfig] otherwise, each naming the class and nothing else, because the
+     * host's message may carry the contact. A blank token is refused as a configuration error too.
+     */
+    // The host's failure is untyped and reported by class only; a blank token is a second refusal.
+    @Suppress("TooGenericExceptionCaught", "ThrowsCount", "SwallowedException")
+    private suspend fun authToken(contact: LoginContact?): String {
+        val token = try {
+            authTokenProvider(contact)
+        } catch (e: RainError) {
+            throw e
+        } catch (e: CancellationException) {
+            // As in ready(): only this coroutine's own cancellation passes. A timeout or a cancelled
+            // scope inside the host's provider is the provider failing, and left as a cancellation
+            // it would skip every `catch (e: RainError)` a host has and, on a refetch, spend the code silently.
+            currentCoroutineContext().ensureActive()
+            throw providerFailure(e)
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            throw providerFailure(e)
+        }
+        if (token.isBlank()) throw RainError.InvalidConfig("authTokenProvider returned a blank wallet auth token")
+        return token
+    }
+
+    /** The host's failure by class only: its own backend out of reach is retryable, anything else is configuration. */
+    private fun providerFailure(e: Exception): RainError {
+        val name = e.javaClass.simpleName
+        return if (e.causeChain().any { it is IOException }) {
+            RainError.NetworkError("authTokenProvider could not reach your backend ($name); no wallet auth token was minted")
+        } else {
+            RainError.InvalidConfig(
+                "authTokenProvider failed with $name; it must return the wallet auth token your backend minted for this contact"
+            )
+        }
+    }
+
+    /**
+     * Runs [block] and deletes the device key [publicKey] on every failure exit, the caller's
+     * cancellation included, so a key no session will ever stamp with does not stay in the
+     * keystore. On success the key goes to [storeSession], whose rule governs it from there.
+     */
+    private suspend fun <T> withDeviceKeyOnFailure(publicKey: String, block: suspend () -> T): T {
+        try {
+            return block()
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) { deleteDeviceKey(publicKey) }
+            throw e
+        } catch (e: RainError) {
+            deleteDeviceKey(publicKey)
+            throw e
+        }
+    }
+
+    /** Best-effort removal of a device key no session uses: a key that will not delete is logged, never surfaced. */
+    @Suppress("TooGenericExceptionCaught") // best-effort cleanup; the failure that matters is the caller's
+    private suspend fun deleteDeviceKey(publicKey: String) {
+        try {
+            context.deleteDeviceKey(publicKey)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.w("Rain SDK: could not delete a device key (%s)", e.javaClass.simpleName)
+        }
+    }
+
+    private fun OtpChannel.contactOf(canonical: String): LoginContact = when (this) {
+        OtpChannel.EMAIL -> LoginContact.Email(canonical)
+        OtpChannel.SMS -> LoginContact.Phone(canonical)
+    }
+
+    // ---------- sessions ----------
 
     /**
      * A live or refreshable session, or [RainError.TokenExpired]: the coordinator's own check, run
@@ -549,6 +752,39 @@ internal class TurnkeyManagedAuthController(
     }
 
     /**
+     * Stores the session Rain issued under [sessionKey], the vendor's `createSession`: it persists
+     * the JWT and, when nothing is selected, selects the session and refreshes the user and the
+     * wallets over the network before returning, so a failure or the caller's cancellation can land
+     * with the session already stored, selected or not. The [ceremony] rule applies. A session the
+     * vendor selected before the failure is left signed in with [deviceKey], since the device
+     * stamps with that key from then on and deleting it would sign the user out at the next
+     * relaunch; otherwise the key is deleted and a session stored without being selected is
+     * cleared, so the failed login leaves neither behind.
+     */
+    private suspend fun storeSession(jwt: String, sessionKey: String, deviceKey: String) {
+        try {
+            guarded { context.storeSession(jwt, sessionKey) }
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) { abandonStore(sessionKey, deviceKey) }
+            throw e
+        } catch (e: RainError) {
+            abandonStore(sessionKey, deviceKey)
+            throw e
+        }
+    }
+
+    /**
+     * Cleans up after a store that failed, unless the vendor selected the session first. Deletes
+     * the key first, while it is certainly still there; the vendor's purge of a stored session
+     * deletes the key it finds and is silent about one already gone.
+     */
+    private suspend fun abandonStore(sessionKey: String, deviceKey: String) {
+        if (context.selectedSessionKey == sessionKey) return
+        deleteDeviceKey(deviceKey)
+        clearUnselected(sessionKey)
+    }
+
+    /**
      * Runs a passkey ceremony that stores its session under [sessionKey] on success. On a mapped
      * failure or the caller's cancellation, the fresh key is cleared unless the vendor already
      * selected it: the vendor's key cleanup can throw after its session store, and a cancellation
@@ -568,18 +804,6 @@ internal class TurnkeyManagedAuthController(
         }
     }
 
-    /**
-     * Decides, on the raw vendor failure of a confirm, whether the one-time code is still worth
-     * retrying. The code is spent only once the verify step returned a token, so a failure inside
-     * that step (the proxy refusing the code in a shape the mapper cannot classify, or the call
-     * never completing) keeps the challenge, while a failure in the account lookup, login or
-     * session step that follows drops it. The one exception — a verify response without a token —
-     * is harmless: the retry surfaces [RainError.InvalidLoginCode] and the user requests a new code.
-     */
-    private fun dropChallengeUnlessVerifyFailed(e: Exception) {
-        if (!TurnkeyErrorMapping.isLoginCodeVerifyFailure(e)) clearPendingOtp()
-    }
-
     /** Drops a pending challenge issued for another contact or channel; a same-contact resend keeps it. */
     private fun retirePendingOtpUnlessFor(contact: String, channel: OtpChannel) {
         pendingLock.withJavaLock {
@@ -596,10 +820,10 @@ internal class TurnkeyManagedAuthController(
         code.trim().ifEmpty { throw RainError.InvalidConfig("code must not be blank") }
 
     /**
-     * The identity string the vendor keys the account on, and the channel the code travels on. The
-     * vendor matches an email case-sensitively, so `Jo@Example.com` and `jo@example.com` would sign
-     * up as two accounts with two wallets; lowercasing folds them into one. Kotlin's `lowercase()`
-     * is locale-independent, so the device locale cannot change the identity.
+     * The identity string the account is keyed on, and the channel the code travels on. The
+     * backend matches an email case-sensitively, so `Jo@Example.com` and `jo@example.com` would
+     * sign up as two accounts with two wallets; lowercasing folds them into one. Kotlin's
+     * `lowercase()` is locale-independent, so the device locale cannot change the identity.
      */
     private fun canonicalize(contact: LoginContact): Pair<String, OtpChannel> = when (contact) {
         is LoginContact.Email -> {
@@ -674,10 +898,18 @@ internal class TurnkeyManagedAuthController(
         }
     }
 
-    /** Makes this controller inert: every auth call throws, and the state reads unauthenticated. */
+    /**
+     * Makes this controller inert: every auth call throws, the state reads unauthenticated, and the
+     * two pending slots are dropped, since the login slot holds the host's bearer token and nothing
+     * may spend either code after this.
+     */
     fun close() {
         closed.set(true)
         closedFlow.value = true
+        pendingLock.withJavaLock {
+            pendingOtp = null
+            pendingContactOtp = null
+        }
     }
 
     private suspend fun ensureAccountsLocked() {
@@ -712,43 +944,47 @@ internal class TurnkeyManagedAuthController(
      * On a first login the vendor selects the new session itself; over a live session it only
      * stores it, so the switch has to be explicit. Afterwards the coordinator's death count
      * advances and stales the manager's cached addresses, since an Active→Active transition is not
-     * a death the watcher notices, and the previous session, revoked server-side by the login, is
-     * cleared locally. A switch that
-     * fails is abandoned the same way on both exits: see [abandonSwitch].
+     * a death the watcher notices, and the previous session is cleared locally. A switch that
+     * fails is abandoned the same way on both exits: see [abandonSwitch], which [previousRevoked]
+     * tells whether the login revoked the previous session server-side.
      */
-    private suspend fun switchToSession(sessionKey: String, previousKey: String?) {
-        // The account is about to change, and the verification slot names the one being left.
-        clearPendingContactOtp()
+    private suspend fun switchToSession(sessionKey: String, previousKey: String?, previousRevoked: Boolean) {
         if (context.selectedSessionKey != sessionKey) {
             try {
                 guarded { context.selectSession(sessionKey) }
             } catch (e: CancellationException) {
-                withContext(NonCancellable) { abandonSwitch(sessionKey, previousKey) }
+                withContext(NonCancellable) { abandonSwitch(sessionKey, previousKey, previousRevoked) }
                 throw e
             } catch (e: RainError) {
-                abandonSwitch(sessionKey, previousKey)
+                abandonSwitch(sessionKey, previousKey, previousRevoked)
                 throw e
             }
         }
+        // The account changed, and the verification slot named the one left behind. Cleared only
+        // now: a switch that failed above kept the previous account, whose pending attach still stands.
+        clearPendingContactOtp()
         coordinator.notifySessionReplaced()
         if (previousKey != null) clearUnselected(previousKey)
     }
 
     /**
      * Cleans up after a switch that failed. The fresh key is cleared only when the selection
-     * really did not take effect — the vendor persists it before its auto-refresh can fail. When
-     * the previous session is still the selected one, the device is signed out: the login that
-     * just succeeded revoked that session server-side (`invalidateExisting`), so leaving it
-     * selected would only move the failure to the next wallet call, where it would read as an
-     * unexplained expiry. The caller rethrows, and that exception is the host's signal, so the
-     * re-auth hook stays silent as it does after [logout].
+     * really did not take effect — the vendor persists it before its auto-refresh can fail. What
+     * happens to the previous session, still the selected one, depends on what the login did to it
+     * server-side ([previousRevoked]). A passkey login revoked the user's other sessions
+     * (`invalidateExisting`), so leaving it selected would only move the failure to the next wallet
+     * call, where it would read as an unexplained expiry: the device is signed out, with the
+     * re-auth hook silent, because the caller's exception is the host's signal, as after [logout].
+     * A code login through Rain revoked nothing, so the previous session is as live as before and
+     * stays selected: the host keeps the account it had and reads the thrown error as the failed
+     * login it is.
      */
     @Suppress(
         "TooGenericExceptionCaught"
     ) // best-effort cleanup: a clear that fails is logged, the select failure is what surfaces
-    private suspend fun abandonSwitch(sessionKey: String, previousKey: String?) {
+    private suspend fun abandonSwitch(sessionKey: String, previousKey: String?, previousRevoked: Boolean) {
         clearUnselected(sessionKey)
-        if (previousKey == null || context.selectedSessionKey != previousKey) return
+        if (!previousRevoked || previousKey == null || context.selectedSessionKey != previousKey) return
         coordinator.suppressNextHostHook()
         try {
             context.clearSelectedSession()
@@ -758,6 +994,9 @@ internal class TurnkeyManagedAuthController(
             // The death did not happen, so the host must still hear about a later one.
             coordinator.releaseHostHookSuppression()
             Timber.w(e, "Rain SDK: could not clear the superseded wallet session")
+        } finally {
+            // The account this sign-out leaves is gone, pending attach included, as after logout().
+            clearPendingContactOtp()
         }
     }
 
@@ -842,16 +1081,18 @@ internal class TurnkeyManagedAuthController(
     }
 
     /**
-     * Runs a vendor call under the error contract: cancellation propagates untouched, a
-     * [RainError] passes through, anything else is mapped. `ensureActive()` — not a cause-chain
-     * walk — decides whether a caught exception is really this coroutine's cancellation: the
-     * vendor wraps cancellation in its own error types, but it also re-emits a sibling's failure as
-     * a wrapped `JobCancellationException` while this caller is still active. [onVendorFailure]
-     * sees the raw vendor exception before it is mapped, for decisions the mapped error cannot carry.
-     * [map] turns it into the [RainError] that leaves: the auth-proxy mapping unless the call has
-     * a rule of its own, as the account lookup does.
+     * Runs a vendor or Rain call under the error contract: cancellation propagates untouched, a
+     * [RainError] passes through, the Rain client's own [RainApiAuthFailure] passes through raw so
+     * that [rainLegOrNull] can read its kind before it is mapped, and anything else is mapped.
+     * `ensureActive()`, not a cause-chain walk, decides whether a caught exception is really this
+     * coroutine's cancellation: the vendor wraps cancellation in its own error types, but it also
+     * re-emits a sibling's failure as a wrapped `JobCancellationException` while this caller is
+     * still active. [onVendorFailure] sees the raw vendor exception before it is mapped, for
+     * decisions the mapped error cannot carry. [map] turns it into the [RainError] that leaves:
+     * [TurnkeyErrorMapping.mapAuthError] unless the call has a rule of its own, as the account
+     * lookup does.
      */
-    @Suppress("TooGenericExceptionCaught", "ThrowsCount") // the mapping boundary: two pass-throughs and one mapped exit
+    @Suppress("TooGenericExceptionCaught", "ThrowsCount") // the mapping boundary: three pass-throughs and one mapped exit
     private suspend fun <T> guarded(
         onVendorFailure: ((Exception) -> Unit)? = null,
         map: (Throwable) -> RainError = TurnkeyErrorMapping::mapAuthError,
@@ -862,6 +1103,8 @@ internal class TurnkeyManagedAuthController(
         } catch (e: CancellationException) {
             throw e
         } catch (e: RainError) {
+            throw e
+        } catch (e: RainApiAuthFailure) {
             throw e
         } catch (e: Exception) {
             currentCoroutineContext().ensureActive()
@@ -907,9 +1150,12 @@ internal class TurnkeyManagedAuthController(
         )
 
         /**
-         * The wallet every managed sign-up creates, inside the signup request: one seed carrying both
-         * accounts. Name, mnemonic length (Turnkey's default of 12) and derivation paths are a
-         * cross-platform contract shared by Rain's SDKs — change it everywhere or nowhere.
+         * The wallet every managed sign-up gets: one seed carrying both accounts. A passkey sign-up
+         * creates it inside the vendor's signup request; Rain's code sign-up creates it inside the
+         * sign-up itself, from a spec of its own that equals this one; and [ensureAccounts]
+         * completes an older organization to the same shape. Name, mnemonic length (Turnkey's
+         * default of 12) and derivation paths are a cross-platform contract shared by Rain's SDKs
+         * and rain-api — change it everywhere or nowhere.
          */
         val MANAGED_WALLET = TurnkeyWalletSpec(MANAGED_WALLET_NAME, listOf(ETHEREUM_ACCOUNT, SOLANA_ACCOUNT))
     }

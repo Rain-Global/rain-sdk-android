@@ -62,13 +62,18 @@ authenticated provider handle, and the Turnkey and Privy drivers are reference c
 yourself. The Rain wallet owns its authentication, so the sample calls the provider's own auth
 methods:
 
-- **Rain Wallet** (`RainSession.prepareRainWallet`) — a contact: an email address, or a phone number
-  when the *Send code by* switch is on Phone. The wallet backend's identity is embedded in the SDK,
-  so there is nothing else to enter. A phone number needs its country code (`+15551234567`); a number typed without one is
-  converted with the device's region before it reaches the SDK, which requires E.164 and removes
-  spaces, dots, hyphens and parentheses. The SDK sends and confirms the one-time code, signs up
-  (creating one wallet with the Ethereum and Solana accounts) or logs in, and backfills a missing
-  account, then initializes Rain on its own, as it does for a resumed session. A session restored
+- **Rain Wallet** (`RainSession.prepareRainWallet`) — the sandbox Rain Api-Key and user ID on the
+  Home card first: the demo mints the wallet auth token with that key
+  (`POST /v1/issuing/embedded-wallets/auth-tokens`), where a host mints it on its backend; *Send
+  code* stays off until both are entered.
+  The Rain wallet is built with the environment this build points at (`SampleEnvironment`); the SDK
+  refuses the production one at construction until Rain turns it on, and the card shows that error.
+  Then a contact: an email address, or a phone number when the *Send code by* switch is on Phone. A
+  phone number needs its country code (`+15551234567`); a number typed without one is converted with
+  the device's region before it reaches the SDK, which requires E.164 and removes spaces, dots,
+  hyphens and parentheses. The SDK asks the demo for the token, has Rain send the code, confirms it,
+  logs in or signs up (creating one wallet with the Ethereum and Solana accounts) and backfills a
+  missing account, then initializes Rain on its own, as it does for a resumed session. A session restored
   from an earlier run is reused only after the backend confirms it is still live. One revoked by a
   login on another device falls back to the code. A rejected code keeps
   the challenge for a retry, and *Resend code* requests a new one (the
@@ -76,12 +81,14 @@ methods:
   because the backend's code format is one shared setting and may be alphanumeric. If the login
   itself succeeded but a later step failed, the sample carries on signed in (Rain's initialization
   finishes the wallet setup); any other failure restarts from *Send code*. An email login and a phone
-  login by the same person are two different accounts. SMS needs SMS one-time codes enabled on the
-  backend configuration; in the sandbox the test number `+1 999-999-9999` with the code `000000`
-  works once the code format is numeric and 6 characters. Two more buttons sit under the code step
-  while signed out: *Sign in with passkey* opens the system passkey sheet for an existing account,
-  and *Create wallet with passkey* makes a new account whose only login is the passkey, with the
-  same wallet setup as a code sign-up; a returning user who taps it ends up with a second, empty
+  login by the same person are two different accounts. The sandbox test number `+1 999-999-9999`
+  with the code `000000` worked under the auth proxy; whether Rain's endpoints honour it is
+  unconfirmed, so check it on a dev run before relying on it. On *Send code*, a refused wallet auth
+  token or tenant shows `RAIN_202`, Rain or the demo's mint unreachable `RAIN_301`, a missing
+  Api-Key `RAIN_102`, each with a hint. Two more buttons sit under the code
+  step while signed out: *Sign in with passkey* opens the system passkey sheet for an existing
+  account, and *Create wallet with passkey* makes a new account whose only login is the passkey, with
+  the same wallet setup as a code sign-up; a returning user who taps it ends up with a second, empty
   wallet, and accounts are never merged. Both need the domain in `RainSession.prepareRainWallet`
   (`passkeys.uptop.xyz`) to vouch for this build's signing key, see *Demo keystore* under Notes.
   Signed in, *Add a passkey to this account* registers a passkey for a code-created account, and

@@ -371,15 +371,11 @@ internal class MockTurnkey(
 
     data class SendOtpCall(val contact: String, val channel: OtpChannel)
 
-    data class CompleteOtpCall(
-        val otpId: String,
-        val otpCode: String,
-        val otpEncryptionTargetBundle: String,
-        val contact: String,
-        val channel: OtpChannel,
-        val sessionKey: String,
-        val signupWallet: TurnkeyWalletSpec
-    )
+    data class EncryptOtpCodeCall(val code: String, val encryptionTargetBundle: String, val publicKey: String)
+
+    data class SignUpSignatureCall(val verificationToken: String, val contact: String, val channel: OtpChannel)
+
+    data class StoreSessionCall(val jwt: String, val sessionKey: String)
 
     data class CreateWalletCall(val walletName: String, val accounts: List<TurnkeyAccountSpec>)
 
@@ -399,11 +395,41 @@ internal class MockTurnkey(
         channel = OtpChannel.EMAIL,
     )
 
-    val completeOtpCalls = mutableListOf<CompleteOtpCall>()
-    var completeOtpError: Exception? = null
+    /** Every device key [createDeviceKey] handed out, `device-key-1`, `device-key-2`, ... in order. */
+    val createdDeviceKeys = mutableListOf<String>()
+    var createDeviceKeyError: Exception? = null
 
-    /** Runs after a recorded [completeOtp] with the new session key — install the session here. */
-    var onCompleteOtp: (suspend (sessionKey: String) -> Unit)? = null
+    /** Every key [deleteDeviceKey] was asked to remove, in order. */
+    val deletedDeviceKeys = mutableListOf<String>()
+
+    /** The keys still in the keystore: created and not deleted. The session's key stays here on success. */
+    val liveDeviceKeys: List<String> get() = createdDeviceKeys - deletedDeviceKeys.toSet()
+
+    val encryptOtpCodeCalls = mutableListOf<EncryptOtpCodeCall>()
+    var encryptOtpCodeError: Exception? = null
+
+    val loginSignatureCalls = mutableListOf<String>()
+    val signUpSignatureCalls = mutableListOf<SignUpSignatureCall>()
+
+    /** When set, both signature seams throw it; [signUpSignatureError] fails the sign-up signature alone. */
+    var clientSignatureError: Exception? = null
+    var signUpSignatureError: Exception? = null
+
+    /** What both signature seams hand back, keyed on nothing: the controller forwards it whole. */
+    val stubbedClientSignature = RainApiClientSignature(publicKey = "device-pk", message = "{\"tokenId\":\"t\"}", signature = "sig")
+
+    val storeSessionCalls = mutableListOf<StoreSessionCall>()
+    var storeSessionError: Exception? = null
+
+    /** Runs after a recorded [storeSession] with the new session key — install the session here. */
+    var onStoreSession: (suspend (sessionKey: String) -> Unit)? = null
+
+    /**
+     * When true, a failing [storeSession] stores (and, with nothing selected, selects) its session
+     * *before* throwing — the vendor's shape when `createSession`'s refresh over the network fails
+     * after its store and select, or when the caller's cancellation lands there.
+     */
+    var storeSessionAppliesBeforeThrowing = false
 
     /** Mirrors the vendor: a live session starts out under its default key. */
     override var selectedSessionKey: String? = if (session != null) DEFAULT_SESSION_KEY else null
@@ -427,7 +453,7 @@ internal class MockTurnkey(
 
     // ---- passkey seams ----
 
-    data class PasskeyLoginCall(val sessionKey: String)
+    data class PasskeyLoginCall(val sessionKey: String, val organizationId: String?)
 
     data class PasskeySignUpCall(
         val sessionKey: String,
@@ -532,26 +558,45 @@ internal class MockTurnkey(
         return stubbedOtpChallenge.copy(channel = channel)
     }
 
-    override suspend fun completeOtp(
-        challenge: OtpChallenge,
-        otpCode: String,
-        contact: String,
-        sessionKey: String,
-        signupWallet: TurnkeyWalletSpec
-    ) {
-        completeOtpCalls += CompleteOtpCall(
-            challenge.otpId,
-            otpCode,
-            challenge.encryptionTargetBundle,
-            contact,
-            challenge.channel,
-            sessionKey,
-            signupWallet
-        )
-        completeOtpError?.let { throw it }
-        // Like the vendor's createSession: a first login auto-selects; over a live session it only stores.
-        if (selectedSessionKey == null) selectedSessionKey = sessionKey
-        onCompleteOtp?.invoke(sessionKey)
+    override suspend fun createDeviceKey(): String {
+        createDeviceKeyError?.let { throw it }
+        val key = "device-key-${createdDeviceKeys.size + 1}"
+        createdDeviceKeys += key
+        return key
+    }
+
+    override suspend fun deleteDeviceKey(publicKey: String) {
+        deletedDeviceKeys += publicKey
+    }
+
+    override suspend fun encryptOtpCode(code: String, encryptionTargetBundle: String, publicKey: String): String {
+        encryptOtpCodeCalls += EncryptOtpCodeCall(code, encryptionTargetBundle, publicKey)
+        encryptOtpCodeError?.let { throw it }
+        return "encrypted($code,$encryptionTargetBundle,$publicKey)"
+    }
+
+    override suspend fun clientSignatureForLogin(verificationToken: String): RainApiClientSignature {
+        loginSignatureCalls += verificationToken
+        clientSignatureError?.let { throw it }
+        // The vendor signs with the key the verification token is bound to, the one the code was encrypted
+        // under; a controller that deleted it first would fail on a device, so the double fails here too.
+        val bound = encryptOtpCodeCalls.lastOrNull()?.publicKey
+        check(bound == null || bound in liveDeviceKeys) { "the login signature needs device key $bound, which was deleted" }
+        return stubbedClientSignature
+    }
+
+    override suspend fun clientSignatureForSignUp(verificationToken: String, contact: String, channel: OtpChannel): RainApiClientSignature {
+        signUpSignatureCalls += SignUpSignatureCall(verificationToken, contact, channel)
+        (signUpSignatureError ?: clientSignatureError)?.let { throw it }
+        // The vendor's sign-up message names the contact as the root user's email or phone number
+        // (`V1SignupUsageV2`), so the double's does too: the one Rain body the contact is written into.
+        val field = if (channel == OtpChannel.EMAIL) "email" else "phoneNumber"
+        return stubbedClientSignature.copy(message = "{\"tokenId\":\"t\",\"$field\":\"$contact\"}")
+    }
+
+    override suspend fun storeSession(jwt: String, sessionKey: String) {
+        storeSessionCalls += StoreSessionCall(jwt, sessionKey)
+        storeLikeVendor(sessionKey, storeSessionError, storeSessionAppliesBeforeThrowing, onStoreSession)
     }
 
     override suspend fun selectSession(sessionKey: String) {
@@ -574,9 +619,9 @@ internal class MockTurnkey(
         if (sessionKey == selectedSessionKey) resetToUnauthenticated()
     }
 
-    override suspend fun completePasskeyLogin(activity: android.app.Activity, sessionKey: String) {
-        passkeyLoginCalls += PasskeyLoginCall(sessionKey)
-        storePasskeySession(sessionKey, passkeyLoginError, onPasskeyLogin)
+    override suspend fun completePasskeyLogin(activity: android.app.Activity, sessionKey: String, organizationId: String?) {
+        passkeyLoginCalls += PasskeyLoginCall(sessionKey, organizationId)
+        storeLikeVendor(sessionKey, passkeyLoginError, passkeyStoresBeforeThrowing, onPasskeyLogin)
     }
 
     override suspend fun completePasskeySignUp(
@@ -586,7 +631,7 @@ internal class MockTurnkey(
         signupWallet: TurnkeyWalletSpec,
     ) {
         passkeySignUpCalls += PasskeySignUpCall(sessionKey, passkeyName, signupWallet)
-        storePasskeySession(sessionKey, passkeySignUpError, onPasskeySignUp)
+        storeLikeVendor(sessionKey, passkeySignUpError, passkeyStoresBeforeThrowing, onPasskeySignUp)
     }
 
     /** Runs inside the add-passkey ceremony, after the call is recorded; a gate here holds the sheet open. */
@@ -636,13 +681,18 @@ internal class MockTurnkey(
         setUserContactError?.let { throw it }
     }
 
-    /** Like the vendor's createSession: a first login auto-selects; over a live session it only stores. */
-    private suspend fun storePasskeySession(
+    /**
+     * Like the vendor's createSession, which both the code login's store and the passkey login run:
+     * a first login auto-selects; over a live session it only stores. With [appliesBeforeThrowing]
+     * the store and select happen and [onStored] runs before [error] is thrown.
+     */
+    private suspend fun storeLikeVendor(
         sessionKey: String,
         error: Exception?,
+        appliesBeforeThrowing: Boolean,
         onStored: (suspend (sessionKey: String) -> Unit)?,
     ) {
-        if (error != null && !passkeyStoresBeforeThrowing) throw error
+        if (error != null && !appliesBeforeThrowing) throw error
         if (selectedSessionKey == null) selectedSessionKey = sessionKey
         onStored?.invoke(sessionKey)
         error?.let { throw it }

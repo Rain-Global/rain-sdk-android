@@ -4,8 +4,8 @@ The Rain wallet: the provider a partner registers to give users a wallet under R
 The SDK owns authentication (a one-time code by email or SMS, or a passkey bound to a domain you
 control), wallet provisioning (one wallet holding an Ethereum and a Solana account, created on
 first login), sessions and key export, and
-its public surface names no wallet vendor. The wallet backend's identity is embedded, so an app
-configures nothing but behaviour.
+its public surface names no wallet vendor. The wallet backend's identity is embedded per
+environment; an app supplies the wallet auth token its backend mints and tunes behaviour.
 
 > **Known issues in `5.0.0-beta.1`.** Solana `sendNative`, `sendToken` and `withdrawCollateral`
 > fail with `RAIN_501` and broadcast nothing. Attaching a contact through
@@ -21,15 +21,28 @@ dependencies {
 }
 ```
 
+The snippets below are for the next release; `5.0.0-beta.1` has no `authTokenProvider` or `environment`.
+
 ```kotlin
 import com.rain.sdk.RainSdk
 import com.rain.sdk.provider.ProviderId
 import com.rain.sdk.wallet.RainProvider
 import com.rain.sdk.wallet.RainWalletConfig
 import com.rain.sdk.wallet.RainWalletContact
+import com.rain.sdk.wallet.RainWalletEnvironment
 
+// authTokenProvider is required: your backend mints the token with its Api-Key,
+// POST /v1/issuing/embedded-wallets/auth-tokens, for the contact the SDK hands you.
+// environment defaults to Production, which this release refuses until Rain turns it on.
 // passkeyDomain is optional; without it the passkey methods throw RainError.InvalidConfig
-val wallet = RainProvider(application, RainWalletConfig(passkeyDomain = "passkeys.example.com"))
+val wallet = RainProvider(
+    application,
+    RainWalletConfig(
+        authTokenProvider = { contact -> myBackend.mintWalletAuthToken(contact) },
+        environment = RainWalletEnvironment.Sandbox,
+        passkeyDomain = "passkeys.example.com",
+    ),
+)
 
 wallet.awaitSessionRestore()
 if (!wallet.hasActiveSession()) {
@@ -47,12 +60,21 @@ val rain = RainSdk.builder()
 val client = rain.provider(ProviderId.RAIN)
 ```
 
-`RainWalletConfig` tunes behaviour: the session policy (`RainWalletSessionPolicy`), the expiry
-hook `onSessionExpired`, whether sends are fee-sponsored (`sponsorGas`, on by default) and the
-passkey domain (`passkeyDomain`, off by default). The session is observable through `sessionState` and
-`currentSessionState()` (`RainWalletSessionState`) and through `authState` and `currentAuthState()`
-(`RainWalletAuthState`); `refreshSession()` forces a refresh, `logout()` clears the stored session,
-and `close()` stops the passive session watcher when a provider is discarded.
+`RainWalletConfig` carries `authTokenProvider`, required: the SDK calls it with the canonical
+contact of a code request (an email trimmed and lowercased, a phone number in E.164), and it
+returns the `token` your backend minted for that contact with an Api-Key holding `embeddedWallets:write` (`POST /v1/issuing/embedded-wallets/auth-tokens`).
+Keep the Api-Key off the device, and have the mint endpoint authenticate the app user and throttle
+before minting: Rain limits by IP only, and a code is SMS spend. It also carries `environment`
+(`RainWalletEnvironment.Production` by default, which the constructor refuses with `RAIN_102` until
+the SDK release that turns it on, so pass `Sandbox`, the one environment with a wallet backend
+behind it today; or `Custom(apiBaseUrl)`, any https host that forwards to Rain's sandbox, such as
+your own proxy) and tunes behaviour: the session policy (`RainWalletSessionPolicy`), the expiry hook
+`onSessionExpired`, whether sends are fee-sponsored (`sponsorGas`, on by default) and the passkey
+domain (`passkeyDomain`, off by default). The rules of each parameter are in the `RainWalletConfig`
+row of [docs/METHODS.md](../docs/METHODS.md#rain-wallet-provider). The session is observable through
+`sessionState` and `currentSessionState()` (`RainWalletSessionState`) and through `authState` and
+`currentAuthState()` (`RainWalletAuthState`); `refreshSession()` forces a refresh, `logout()` clears
+the stored session, and `close()` stops the passive session watcher when a provider is discarded.
 `exportRecoveryPhrase()` returns the wallet's 12-word phrase and `exportPrivateKey(account)` one
 private key (`RainWalletKeyAccount.ETHEREUM` or `SOLANA`), both decrypted on the device; the
 formats are a cross-platform contract shared by Rain's SDKs. Every member, its error codes and the
@@ -75,25 +97,35 @@ so returning users sign in or add a passkey, and accounts are never merged. A pa
 is meant to get an email or phone as a second login through `sendContactVerificationCode(contact)`
 and `confirmContactVerification(code)`, which attach the verified contact to this account and never
 move wallets (what an attach refuses and what it replaces today is in the
-`confirmContactVerification` row of [docs/METHODS.md](../docs/METHODS.md#rain-wallet-provider) and
-in the known issues above); `exportRecoveryPhrase()` is its backup path either way.
+`confirmContactVerification` row of
+[docs/METHODS.md](../docs/METHODS.md#rain-wallet-provider) and in the known issues above);
+`exportRecoveryPhrase()` is its backup path either way.
 
 Notes:
 
 - The wallet backend's configuration is one-shot per app launch; the first authentication call
   applies it, `passkeyDomain` included, so a second provider with a different domain in the same
   launch makes every authentication call throw `RainError.InvalidConfig` until the app relaunches.
-- The embedded backend identity is Rain's production wallet backend; there is no host-facing
-  environment switch.
-- What leaves the device: the email address or phone number passed to `sendLoginCode` or
-  `sendContactVerificationCode`, sent to the wallet backend to deliver the code and key the account
-  (on confirm of an attach, the verified contact and its verification token go to the backend's
-  account lookup, which names the account the contact signs in to, and then to its user update); on
-  a passkey sign-up the passkey's attestation, the passkey name `passkey-<unix seconds>`
-  and a temporary session key, on a passkey sign-in the passkey's assertion, on `addPasskey` a new
-  passkey's attestation. The session stays on the device in storage the backend SDK owns; wallet
-  keys live in the wallet backend and reach the device only through the export methods. This module
-  sends nothing else.
+- The embedded backend identity follows `RainWalletConfig.environment`; the sandbox is the one
+  environment with a wallet backend behind it today, so pass `Sandbox` until Rain turns production,
+  the default, on.
+- What leaves the device: the canonical email address or phone number passed to `sendLoginCode`
+  goes to your `authTokenProvider`. The wallet auth token it returns, bound to that contact, goes
+  to Rain as the bearer of the code request, the code verify (the typed code, encrypted), the
+  sign-up and the login; Rain delivers the code and keys the account on the contact the token
+  names. The contact also reaches Rain inside the verification token the code verify answers with,
+  which the sign-up and the login send back, and, on a first login, inside the sign-up message the
+  device signs. The email address or phone number passed to `sendContactVerificationCode` is sent
+  to the wallet backend to deliver the code; on confirm of an attach, the verified contact and its
+  verification token go to the backend's account lookup, which names the account the contact signs
+  in to, and then to its user update. On a passkey sign-up the passkey's attestation, the passkey
+  name `passkey-<unix seconds>` and a temporary session key go to the wallet backend; on a passkey
+  sign-in the passkey's assertion; on `addPasskey` a new passkey's attestation. The session stays
+  on the device in storage the backend SDK owns; wallet keys live in the wallet backend and reach
+  the device only through the export methods. This module sends nothing else.
+- A code login leaves the user's sessions on other devices alone, so a code login on a new phone
+  leaves a lost one signed in until its session lapses; a passkey login revokes them, so the
+  signed-out device's `onSessionExpired` fires at its next call.
 - The Rain wallet cannot be registered together with the provider from `rain-turnkey-android` in
   one `RainSdk`: `build()` refuses the pair, because both drive one process-wide wallet backend.
 - Capabilities: `EXPORT`, `MULTI_CHAIN`, plus `GAS_SPONSORSHIP` while `sponsorGas` is on. Signing is
@@ -111,5 +143,7 @@ Notes:
   and a send there throws `RainError.ChainNotSupported` (`RAIN_104`) before any network work.
 - `RainWalletSessionState` and `RainWalletAuthState` are exhaustive: a `when` over them needs no
   `else` branch, and a new state is a breaking change shipped in a major version.
+  `RainWalletEnvironment` is the other way round: a `when` over it needs an `else` branch, so a
+  deployment can be added without one.
 - Every public signature of this module stays free of wallet-backend types, and the backend adapter
   is an `implementation` dependency, so your compile classpath never sees it.

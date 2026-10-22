@@ -321,8 +321,9 @@ internal class TurnkeySessionCoordinator(
     /**
      * Clears the stored session after Turnkey refused to refresh it with HTTP 401 on the stamp-login
      * request (sdk-kotlin 2.1.0 `TurnkeyContext.refreshSession` wraps it in `FailedToRefreshSession`).
-     * The session was revoked out from under this device, which is what a login on another device
-     * does (`invalidateExisting`), and the stored copy still carries its local expiry. Without the
+     * The session was revoked out from under this device, which is what a passkey login on another
+     * device does (`invalidateExisting`; a code login through Rain revokes nothing), and the stored
+     * copy still carries its local expiry. Without the
      * clear, [currentState], [sessionStates] and every read derived from them would keep saying
      * Active until the JWT lapsed, up to the session's whole lifetime, while every call failed. The
      * clear flips them with the failure. The watcher then sees Active → Unauthenticated, and

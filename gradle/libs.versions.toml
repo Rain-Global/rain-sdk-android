@@ -24,6 +24,7 @@ detekt = "2.0.0-alpha.6"
 
 # -- Core SDK Dependencies --
 portal-android = "9.2.0"
+# A bump re-runs ClientSignatureMessageTest: the sign-up message the device signs for rain-api comes from the vendor's serializer.
 turnkey = "2.1.0"
 turnkey-http = "2.2.0"
 turnkey-types = "2.1.0"

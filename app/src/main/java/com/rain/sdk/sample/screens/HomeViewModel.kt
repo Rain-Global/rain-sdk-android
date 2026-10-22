@@ -559,11 +559,24 @@ class HomeViewModel(
                 _state.update {
                     it.copy(
                         isLoading = false,
-                        statusText = "Rain Wallet login failed: ${e.message}"
+                        statusText = rainWalletAuthFailureText("Rain Wallet login failed", e)
                     )
                 }
             }
         }
+    }
+
+    /**
+     * The status line for a failed Rain wallet authentication call: the three codes the Rain
+     * endpoints add get a hint a tester can act on, every other failure shows the SDK's message. A
+     * mint the demo could not make offline arrives as the same `RAIN_301` as Rain being unreachable.
+     */
+    private fun rainWalletAuthFailureText(label: String, e: Exception): String = when {
+        e is RainError.Unauthorized -> "$label: Rain refused the wallet auth token or this tenant (${e.code}); check the Api-Key's scope"
+        e is RainError.NetworkError -> "$label: Rain or the demo's token mint could not be reached (${e.code}); check the connection and try again"
+        e is RainError.InvalidConfig && e.message.orEmpty().contains("authTokenProvider") ->
+            "$label: the demo could not mint a wallet auth token (${e.code}); enter the sandbox Api-Key and user ID on Home"
+        else -> "$label: ${e.message}"
     }
 
     fun verifyRainWalletOtp() {
@@ -1702,6 +1715,24 @@ data class HomeUiState(
             mode == WalletMode.Turnkey && backendOwner == SessionStore.Provider.RainWallet ->
                 "The Rain Wallet tab configured the shared wallet backend this launch — relaunch the app to log in here"
             else -> null
+        }
+
+    /**
+     * The Rain wallet mints its wallet auth tokens through the demo's Rain API client, so a code
+     * login needs the sandbox Api-Key and user ID on Home; a passkey sign-in, a passkey sign-up,
+     * an added passkey and a contact attach need no token. A build pointed at production is not
+     * gated here: the SDK refuses `RainWalletEnvironment.Production` at construction, and the card
+     * shows that error.
+     */
+    val rainWalletAuthAvailable: Boolean
+        get() = rainApiKey.isNotBlank() && userId.isNotBlank()
+
+    /** Why [rainWalletAuthAvailable] is false, for the Rain Wallet card; null when it is true. */
+    val rainWalletAuthNotice: String?
+        get() = if (rainWalletAuthAvailable) {
+            null
+        } else {
+            "Enter the sandbox Rain Api-Key and user ID on the Home card first: the demo mints the wallet auth token with them"
         }
 
     /** The contact the selected Rain Wallet channel sends to. */

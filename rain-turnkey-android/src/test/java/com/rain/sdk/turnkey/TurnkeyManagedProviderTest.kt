@@ -24,8 +24,8 @@ import org.junit.Test
 
 /**
  * The managed-auth surface of [TurnkeyProvider]: the two [TurnkeyConfig] modes, the BYO guard,
- * forwarding to the controller through the real wiring (only the vendor context is faked), and
- * account provisioning at resolution.
+ * forwarding to the controller through the real wiring (only the vendor context and the Rain
+ * client are faked), and account provisioning at resolution.
  *
  * The BYO constructor takes the vendor's `TurnkeyContext` singleton, whose class initializer
  * dispatches onto `Dispatchers.Main`; on the JVM that dispatcher is absent, so a test dispatcher
@@ -53,14 +53,23 @@ class TurnkeyManagedProviderTest {
         if (mainSet) Dispatchers.resetMain()
     }
 
+    private val tokenRequests = mutableListOf<LoginContact?>()
+
     private fun managedConfig(
         organizationId: String = "org-a",
         authProxyConfigId: String = "proxy-a",
+        rainApiBaseUrl: String = "https://api-dev.rain.xyz",
         passkeyDomain: String? = null,
+        authTokenProvider: suspend (LoginContact?) -> String = { "wat_1" },
     ) = TurnkeyConfig(
         application = mockk<Application>(),
         organizationId = organizationId,
         authProxyConfigId = authProxyConfigId,
+        rainApiBaseUrl = rainApiBaseUrl,
+        authTokenProvider = { contact ->
+            tokenRequests += contact
+            authTokenProvider(contact)
+        },
         passkeyDomain = passkeyDomain,
     )
 
@@ -98,8 +107,10 @@ class TurnkeyManagedProviderTest {
         expectThrows<RainError.InvalidConfig> { provider.sendLoginCode(LoginContact.Phone("+19999999999")) }
         expectThrows<RainError.InvalidConfig> { provider.confirmLoginCode("123456") }
         expectThrows<RainError.InvalidConfig> { provider.logout() }
-        assertThat(turnkey.sendOtpCalls).isEmpty()
+        assertThat(turnkey.createdDeviceKeys).isEmpty()
         assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
+        assertThat(TurnkeyConfig(turnkey = TurnkeyContext).managedRainApiBaseUrl).isNull()
+        assertThat(TurnkeyConfig(turnkey = TurnkeyContext).managedAuthTokenProvider).isNull()
 
         // Key export is not an authentication member: with the host's live session it works here too.
         assertThat(provider.exportRecoveryPhrase()).isEqualTo(turnkey.stubbedMnemonic)
@@ -141,36 +152,43 @@ class TurnkeyManagedProviderTest {
             configured += organizationId to authProxyConfigId
         }
         val turnkey = MockTurnkey(session = null)
-        val provider = TurnkeyProvider(managedConfig("org-a", "proxy-a"), contextOverride = turnkey)
+        val rainApi = MockRainApiAuth()
+        val provider = TurnkeyProvider(managedConfig("org-a", "proxy-a"), contextOverride = turnkey, rainApiOverride = rainApi)
         assertThat(configured).isEmpty()
 
         provider.sendLoginCode(LoginContact.Email("user@example.com"))
 
         assertThat(configured).containsExactly("org-a" to "proxy-a")
-        assertThat(turnkey.sendOtpCalls).containsExactly(MockTurnkey.SendOtpCall("user@example.com", OtpChannel.EMAIL))
+        assertThat(tokenRequests).containsExactly(LoginContact.Email("user@example.com"))
+        assertThat(rainApi.initOtpCalls).containsExactly("wat_1")
     }
 
     @Test
-    fun `managed mode forwards an SMS send with its channel and canonical number`() = runTest {
+    fun `managed mode asks the config's token provider for an SMS send with the canonical number`() = runTest {
         val turnkey = MockTurnkey(session = null)
-        val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey)
+        val rainApi = MockRainApiAuth()
+        val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey, rainApiOverride = rainApi)
 
         provider.sendLoginCode(LoginContact.Phone("+1 999 999 9999"))
 
-        assertThat(turnkey.sendOtpCalls).containsExactly(MockTurnkey.SendOtpCall("+19999999999", OtpChannel.SMS))
+        assertThat(tokenRequests).containsExactly(LoginContact.Phone("+19999999999"))
+        assertThat(rainApi.initOtpCalls).containsExactly("wat_1")
     }
 
     @Test
     fun `managed mode forwards the OTP flow and reports the session it produced`() = runTest {
         val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-        turnkey.onCompleteOtp = { turnkey.authenticate() }
-        val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey)
+        turnkey.onStoreSession = { turnkey.authenticate() }
+        val rainApi = MockRainApiAuth()
+        val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey, rainApiOverride = rainApi)
         assertThat(provider.hasActiveSession()).isFalse()
 
         provider.sendLoginCode(LoginContact.Email("user@example.com"))
         provider.confirmLoginCode("123456")
 
-        assertThat(turnkey.completeOtpCalls).hasSize(1)
+        assertThat(rainApi.verifyOtpCalls).hasSize(1)
+        assertThat(rainApi.loginCalls).hasSize(1)
+        assertThat(turnkey.storeSessionCalls).hasSize(1)
         assertThat(provider.hasActiveSession()).isTrue()
         assertThat(provider.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
         assertThat(provider.authState.first()).isEqualTo(TurnkeyAuthState.Authenticated)
@@ -198,14 +216,14 @@ class TurnkeyManagedProviderTest {
     @Test
     fun `a managed login over a live session hands the wallet create built the new user's address`() = runTest {
         val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()))
-        val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey)
+        val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey, rainApiOverride = MockRainApiAuth())
         try {
             val wallet = provider.create(providerContext())
             assertThat(wallet.getWalletAddress()).isEqualTo(MockTurnkey.DEFAULT_WALLET_ADDRESS)
 
             // Another user logs in over the live session; the vendor now lists that user's wallet.
             val other = "0x9999999999999999999999999999999999999999"
-            turnkey.onCompleteOtp = {
+            turnkey.onStoreSession = {
                 val reAddressed = MockTurnkey.walletWithEthereumAddress(other)
                 turnkey.wallets = listOf(reAddressed.copy(accounts = reAddressed.accounts + MockTurnkey.solanaAccount()))
             }
@@ -233,12 +251,14 @@ class TurnkeyManagedProviderTest {
     }
 
     @Test
-    fun `blank managed ids are rejected on the first auth call with InvalidConfig`() = runTest {
+    fun `a blank organization id is rejected on the first auth call with InvalidConfig`() = runTest {
         val turnkey = MockTurnkey(session = null)
-        val provider = TurnkeyProvider(managedConfig(organizationId = "  "), contextOverride = turnkey)
+        val rainApi = MockRainApiAuth()
+        val provider = TurnkeyProvider(managedConfig(organizationId = "  "), contextOverride = turnkey, rainApiOverride = rainApi)
 
         expectThrows<RainError.InvalidConfig> { provider.sendLoginCode(LoginContact.Email("user@example.com")) }
-        assertThat(turnkey.sendOtpCalls).isEmpty()
+        assertThat(tokenRequests).isEmpty()
+        assertThat(rainApi.initOtpCalls).isEmpty()
     }
 
     @Test
@@ -251,6 +271,8 @@ class TurnkeyManagedProviderTest {
                 application = mockk<Application>(),
                 organizationId = "org-a",
                 authProxyConfigId = "proxy-a",
+                rainApiBaseUrl = "https://api-dev.rain.xyz",
+                authTokenProvider = { "wat_1" },
                 onSessionExpired = { hookCalls++ },
             ),
             contextOverride = turnkey,
@@ -398,7 +420,7 @@ class TurnkeyManagedProviderTest {
     @Test
     fun `managed mode forwards the contact-attach calls with the canonical contact`() = runTest {
         val turnkey = MockTurnkey()
-        val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey)
+        val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey, rainApiOverride = MockRainApiAuth())
 
         provider.sendContactVerificationCode(LoginContact.Phone("+1 999-999-9999"))
         provider.confirmContactVerification("000000")
@@ -419,10 +441,11 @@ class TurnkeyManagedProviderTest {
         }
         assertThat(refused).hasMessageThat().contains("managed mode")
         expectThrows<RainError.InvalidConfig> { byo.confirmContactVerification("123456") }
-        assertThat(byoContext.sendOtpCalls).isEmpty()
+        assertThat(byoContext.createdDeviceKeys).isEmpty()
 
         val turnkey = MockTurnkey()
-        val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey)
+        val rainApi = MockRainApiAuth()
+        val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey, rainApiOverride = rainApi)
         provider.close()
         expectThrows<RainError.InvalidConfig> { provider.sendContactVerificationCode(LoginContact.Email("user@example.com")) }
         expectThrows<RainError.InvalidConfig> { provider.confirmContactVerification("123456") }

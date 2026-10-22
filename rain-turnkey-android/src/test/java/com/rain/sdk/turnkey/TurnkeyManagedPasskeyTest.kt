@@ -3,6 +3,7 @@ package com.rain.sdk.turnkey
 import android.app.Activity
 import com.google.common.truth.Truth.assertThat
 import com.rain.sdk.error.RainError
+import com.turnkey.core.models.AuthState
 import com.turnkey.types.V1AddressFormat
 import io.mockk.mockk
 import kotlinx.coroutines.CancellationException
@@ -16,16 +17,18 @@ import org.junit.Test
 
 /**
  * The passkey flows of [TurnkeyManagedAuthController], sign-in and sign-up, over the seam: the
- * same session handling the code login pins in [TurnkeyManagedAuthTest], plus what a passkey
- * ceremony adds (the domain, the sign-up refusal over a live session, the fresh key cleared
- * after a failed ceremony). Vendor types stay inside method bodies (see [TurnkeyErrorMappingTest]
- * for why); the Activity is a MockK stand-in the mock never touches.
+ * session handling the code login pins in [TurnkeyManagedAuthTest], where a passkey login differs
+ * (the user's other sessions revoked, so a failed switch signs the device out with the host hook
+ * held silent), plus what a passkey ceremony adds (the domain, the sign-up refusal over a live
+ * session, the fresh key cleared after a failed ceremony). Vendor types stay inside method bodies
+ * (see [TurnkeyErrorMappingTest] for why); the Activity is a MockK stand-in the mock never touches.
  */
 class TurnkeyManagedPasskeyTest {
 
     private var hookCalls = 0
     private val activity: Activity = mockk(relaxed = true)
     private val domain = "passkeys.example.com"
+    private val tokenRequests = mutableListOf<LoginContact?>()
 
     @Before
     fun setUp() = assumeJdk24()
@@ -36,14 +39,22 @@ class TurnkeyManagedPasskeyTest {
         retryDelay = { },
     )
 
+    @Suppress("LongParameterList") // one knob per controller dependency, all but the vendor defaulted
     private fun controller(
         turnkey: MockTurnkey,
+        rainApi: MockRainApiAuth = MockRainApiAuth(),
         passkeyDomain: String? = domain,
         configurationError: RainError? = null,
         coordinator: TurnkeySessionCoordinator = coordinator(turnkey),
         nowEpochSeconds: () -> Double = { 1_700_000_000.5 },
+        authTokenProvider: suspend (LoginContact?) -> String = { "wat_1" },
     ) = TurnkeyManagedAuthController(
         context = turnkey,
+        rainApi = rainApi,
+        authTokenProvider = { contact ->
+            tokenRequests += contact
+            authTokenProvider(contact)
+        },
         coordinator = coordinator,
         configure = { configurationError },
         passkeyDomain = passkeyDomain,
@@ -62,6 +73,9 @@ class TurnkeyManagedPasskeyTest {
 
         val call = turnkey.passkeyLoginCalls.single()
         assertThat(call.sessionKey).startsWith("rain-turnkey-")
+        // The parent organization resolves the passkey's sub-organization; no token, no Rain leg.
+        assertThat(call.organizationId).isNull()
+        assertThat(tokenRequests).isEmpty()
         // The vendor auto-selected the first session, so no redundant re-select and nothing cleared.
         assertThat(turnkey.selectSessionCalls).isEmpty()
         assertThat(turnkey.selectedSessionKey).isEqualTo(call.sessionKey)
@@ -137,22 +151,69 @@ class TurnkeyManagedPasskeyTest {
     }
 
     @Test
-    fun `a select failure after a passkey login signs the device out without the hook`() = runTest {
-        val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()))
-        turnkey.selectSessionError = RuntimeException("select failed")
-        val controller = controller(turnkey)
+    fun `a select failure after a passkey login signs the device out without the hook, and a later genuine death still notifies`() =
+        runTest {
+            val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()))
+            turnkey.selectSessionError = RuntimeException("select failed")
+            val coordinator = coordinator(turnkey)
+            val controller = controller(turnkey, coordinator = coordinator)
+            // Monitored, as a host runs it: the sign-out below is a death the watcher sees and the
+            // suppression has to consume, or the next genuine death would be swallowed.
+            coordinator.startMonitoring(backgroundScope)
+            runCurrent()
 
-        expectThrows<RainError.ProviderError> { controller.loginWithPasskey(activity) }
+            expectThrows<RainError.ProviderError> { controller.loginWithPasskey(activity) }
 
-        val fresh = turnkey.passkeyLoginCalls.single().sessionKey
-        // The fresh key is cleared (the select did not take effect) and the previous session, already
-        // revoked server-side by the login, is cleared too, with the host hook silent.
-        assertThat(turnkey.clearSessionCalls).contains(fresh)
-        assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(1)
-        assertThat(turnkey.selectedSessionKey).isNull()
-        assertThat(hookCalls).isEqualTo(0)
-        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
-    }
+            val fresh = turnkey.passkeyLoginCalls.single().sessionKey
+            // The fresh key is cleared (the select did not take effect) and the previous session, already
+            // revoked server-side by the login, is cleared too, with the host hook silent. Read before
+            // the scheduler runs anything else: the host reads these right after the throw.
+            assertThat(turnkey.clearSessionCalls).contains(fresh)
+            assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(1)
+            assertThat(turnkey.selectedSessionKey).isNull()
+            assertThat(controller.hasActiveSession()).isFalse()
+            assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
+            assertThat(hookCalls).isEqualTo(0)
+            runCurrent()
+            assertThat(hookCalls).isEqualTo(0)
+
+            // A genuine death after a re-login still notifies the host.
+            turnkey.authenticate()
+            runCurrent()
+            turnkey.session = null
+            turnkey.authStateFlow.value = AuthState.unauthenticated
+            runCurrent()
+            assertThat(hookCalls).isEqualTo(1)
+        }
+
+    @Test
+    fun `a select failure whose sign-out also fails surfaces the select error, keeps the previous session and re-arms the hook`() =
+        runTest {
+            val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()))
+            turnkey.selectSessionError = RuntimeException("select failed")
+            turnkey.clearSelectedSessionError = RuntimeException("storage locked")
+            val coordinator = coordinator(turnkey)
+            val controller = controller(turnkey, coordinator = coordinator)
+            coordinator.startMonitoring(backgroundScope)
+            runCurrent()
+
+            val thrown = expectThrows<RainError.ProviderError> { controller.loginWithPasskey(activity) }
+
+            // The select failure is what surfaces; the failed clear is logged. The previous session is
+            // still selected, so the device reads signed in, and the host hook stayed silent.
+            assertThat(thrown.causeChain().any { it === turnkey.selectSessionError }).isTrue()
+            assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(1)
+            assertThat(turnkey.selectedSessionKey).isEqualTo(MockTurnkey.DEFAULT_SESSION_KEY)
+            assertThat(controller.hasActiveSession()).isTrue()
+            assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+            assertThat(hookCalls).isEqualTo(0)
+
+            // The sign-out did not happen, so the suppression armed for it must not swallow a real death.
+            turnkey.session = null
+            turnkey.authStateFlow.value = AuthState.unauthenticated
+            runCurrent()
+            assertThat(hookCalls).isEqualTo(1)
+        }
 
     @Test
     fun `a vendor failure during login is mapped and the live session stays selected`() = runTest {
@@ -231,11 +292,11 @@ class TurnkeyManagedPasskeyTest {
         controller.loginWithPasskey(activity)
         controller.confirmLoginCode("123456")
 
-        // The code binds no device key, so the vendor's key cleanup after the ceremony cannot hurt
-        // it, and the confirm is the ordinary login over a live session.
-        val confirm = turnkey.completeOtpCalls.single()
-        assertThat(confirm.contact).isEqualTo("user@example.com")
+        // The code binds no device key until the confirm creates one, so the vendor's key cleanup
+        // after the ceremony cannot hurt it, and the confirm is the ordinary login over a live session.
+        val confirm = turnkey.storeSessionCalls.single()
         assertThat(turnkey.selectedSessionKey).isEqualTo(confirm.sessionKey)
+        assertThat(turnkey.createdDeviceKeys).containsExactly("device-key-1")
     }
 
     @Test

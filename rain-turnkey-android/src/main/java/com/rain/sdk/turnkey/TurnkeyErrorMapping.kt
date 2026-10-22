@@ -31,9 +31,9 @@ import timber.log.Timber
  *   in its message it claims only 401 (`TokenExpired`) and 403 (`Unauthorized`); any other status
  *   returns null on purpose so the shared prose rules can read the body, pinned by the test
  *   `an unclassified HTTP status falls through to the prose checks`.
- * - It is total for a [RainApiAuthFailure], the Rain client's refusal on the managed-auth legs that
- *   run against Rain's embedded-wallet endpoints instead of the auth proxy, by the kind the client
- *   read off the status; see [mapRainApiAuthFailure].
+ * - It is total for a [RainApiAuthFailure], the Rain client's refusal on the managed-auth legs,
+ *   which run against Rain's embedded-wallet endpoints, by the kind the client read off the status;
+ *   see [mapRainApiAuthFailure].
  * - It returns null for everything else, which leaves the shared prose fallback in charge.
  *
  * A failed passkey ceremony is the one place the vendor's own type says nothing: the login and
@@ -96,9 +96,9 @@ internal object TurnkeyErrorMapping {
 
     /**
      * [map] plus the authentication log line, for the managed-login catch-all boundary. On the
-     * auth-proxy calls (code request, code verification, login) nothing hands the throwable to the
-     * log: an auth-proxy failure can echo the user's contact address, so only the code and the class
-     * name are recorded, and no step of the mapping logs the throwable itself.
+     * authentication calls nothing hands the throwable to the log: a failure there can echo the
+     * user's contact address, so only the code and the class name are recorded, and no step of the
+     * mapping logs the throwable itself.
      */
     fun mapAuthError(e: Throwable): RainError {
         val mapped = map(e)
@@ -120,7 +120,7 @@ internal object TurnkeyErrorMapping {
         return mapped
     }
 
-    /** No throwable in this log line: an auth-proxy failure can echo the user's contact address. */
+    /** No throwable in this log line: an authentication failure can echo the user's contact address. */
     private fun logAuthFailure(mapped: RainError, e: Throwable) {
         Timber.e(
             "Rain SDK: Authentication error %s (%s)",
@@ -143,7 +143,7 @@ internal object TurnkeyErrorMapping {
      *  - Everything else → ProviderError
      *
      * Logs nothing itself: the session coordinator records an unmapped failure at its boundary, and
-     * the auth-proxy calls must not put the throwable in the log at all.
+     * the authentication calls must not put the throwable in the log at all.
      */
     @Suppress("ReturnCount") // one return per vendor variant reads better than a nested when
     fun mapTurnkeyError(e: TurnkeyKotlinError): RainError {

@@ -31,11 +31,15 @@ class TurnkeyManagedContactAttachTest {
         retryDelay = { },
     )
 
+    /** The Rain client and the token supplier serve the login legs only: the attach runs through the vendor's auth proxy. */
     private fun controller(
         turnkey: MockTurnkey,
+        rainApi: MockRainApiAuth = MockRainApiAuth(),
         passkeyDomain: String? = "passkeys.example.com",
     ) = TurnkeyManagedAuthController(
         context = turnkey,
+        rainApi = rainApi,
+        authTokenProvider = { "wat_1" },
         coordinator = coordinator(turnkey),
         configure = { null },
         passkeyDomain = passkeyDomain,
@@ -76,20 +80,24 @@ class TurnkeyManagedContactAttachTest {
     @Test
     fun `a verification code and a login code coexist and neither confirm consumes the other's`() = runTest {
         val turnkey = MockTurnkey()
-        val controller = controller(turnkey)
-        turnkey.stubbedOtpChallenge = OtpChallenge(otpId = "otp-login", encryptionTargetBundle = "b1", channel = OtpChannel.EMAIL)
+        val rainApi = MockRainApiAuth()
+        rainApi.initOtp = { RainApiOtpChallenge("otp-login", "b1") }
+        val controller = controller(turnkey, rainApi)
         controller.sendLoginCode(LoginContact.Email("login@example.com"))
         turnkey.stubbedOtpChallenge = OtpChallenge(otpId = "otp-attach", encryptionTargetBundle = "b2", channel = OtpChannel.EMAIL)
         controller.sendContactVerificationCode(LoginContact.Email("attach@example.com"))
 
         controller.confirmContactVerification("111111")
 
+        // The attach spent its proxy code; the login's Rain code is untouched and nothing was stored.
         assertThat(turnkey.verifyOtpTokenCalls.single().otpId).isEqualTo("otp-attach")
-        assertThat(turnkey.completeOtpCalls).isEmpty()
+        assertThat(rainApi.verifyOtpCalls).isEmpty()
+        assertThat(turnkey.storeSessionCalls).isEmpty()
 
         controller.confirmLoginCode("222222")
 
-        assertThat(turnkey.completeOtpCalls.single().otpId).isEqualTo("otp-login")
+        assertThat(rainApi.verifyOtpCalls.single().otpId).isEqualTo("otp-login")
+        assertThat(turnkey.storeSessionCalls).hasSize(1)
         assertThat(turnkey.verifyOtpTokenCalls).hasSize(1)
     }
 

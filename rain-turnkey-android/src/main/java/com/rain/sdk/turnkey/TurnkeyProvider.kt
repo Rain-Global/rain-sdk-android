@@ -17,6 +17,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl
+import okhttp3.OkHttpClient
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** The message every call on a closed provider carries; one literal so the two guards cannot drift. */
@@ -28,9 +30,12 @@ internal const val TURNKEY_PROVIDER_CLOSED_MESSAGE = "This provider was closed; 
  * - **Bring-your-own** — `TurnkeyConfig(turnkey)`, the public Turnkey integration: the host drives
  *   Turnkey's Kotlin SDK itself (passkeys, auth proxy, OAuth, OTP), completes login, and hands the
  *   authenticated [TurnkeyContext] singleton here. The SDK never touches authentication.
- * - **Managed** — `TurnkeyConfig(application, organizationId, authProxyConfigId)`: the SDK owns
- *   Turnkey authentication (a one-time code by email or SMS, or a passkey, through Turnkey's auth
- *   proxy; Ethereum and Solana accounts provisioned on first login). Internal API, marked
+ * - **Managed** — `TurnkeyConfig(application, organizationId, authProxyConfigId, rainApiBaseUrl, authTokenProvider)`:
+ *   the SDK owns authentication (a one-time code by email or SMS through Rain's embedded-wallet
+ *   endpoints under a wallet auth token the host's backend mints, or a passkey; a passkey sign-up
+ *   and a contact attach through Turnkey's auth proxy; Ethereum and Solana accounts provisioned on
+ *   first login).
+ *   Internal API, marked
  *   [InternalRainTurnkeyApi]: the building block of the Rain wallet provider (`RainProvider` in `rain-wallet-android`), not a host-facing mode.
  *
  * @param turnkey The `TurnkeyContext` singleton every wallet call goes through — authenticated by
@@ -75,14 +80,22 @@ class TurnkeyConfig internal constructor(
     /** Managed-mode ids; null in bring-your-own mode, where the host owns authentication. */
     internal val managed: ManagedIds?,
 ) {
-    /** SDK-managed auth against the Turnkey organization + auth-proxy configuration. */
+    /** SDK-managed auth: the Turnkey organization and its auth-proxy configuration, Rain's API host and the host's token supplier. */
     internal class ManagedIds(
         val application: Application,
         val organizationId: String,
+        /** The auth-proxy configuration the passkey sign-up and the contact attach run through; the vendor is initialized with it. */
         val authProxyConfigId: String,
+        /** Rain's API host for the device half of the embedded-wallet auth; https, validated at construction. */
+        val rainApiBaseUrl: HttpUrl,
+        /** The host's wallet auth token for a contact, the canonical contact of a code flow. */
+        val authTokenProvider: suspend (LoginContact?) -> String,
         /** The passkey relying-party domain, normalized; null when passkeys are off. */
         val passkeyDomain: String?,
-    )
+    ) {
+        /** The base URL as hosts read it: normalized, no trailing slash. */
+        val rainApiBaseUrlText: String get() = rainApiBaseUrl.toString().trimEnd('/')
+    }
 
     /** Managed mode's organization id; null in bring-your-own mode. Read by the Rain wallet's tests. */
     @InternalRainTurnkeyApi
@@ -91,6 +104,14 @@ class TurnkeyConfig internal constructor(
     /** Managed mode's auth-proxy configuration id; null in bring-your-own mode. */
     @InternalRainTurnkeyApi
     val managedAuthProxyConfigId: String? get() = managed?.authProxyConfigId
+
+    /** Managed mode's Rain API base URL as validated at construction, without a trailing slash; null in bring-your-own mode. */
+    @InternalRainTurnkeyApi
+    val managedRainApiBaseUrl: String? get() = managed?.rainApiBaseUrlText
+
+    /** Managed mode's wallet auth token supplier; null in bring-your-own mode. Read by the Rain wallet's tests. */
+    @InternalRainTurnkeyApi
+    val managedAuthTokenProvider: (suspend (LoginContact?) -> String)? get() = managed?.authTokenProvider
 
     /**
      * Managed mode's passkey relying-party domain as normalized at construction; null in
@@ -124,15 +145,27 @@ class TurnkeyConfig internal constructor(
      * managed provider with *different* ids or a different domain, or a `TurnkeyContext` the app
      * initialized itself make every auth call throw
      * `RainError.InvalidConfig` — relaunch the app to change them; a failed Turnkey initialization
-     * makes them throw `RainError.InternalError` until relaunch.
+     * makes them throw `RainError.InternalError` until relaunch. A malformed URL is refused by this
+     * constructor.
      *
-     * A successful [TurnkeyProvider.confirmLoginCode] revokes the user's other Turnkey sessions on
-     * every device (`invalidateExisting`): logging in on a second phone signs the first one out, and
-     * that device's [onSessionExpired] fires at its next call.
+     * The code login runs through Rain's embedded-wallet endpoints under a wallet auth token the
+     * host's backend mints; `TurnkeyManagedAuthController` says what each leg carries. A successful
+     * [TurnkeyProvider.confirmLoginCode] leaves the user's sessions on other devices alone; a
+     * successful [TurnkeyProvider.loginWithPasskey] still revokes them (`invalidateExisting`), so a
+     * passkey login on a second phone signs the first one out, and that device's [onSessionExpired]
+     * fires at its next call.
      *
      * @param application The host application; Turnkey's Kotlin SDK needs it for secure storage.
      * @param organizationId Your Turnkey parent organization id.
-     * @param authProxyConfigId The auth-proxy configuration id from the Turnkey dashboard.
+     * @param authProxyConfigId The auth-proxy configuration id from the Turnkey dashboard; the
+     *   passkey sign-up and the contact attach run through that proxy.
+     * @param rainApiBaseUrl The Rain API host the authentication runs against, an absolute https
+     *   URL such as `https://api-dev.rain.xyz` naming a host and nothing more; validated at construction.
+     * @param authTokenProvider The wallet auth token the host's backend mints for the contact given,
+     *   the canonical contact of a code flow. It runs under the provider's authentication lock, so
+     *   it must not call back into the provider, and it should
+     *   carry its own timeout. The rules are the Rain wallet's (`RainWalletConfig.authTokenProvider`
+     *   in docs/METHODS.md), the retry per refused leg and how a failure surfaces included.
      * @param walletAddress Optional EVM address override, validated and stored in EIP-55 checksum form; null or blank means no override.
      * @param passkeyDomain The passkey relying-party domain: a registrable domain of at least two labels
      *   the host controls, such as `passkeys.example.com`, whose `/.well-known/assetlinks.json` follows
@@ -144,10 +177,11 @@ class TurnkeyConfig internal constructor(
      *   working when it changes. It is part of the one-shot configuration, so a second managed
      *   provider with a different domain in the same app launch makes every auth call throw
      *   `RainError.InvalidConfig` until relaunch.
-     * @throws RainError.InvalidConfig (`RAIN_102`) when [walletAddress] is malformed or carries a
-     *   wrong mixed-case checksum, or when [passkeyDomain] is not a domain of at least two labels made
-     *   of letters, digits and hyphens (a scheme, port, path or a single label such as `localhost`
-     *   is refused).
+     * @throws RainError.InvalidConfig (`RAIN_102`) when [rainApiBaseUrl] is not an absolute https URL
+     *   naming a host and nothing more (a path, query, fragment or userinfo is refused), when
+     *   [walletAddress] is malformed or carries a wrong mixed-case checksum, or when
+     *   [passkeyDomain] is not a domain of at least two labels made of letters, digits and hyphens (a
+     *   scheme, port, path or a single label such as `localhost` is refused).
      */
     @InternalRainTurnkeyApi
     @Suppress("LongParameterList") // the BYO constructor's parameters plus the managed ids and the passkey domain; five have defaults
@@ -155,6 +189,8 @@ class TurnkeyConfig internal constructor(
         application: Application,
         organizationId: String,
         authProxyConfigId: String,
+        rainApiBaseUrl: String,
+        authTokenProvider: suspend (LoginContact?) -> String,
         walletAddress: String? = null,
         sessionPolicy: TurnkeySessionPolicy = TurnkeySessionPolicy(),
         onSessionExpired: (() -> Unit)? = null,
@@ -172,6 +208,8 @@ class TurnkeyConfig internal constructor(
             application,
             organizationId,
             authProxyConfigId,
+            rainApiBaseUrlOrThrow(rainApiBaseUrl),
+            authTokenProvider,
             TurnkeyPasskeys.normalizedDomainOrNull(passkeyDomain),
         ),
     )
@@ -201,6 +239,8 @@ class TurnkeyConfig internal constructor(
 class TurnkeyProvider internal constructor(
     private val config: TurnkeyConfig,
     private val contextOverride: TurnkeyContextProtocol?,
+    /** Test seam: stands in for the Rain client built from the managed configuration's base URL. */
+    private val rainApiOverride: RainApiAuthClientProtocol? = null,
 ) : ProviderDescriptor {
 
     constructor(config: TurnkeyConfig) : this(config, contextOverride = null)
@@ -234,6 +274,8 @@ class TurnkeyProvider internal constructor(
         config.managed?.let { ids ->
             TurnkeyManagedAuthController(
                 context = turnkeyContext,
+                rainApi = rainApiOverride ?: RainApiAuthClient(ids.rainApiBaseUrl, rainApiHttpClient),
+                authTokenProvider = ids.authTokenProvider,
                 coordinator = coordinator,
                 configure = {
                     TurnkeyManagedConfigurator.configure(
@@ -446,35 +488,34 @@ class TurnkeyProvider internal constructor(
     }
 
     /**
-     * Sends a one-time login code to [contact], by email or by SMS; touches no existing session.
-     * Applies the one-shot Turnkey configuration when it is the first auth call. Calling it again
-     * for the same contact issues a new code and replaces the pending one, which is how a code is
-     * resent: Turnkey codes expire after 5 minutes by default, lock after 3 wrong attempts, and at
-     * most 3 can be active per user. Calling it for another contact or channel retires the pending
-     * code first, so a failed switch leaves nothing confirmable. A phone number must be in E.164
-     * form (`+`, country code and number, digits only); spaces, dots, hyphens and parentheses are
-     * removed first, and a parenthesised trunk zero is refused. The contact is canonicalized once,
-     * an email trimmed and lowercased because Turnkey matches it case-sensitively, and the same
-     * string is sent on confirm. Throws `RainError.InvalidConfig` for a blank email or a phone
-     * number outside E.164. Managed mode only.
+     * Sends a one-time login code to [contact], by email or by SMS: asks the configuration's
+     * `authTokenProvider` for a wallet auth token bound to the canonical contact, then has Rain
+     * deliver the code; touches no existing session. Applies the one-shot Turnkey configuration
+     * when it is the first auth call. Calling it again for the same contact issues a new code and
+     * replaces the pending one, which is how a code is resent; calling it for another contact or
+     * channel retires the pending code first, so a failed switch leaves nothing confirmable. The
+     * contact is canonicalized once (see [LoginContact]) and the same string names the account on
+     * sign-up. Throws `RainError.InvalidConfig`, `RainError.Unauthorized`, `RainError.NetworkError`,
+     * `RainError.ProviderError` or `RainError.InternalError`; the `sendLoginCode` row under *Members*
+     * in `docs/TURNKEY_SUPPORT.md` says which condition maps to which. Managed mode only.
      */
     @InternalRainTurnkeyApi
     suspend fun sendLoginCode(contact: LoginContact) = requireManagedAuth().sendLoginCode(contact)
 
     /**
-     * Confirms the code from [sendLoginCode]. A first login signs the user up and creates one
-     * wallet holding an Ethereum and a Solana account inside the same request; a returning login
-     * backfills a missing account onto the existing wallet. A rejected code throws
-     * `RainError.InvalidLoginCode` and keeps the challenge, so the user can retype it; any other
-     * failure inside the code check itself also keeps it, while a failure after the code was
-     * accepted drops it. If that failure is the switch to the new session, the device is signed
-     * out as well — the login already revoked the previous session server-side — without firing
-     * [TurnkeyConfig.onSessionExpired]; a provisioning failure keeps the new session, which heals
-     * at resolution. A successful login revokes the user's other Turnkey sessions on every
-     * device (`invalidateExisting`); the signed-out device's `onSessionExpired` fires at its next
-     * call. The session switch and the backfill run after the code was accepted, so a login that
-     * succeeded can still end in `RainError.TokenExpired` or `RainError.Unauthorized`. The channel
-     * the code went out on makes no difference here. Managed mode only.
+     * Confirms the code from [sendLoginCode]: Rain verifies the code and logs the contact's wallet
+     * in, or signs the contact up when this tenant has none, creating one wallet holding an Ethereum
+     * and a Solana account inside the sign-up; a returning login backfills a missing account onto
+     * the existing wallet. A rejected code keeps the challenge, so the user can retype it, and so
+     * does any other failure of the code check, an unreadable answer excepted, since Rain accepted
+     * the code; a failure after the code was accepted drops it. A failed switch to the new session
+     * leaves the previous session selected; a provisioning failure keeps the new session, which
+     * heals at resolution. A code login leaves the user's sessions on other devices alone. The
+     * channel the code went out on makes no difference here. Throws `RainError.InvalidLoginCode`,
+     * `RainError.InvalidConfig`, `RainError.Unauthorized`, `RainError.NetworkError`,
+     * `RainError.ProviderError`, `RainError.InternalError` or, from the session switch,
+     * `RainError.TokenExpired`; the `confirmLoginCode` row under *Members* in
+     * `docs/TURNKEY_SUPPORT.md` says which condition maps to which. Managed mode only.
      */
     @InternalRainTurnkeyApi
     suspend fun confirmLoginCode(code: String) = requireManagedAuth().confirmLoginCode(code)
@@ -608,7 +649,16 @@ class TurnkeyProvider internal constructor(
     private fun requireManagedAuth(): TurnkeyManagedAuthController =
         managedAuth ?: throw RainError.InvalidConfig(
             "Authentication methods are only available in managed mode — construct the provider " +
-                "with TurnkeyConfig(application, organizationId, authProxyConfigId); in " +
+                "with TurnkeyConfig(application, organizationId, authProxyConfigId, rainApiBaseUrl, authTokenProvider); in " +
                 "bring-your-own mode the host owns authentication"
         )
+
+    private companion object {
+        /**
+         * One HTTP client for every managed provider in the process: each client owns a thread pool
+         * and a connection pool that `close()` would otherwise have to release, and a host that
+         * rebuilds the provider per login, as the sample does, would leak one per login.
+         */
+        val rainApiHttpClient: OkHttpClient by lazy { RainApiAuthClient.defaultHttpClient() }
+    }
 }

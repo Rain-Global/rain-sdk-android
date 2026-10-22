@@ -1,6 +1,8 @@
 package com.rain.sdk.sample
 
 import com.google.common.truth.Truth.assertThat
+import com.rain.sdk.wallet.RainWalletContact
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -35,5 +37,16 @@ class RainSessionRainApiTest {
         session.configureRainApi("key-123", "user-abc")
         session.clearRainApi()
         assertThat(session.isRainApiConfigured).isFalse()
+    }
+
+    @Test
+    fun `the wallet auth token provider refuses without a configured client`() {
+        val session = RainSession()
+        val provider = session.walletAuthTokenProvider()
+
+        // The IllegalStateException the SDK reports as RAIN_102 naming the class; the mint itself is
+        // demo code against Rain's endpoint, exercised on the device run.
+        val refused = assertThrows(IllegalStateException::class.java) { runBlocking { provider(RainWalletContact.Email("a@b.c")) } }
+        assertThat(refused).hasMessageThat().isEqualTo(RainSession.RAIN_API_CREDENTIALS_REQUIRED)
     }
 }
