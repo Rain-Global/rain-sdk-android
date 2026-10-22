@@ -65,7 +65,7 @@ methods:
 - **Rain Wallet** (`RainSession.prepareRainWallet`) — the sandbox Rain Api-Key and user ID on the
   Home card first: the demo mints the wallet auth token with that key
   (`POST /v1/issuing/embedded-wallets/auth-tokens`), where a host mints it on its backend; *Send
-  code* and *Create wallet with passkey* stay off until both are entered.
+  code*, *Create wallet with passkey* and *Send verification code* stay off until both are entered.
   The Rain wallet is built with the environment this build points at (`SampleEnvironment`); the SDK
   refuses the production one at construction until Rain turns it on, and the card shows that error.
   Then a contact: an email address, or a phone number when the *Send code by* switch is on Phone. A
@@ -83,9 +83,9 @@ methods:
   finishes the wallet setup); any other failure restarts from *Send code*. An email login and a phone
   login by the same person are two different accounts. The sandbox test number `+1 999-999-9999`
   with the code `000000` worked under the auth proxy; whether Rain's endpoints honour it is
-  unconfirmed, so check it on a dev run before relying on it. On *Send code*, a refused wallet auth
-  token or tenant shows `RAIN_202`, Rain or the demo's mint unreachable `RAIN_301`, a missing
-  Api-Key `RAIN_102`, each with a hint. Two more buttons sit under the code
+  unconfirmed, so check it on a dev run before relying on it. On *Send code* and *Send verification
+  code*, a refused wallet auth token or tenant shows `RAIN_202`, Rain or the demo's mint unreachable
+  `RAIN_301`, a missing Api-Key `RAIN_102`, each with a hint. Two more buttons sit under the code
   step while signed out: *Sign in with passkey* opens the system passkey sheet for an existing
   account, and *Create wallet with passkey* makes a new account whose only login is the passkey, with
   the same wallet setup as a code sign-up, through two passkey prompts (one creates the passkey, one
@@ -94,10 +94,11 @@ methods:
   (`passkeys.uptop.xyz`) to vouch for this build's signing key, see *Demo keystore* under Notes.
   Signed in, *Add a passkey to this account* registers a passkey for a code-created account, and
   the *Add a login contact* step sends a verification code to an email or phone and attaches it on
-  *Verify and attach*, after which that contact signs in to this account by code; a contact another
-  account signs in with is refused (`RAIN_202`) and the card shows the reason. A closed passkey
-  sheet shows `RAIN_401`; after *Create wallet with passkey* the status says to try *Sign in with
-  passkey* first, because the second sheet closes after Rain created the account.
+  *Verify and attach*, after which that contact signs in to this account by code; the SDK does not
+  check whether another account signs in with the contact (a known issue in the CHANGELOG), so
+  attach only a contact of the signed-in user's own. A closed passkey sheet shows `RAIN_401`; after
+  *Create wallet with passkey* the status says to try *Sign in with passkey* first, because the
+  second sheet closes after Rain created the account.
 - **Export keys** — once the Rain Wallet session is active, an *Export keys* card under the Rain Wallet card reveals the recovery phrase,
   the Ethereum private key or the Solana private key, one at a time, through `exportRecoveryPhrase`
   and `exportPrivateKey`, on a restored or reused session before *Initialize Rain*, and after it. While a value shows, the window

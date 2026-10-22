@@ -111,7 +111,6 @@ class RainProviderTest {
         // provisioned Ethereum account.
         assertThat(mapped.walletAddress).isNull()
         assertThat(mapped.managedOrganizationId).isEqualTo(RainWalletBackend.ORGANIZATION_ID)
-        assertThat(mapped.managedAuthProxyConfigId).isEqualTo(RainWalletBackend.AUTH_CONFIG_ID)
         assertThat(mapped.managedRainApiBaseUrl).isEqualTo(RainWalletBackend.SANDBOX_API_BASE_URL)
         assertThat(mapped.onSessionExpired).isSameInstanceAs(hook)
         assertThat(mapped.sponsorGas).isFalse()

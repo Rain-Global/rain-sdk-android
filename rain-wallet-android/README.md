@@ -61,8 +61,8 @@ val client = rain.provider(ProviderId.RAIN)
 ```
 
 `RainWalletConfig` carries `authTokenProvider`, required: the SDK calls it with the canonical
-contact of a code request (an email trimmed and lowercased, a phone number in E.164), or with null
-for a passkey sign-up, and it returns the `token` your backend minted for that contact
+contact of a code request or attach (an email trimmed and lowercased, a phone number in E.164), or
+with null for a passkey sign-up, and it returns the `token` your backend minted for that contact
 with an Api-Key holding `embeddedWallets:write` (`POST /v1/issuing/embedded-wallets/auth-tokens`).
 Keep the Api-Key off the device, and have the mint endpoint authenticate the app user and throttle
 before minting: Rain limits by IP only, and a code is SMS spend. It also carries `environment`
@@ -98,29 +98,28 @@ so returning users sign in or add a passkey, and accounts are never merged; the 
 a sign-up, once for the passkey and once for the login on the new account, and `authTokenProvider`
 is called with no contact first. A passkey-only account is meant to get an email or phone as a
 second login through `sendContactVerificationCode(contact)` and `confirmContactVerification(code)`,
-which attach the verified contact to this account and never move wallets (what an attach refuses
-and what it replaces today is in the `confirmContactVerification` row of
-[docs/METHODS.md](../docs/METHODS.md#rain-wallet-provider) and in the known issues above);
+which attach the verified contact to this account and never move wallets (what an attach replaces
+today, and the contact it cannot yet refuse, are in the `confirmContactVerification` row of
+[docs/METHODS.md](../docs/METHODS.md#rain-wallet-provider) and the CHANGELOG's known issues);
 `exportRecoveryPhrase()` is its backup path either way.
 
 Notes:
 
 - The wallet backend's configuration is one-shot per app launch; the first authentication call
-  applies it, `passkeyDomain` included, so a second provider with a different domain in the same
-  launch makes every authentication call throw `RainError.InvalidConfig` until the app relaunches.
+  applies it, `environment` and `passkeyDomain` included, so a second provider with a different
+  deployment (another base URL) or domain in the same launch makes every authentication call throw
+  `RainError.InvalidConfig` until the app relaunches.
 - The embedded backend identity follows `RainWalletConfig.environment`; the sandbox is the one
   environment with a wallet backend behind it today, so pass `Sandbox` until Rain turns production,
   the default, on.
-- What leaves the device: the canonical email address or phone number passed to `sendLoginCode`
-  goes to your `authTokenProvider`. The wallet auth token it returns, bound to that contact, goes
-  to Rain as the bearer of the code request, the code verify (the typed code, encrypted), the
-  sign-up and the login; Rain delivers the code and keys the account on the contact the token
-  names. The contact also reaches Rain inside the verification token the code verify answers with,
-  which the sign-up and the login send back, and, on a first login, inside the sign-up message the
-  device signs. The email address or phone number passed to `sendContactVerificationCode` is sent
-  to the wallet backend to deliver the code; on confirm of an attach, the verified contact and its
-  verification token go to the backend's account lookup, which names the account the contact signs
-  in to, and then to its user update. On a passkey sign-up the passkey's attestation goes to
+- What leaves the device: the canonical email address or phone number passed to `sendLoginCode` or
+  `sendContactVerificationCode` goes to your `authTokenProvider`. The wallet auth token it returns,
+  bound to that contact, goes to Rain as the bearer of the code request, the code verify (the typed
+  code, encrypted), the sign-up and the login; Rain delivers the code and keys the account on the
+  contact the token names. The contact also reaches Rain inside the verification token the code
+  verify answers with, which the sign-up and the login send back, and, on a first login, inside the
+  sign-up message the device signs. On confirm of an attach, the verification token and the contact
+  go to the wallet backend's user update. On a passkey sign-up the passkey's attestation goes to
   Rain's passkey sign-up, then the passkey's assertion to the wallet backend for the login; the
   passkey's name, `passkey-<unix seconds>`, goes to the device's credential provider, and Rain names
   the authenticator it registers itself. On a passkey sign-in the passkey's assertion; on

@@ -16,8 +16,8 @@ import com.rain.sdk.turnkey.TurnkeyConfig
  *
  * @param authTokenProvider Returns the wallet auth token your backend mints with its Api-Key
  *                          (`POST /v1/issuing/embedded-wallets/auth-tokens`) for the contact the
- *                          SDK passes: the canonical contact of a code request, or null for a
- *                          passkey sign-up. Called once per code request or sign-up, and once
+ *                          SDK passes: the canonical contact of a code request or attach, or null
+ *                          for a passkey sign-up. Called once per code request or sign-up, and once
  *                          more for each leg Rain refuses the token on. It runs under the
  *                          provider's authentication lock, so it must not call back into the
  *                          provider, and it should carry its own timeout. Throw a `RainError` to
@@ -32,8 +32,10 @@ import com.rain.sdk.turnkey.TurnkeyConfig
  *                    [RainWalletEnvironment.Production] by default, which the [RainProvider]
  *                    constructor refuses with `RainError.InvalidConfig` until the release that turns
  *                    production on, so pass [RainWalletEnvironment.Sandbox] until then, or a
- *                    [RainWalletEnvironment.Custom]. The `RainWalletConfig` row of docs/METHODS.md
- *                    has the rules.
+ *                    [RainWalletEnvironment.Custom]. Part of the backend's one-shot configuration,
+ *                    so a second provider with another deployment in the same launch makes every
+ *                    authentication call throw `RainError.InvalidConfig`. The `RainWalletConfig`
+ *                    row of docs/METHODS.md has the rules.
  * @param sessionPolicy Expiry/refresh/retry behaviour for the session guarding every wallet call.
  * @param onSessionExpired Re-auth hook: invoked once per session death when the session dies and
  *                         cannot be refreshed, whether that is discovered during a wallet call or
@@ -101,7 +103,6 @@ internal fun RainWalletConfig.toBacking(application: Application): TurnkeyConfig
     return TurnkeyConfig(
         application = application,
         organizationId = backend.organizationId,
-        authProxyConfigId = RainWalletBackend.AUTH_CONFIG_ID,
         rainApiBaseUrl = backend.apiBaseUrl,
         authTokenProvider = { contact -> mintToken(contact?.toRainWallet()) },
         sessionPolicy = sessionPolicy.toBacking(),

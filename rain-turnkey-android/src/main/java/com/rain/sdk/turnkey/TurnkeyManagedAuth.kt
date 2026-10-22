@@ -39,11 +39,15 @@ import kotlin.concurrent.withLock as withJavaLock
  * `TurnkeyContext` is a Kotlin `object` whose `initSuspend` silently returns when it has already
  * run, so without this guard a host that changed ids — or a context configured outside the SDK —
  * would keep transacting against the first organization with no signal. Configuring again with
- * the same ids and passkey domain is a no-op; with different ones, or over a foreign
- * configuration, it is an error the provider surfaces on every auth call (the app has to
- * relaunch to change them). The passkey domain is part of the configuration because the vendor
- * reads the relying party for its passkey login from there, the cross-platform contract shared
- * by Rain's SDKs; the add-passkey ceremony takes it explicitly.
+ * the same organization id, Rain API base URL and passkey domain is a no-op; with different ones,
+ * or over a foreign configuration, it is an error the provider surfaces on every auth call (the
+ * app has to relaunch to change them). The base URL is part of the configuration because two
+ * providers talking to two Rain deployments would still share the one vendor context and its
+ * sessions; the passkey domain because the vendor reads the relying party for its passkey login
+ * from there, the cross-platform contract shared by Rain's SDKs; the add-passkey ceremony takes it
+ * explicitly. The vendor gets no auth-proxy configuration: the managed login runs against Rain's
+ * endpoints, and with a null id the vendor skips its wallet-kit fetch (sdk-kotlin 2.1.0
+ * `TurnkeyContext.initSuspend`).
  *
  * Known limit: the foreign-configuration probe reads a field the vendor assigns asynchronously,
  * so a host `TurnkeyContext.init` still in flight from `Application.onCreate` can slip past it.
@@ -63,7 +67,7 @@ internal object TurnkeyManagedConfigurator {
     @Volatile
     private var initAttempted = false
 
-    private val defaultInit: suspend (Application, String, String, String?) -> Unit = { app, organizationId, authProxyConfigId, passkeyDomain ->
+    private val defaultInit: suspend (Application, String, String, String?) -> Unit = { app, organizationId, _, passkeyDomain ->
         // The vendor's own `init` launches `initSuspend` on Dispatchers.Main.immediate. Running it
         // there ourselves keeps its lifecycle-observer registration on the main thread while
         // surfacing a failure to this coroutine instead of an uncaught crash on the vendor's scope.
@@ -76,7 +80,8 @@ internal object TurnkeyManagedConfigurator {
                 app,
                 VendorTurnkeyConfig(
                     organizationId = organizationId,
-                    authProxyConfigId = authProxyConfigId,
+                    // No auth-proxy configuration id: Rain's endpoints replace the proxy, and a null
+                    // id keeps the vendor from fetching a wallet-kit configuration it would not use.
                     // Null when passkeys are off: the code-only configuration the vendor got before.
                     authConfig = passkeyDomain?.let { AuthConfig(rpId = it) },
                 ),
@@ -97,39 +102,38 @@ internal object TurnkeyManagedConfigurator {
 
     /**
      * Configures the vendor once per process. Returns the error to surface on every auth call
-     * when the ids are blank, the ids or the passkey domain differ from the ones the process was
-     * configured with, the vendor
-     * was configured outside the SDK, or its initialization failed; null when this provider may
-     * proceed.
+     * when the organization id or the Rain API base URL is blank, either or the passkey domain
+     * differs from what the process was configured with, the vendor was configured outside the
+     * SDK, or its initialization failed; null when this provider may proceed.
      */
     suspend fun configure(
         application: Application,
         organizationId: String,
-        authProxyConfigId: String,
+        rainApiBaseUrl: String,
         passkeyDomain: String?,
     ): RainError? {
         // Steady state — every auth call re-checks — needs no lock: a stale read only falls through.
-        if (configuredWith == Triple(organizationId, authProxyConfigId, passkeyDomain)) return null
-        return mutex.withLock { configureLocked(application, organizationId, authProxyConfigId, passkeyDomain) }
+        if (configuredWith == Triple(organizationId, rainApiBaseUrl, passkeyDomain)) return null
+        return mutex.withLock { configureLocked(application, organizationId, rainApiBaseUrl, passkeyDomain) }
     }
 
     private suspend fun configureLocked(
         application: Application,
         organizationId: String,
-        authProxyConfigId: String,
+        rainApiBaseUrl: String,
         passkeyDomain: String?,
     ): RainError? {
-        val requested = Triple(organizationId, authProxyConfigId, passkeyDomain)
+        val requested = Triple(organizationId, rainApiBaseUrl, passkeyDomain)
         val existing = configuredWith
         return when {
-            organizationId.isBlank() || authProxyConfigId.isBlank() ->
-                RainError.InvalidConfig("organizationId and authProxyConfigId must not be blank")
+            organizationId.isBlank() || rainApiBaseUrl.isBlank() ->
+                RainError.InvalidConfig("organizationId and rainApiBaseUrl must not be blank")
             existing != null -> if (existing == requested) {
                 null
             } else {
                 RainError.InvalidConfig(
-                    "The wallet backend is already configured with different ids for this app launch; " +
-                        "relaunch the app to change them"
+                    "The wallet backend is already configured with different ids, Rain API base URL or passkey " +
+                        "domain for this app launch; relaunch the app to change them"
                 )
             }
             vendorInitializedProbe() && !initAttempted -> RainError.InvalidConfig(
@@ -176,8 +180,7 @@ internal object TurnkeyManagedConfigurator {
  * vendor's device primitives around them (a device key, the code's encryption, the client
  * signatures, the session store); account provisioning, session restore and logout; the passkey
  * flows, sign-in, sign-up and add-passkey, when a relying-party domain is configured; and contact
- * attach, a verified email or phone added to the signed-in account as a login method, through the
- * vendor's auth proxy. Every Rain
+ * attach, a verified email or phone added to the signed-in account as a login method. Every Rain
  * leg carries a wallet auth token the host's backend mints through [authTokenProvider], bound to
  * the tenant and to the contact of the flow, so no leg sends a contact as a field of its own: it
  * reaches Rain inside the verification token and the signed sign-up message, both of which name
@@ -194,7 +197,7 @@ internal object TurnkeyManagedConfigurator {
  * One auth operation runs at a time: send, confirm, logout and provisioning all read-then-write
  * the same process-wide vendor state.
  */
-@Suppress("TooManyFunctions", "LargeClass") // one mutex serializes the whole auth flow; the attach's auth-proxy helpers leave with the proxy
+@Suppress("TooManyFunctions") // one mutex serializes the whole auth flow
 internal class TurnkeyManagedAuthController
 @Suppress("LongParameterList") // the vendor seam, the Rain client, the host's token supplier, the coordinator, the configurator and two knobs
 constructor(
@@ -219,9 +222,6 @@ constructor(
 
     private class PendingOtp(val challenge: OtpChallenge, val contact: String, val token: AuthToken)
 
-    /** The attach's pending code; no token, because the attach runs through the vendor's auth proxy. */
-    private class PendingContactOtp(val challenge: OtpChallenge, val contact: String)
-
     private val flowMutex = Mutex()
     private val pendingLock = ReentrantLock()
     private var pendingOtp: PendingOtp? = null
@@ -230,7 +230,7 @@ constructor(
      * The verification code for a contact being attached, kept apart from [pendingOtp] so a login
      * cannot consume a verification code and a verification cannot consume a login code.
      */
-    private var pendingContactOtp: PendingContactOtp? = null
+    private var pendingContactOtp: PendingOtp? = null
     private val closed = AtomicBoolean(false)
     private val closedFlow = MutableStateFlow(false)
 
@@ -432,13 +432,14 @@ constructor(
 
     /**
      * Sends a verification code to [contact], a contact the signed-in user wants to attach to this
-     * account as a login method, distinct from [sendLoginCode], which starts a login. Requires a
-     * live session, checked before anything is sent. The contact is canonicalized like a login
-     * contact and that string is what the account stores. The pending code follows the login send's
-     * rule: a second call for the same contact replaces it on success and keeps it on failure, and
-     * a call for another contact or channel retires it before the vendor is asked, so a failed
-     * switch leaves nothing confirmable. Accounts are never merged: a contact another account
-     * already signs in with is refused on confirm, before anything changes.
+     * account as a login method, distinct from [sendLoginCode], which starts a login: a wallet auth
+     * token for the canonical contact from the host, then `POST /otp/init` under it. Requires a live
+     * session, checked before anything is sent. The contact is canonicalized like a login contact
+     * and that string is what the account stores. The pending code follows the login send's rule:
+     * a second call for the same contact replaces it on success and keeps it on failure, and a call
+     * for another contact or channel retires it before anything is sent, so a failed switch leaves
+     * nothing confirmable. Accounts are never merged, and nothing checks whether another account in
+     * this tenant signs in with the contact; see [confirmContactVerification].
      */
     suspend fun sendContactVerificationCode(contact: LoginContact) {
         flowMutex.withLock {
@@ -446,69 +447,52 @@ constructor(
             val (canonical, channel) = canonicalize(contact)
             retirePendingContactOtpUnlessFor(canonical, channel)
             requireLiveSession()
-            val challenge = guarded { context.sendOtp(canonical, channel) }
+            val pending = requestCode(canonical, channel)
             pendingLock.withJavaLock {
-                pendingContactOtp = PendingContactOtp(challenge, canonical)
+                pendingContactOtp = pending
             }
         }
     }
 
     /**
      * Confirms the code from [sendContactVerificationCode] and attaches the contact, verified. The
-     * session is checked before the code is spent, so a dead session costs no code. A rejected code
-     * throws [RainError.InvalidLoginCode] and keeps the challenge, as [confirmLoginCode] does, and so
-     * does any other failure inside the verify step. Once the verify returned a token the code is
-     * spent, so the challenge is dropped whether or not what follows succeeds. What follows is the
-     * ownership check, then the update: the backend's account lookup names the account the contact
-     * signs in to, and another account than the signed-in one refuses the attach with
-     * [RainError.Unauthorized] before anything changes (the backend's update accepts such a
-     * contact: it replaces this account's contact while the other account keeps signing in with
-     * it). This account or none, and the update runs. A failed lookup or update surfaces as its
-     * own error and the user requests a new code.
+     * session is checked before the code is spent, so a dead session costs no code. The code is
+     * verified against Rain with a throwaway device key, deleted afterwards, so a wrong code never
+     * touches the live session's key; a rejected code throws [RainError.InvalidLoginCode] and keeps
+     * the challenge, as [confirmLoginCode] does, and so does any other failure of the verify step.
+     * Once the verify answered the code is spent, so the challenge is dropped whether or not what
+     * follows succeeds: the account's email or phone is set through the vendor's update-user
+     * activity under the live session with the verification token. Nothing asks Rain whether
+     * another wallet in the tenant signs in with the contact, because the one lookup Rain has is
+     * its login, which issues a session on that wallet; until a lookup that issues no session
+     * exists, an attach of such a contact succeeds and rain-api's `findSavedSubOrg` then fails
+     * every code login for the contact the two saved wallets share (a known issue in the
+     * CHANGELOG). A failed update surfaces as its own error with the code spent, and the user
+     * requests a new code.
      */
     suspend fun confirmContactVerification(code: String) {
         flowMutex.withLock {
             prepare()
             val pending = requirePendingContactOtp()
             val trimmed = requireCode(code)
-            val organizationId = requireLiveSession().organizationId
-            val token = guarded(onVendorFailure = ::dropContactOtpUnlessVerifyFailed) {
-                context.verifyOtpToken(pending.challenge, trimmed)
+            requireLiveSession()
+            val throwaway = guarded { context.createDeviceKey() }
+            val verificationToken = try {
+                verifyCode(pending, trimmed, throwaway, ::clearPendingContactOtp)
+            } finally {
+                // Nothing else removes the throwaway key; the token stays usable without it.
+                withContext(NonCancellable) { deleteDeviceKey(throwaway) }
             }
-            clearPendingContactOtp()
-            requireContactFreeOrOurs(pending, token, organizationId)
             // The coordinator is its own mapping boundary: it rethrows cancellation and maps the rest.
-            coordinator.executeWrite { session, _ ->
+            coordinator.executeWrite { live, _ ->
                 when (pending.challenge.channel) {
-                    OtpChannel.EMAIL -> context.setUserEmail(session.organizationId, session.userId, pending.contact, token)
-                    OtpChannel.SMS -> context.setUserPhoneNumber(session.organizationId, session.userId, pending.contact, token)
+                    OtpChannel.EMAIL ->
+                        context.setUserEmail(live.organizationId, live.userId, pending.contact, verificationToken)
+                    OtpChannel.SMS ->
+                        context.setUserPhoneNumber(live.organizationId, live.userId, pending.contact, verificationToken)
                 }
             }
         }
-    }
-
-    /**
-     * Decides, on the raw vendor failure of the attach's confirm, whether the code is still worth
-     * retrying. The code is spent only once the verify step returned a token, so a failure inside
-     * that step keeps the challenge, while a failure in the lookup or update that follows drops it.
-     */
-    private fun dropContactOtpUnlessVerifyFailed(e: Exception) {
-        if (!TurnkeyErrorMapping.isLoginCodeVerifyFailure(e)) clearPendingContactOtp()
-    }
-
-    /**
-     * Refuses the attach when another account signs in with the pending contact, through the auth
-     * proxy's account lookup with the token the verify step returned. The lookup runs outside the
-     * coordinator on purpose: no session stamps it, so a 401 from it is not a session death to
-     * refresh and retry, and [TurnkeyErrorMapping.mapAccountLookupError] maps its failures to
-     * [RainError.ProviderError] whatever the status. A contact no account signs in with, or this
-     * account's own, lets the update run.
-     */
-    private suspend fun requireContactFreeOrOurs(pending: PendingContactOtp, token: String, organizationId: String) {
-        val owner = guarded(map = TurnkeyErrorMapping::mapAccountLookupError) {
-            context.lookupContactOwner(pending.challenge.channel, pending.contact, token)
-        }
-        if (owner != null && owner != organizationId) throw RainError.Unauthorized(CONTACT_OWNED_MESSAGE)
     }
 
     /** Mirrors [retirePendingOtpUnlessFor] for the verification slot. */
@@ -519,7 +503,7 @@ constructor(
         }
     }
 
-    private fun requirePendingContactOtp(): PendingContactOtp =
+    private fun requirePendingContactOtp(): PendingOtp =
         pendingLock.withJavaLock { pendingContactOtp }
             ?: throw RainError.InvalidConfig("No verification code was requested; call sendContactVerificationCode first")
 
@@ -909,8 +893,8 @@ constructor(
 
     /**
      * Makes this controller inert: every auth call throws, the state reads unauthenticated, and the
-     * two pending slots are dropped, since the login slot holds the host's bearer token and nothing
-     * may spend either code after this.
+     * two pending slots are dropped, since each holds the host's bearer token and nothing may spend
+     * one after this.
      */
     fun close() {
         closed.set(true)
@@ -1092,21 +1076,14 @@ constructor(
     /**
      * Runs a vendor or Rain call under the error contract: cancellation propagates untouched, a
      * [RainError] passes through, the Rain client's own [RainApiAuthFailure] passes through raw so
-     * that [rainLegOrNull] can read its kind before it is mapped, and anything else is mapped.
-     * `ensureActive()`, not a cause-chain walk, decides whether a caught exception is really this
-     * coroutine's cancellation: the vendor wraps cancellation in its own error types, but it also
-     * re-emits a sibling's failure as a wrapped `JobCancellationException` while this caller is
-     * still active. [onVendorFailure] sees the raw vendor exception before it is mapped, for
-     * decisions the mapped error cannot carry. [map] turns it into the [RainError] that leaves:
-     * [TurnkeyErrorMapping.mapAuthError] unless the call has a rule of its own, as the account
-     * lookup does.
+     * that [rainLegOrNull] can read its kind before it is mapped, and anything else is mapped
+     * through [TurnkeyErrorMapping.mapAuthError]. `ensureActive()`, not a cause-chain walk, decides
+     * whether a caught exception is really this coroutine's cancellation: the vendor wraps
+     * cancellation in its own error types, but it also re-emits a sibling's failure as a wrapped
+     * `JobCancellationException` while this caller is still active.
      */
     @Suppress("TooGenericExceptionCaught", "ThrowsCount") // the mapping boundary: three pass-throughs and one mapped exit
-    private suspend fun <T> guarded(
-        onVendorFailure: ((Exception) -> Unit)? = null,
-        map: (Throwable) -> RainError = TurnkeyErrorMapping::mapAuthError,
-        block: suspend () -> T,
-    ): T {
+    private suspend fun <T> guarded(block: suspend () -> T): T {
         try {
             return block()
         } catch (e: CancellationException) {
@@ -1117,8 +1094,7 @@ constructor(
             throw e
         } catch (e: Exception) {
             currentCoroutineContext().ensureActive()
-            onVendorFailure?.invoke(e)
-            throw map(e)
+            throw TurnkeyErrorMapping.mapAuthError(e)
         }
     }
 
@@ -1134,9 +1110,6 @@ constructor(
         const val SESSION_MIN_REMAINING_SECONDS = 30.0
         const val SESSION_KEY_PREFIX = "rain-turnkey-"
         const val MANAGED_WALLET_NAME = "Wallet"
-
-        /** The refusal for a contact another account signs in with. Names no contact, by the auth-proxy log rule. */
-        const val CONTACT_OWNED_MESSAGE = "This contact already signs in to another account"
 
         /** Separators people type into a phone number; removed before the E.164 check. */
         private val PHONE_SEPARATORS = Regex("""[\s().-]""")

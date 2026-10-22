@@ -160,7 +160,7 @@ private fun RainWalletAttachStep(state: HomeUiState, actions: ProviderCardAction
         onClick = actions.onSendRainWalletAttachCode,
         modifier = Modifier.fillMaxWidth(),
         style = RainButtonStyle.Secondary,
-        enabled = state.rainWalletAttachContact.isNotBlank() && !inFlight && !state.isLoading,
+        enabled = state.rainWalletAttachContact.isNotBlank() && state.rainWalletAuthAvailable && !inFlight && !state.isLoading,
         loading = inFlight && !codeSent,
     )
     if (codeSent) {

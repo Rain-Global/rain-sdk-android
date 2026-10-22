@@ -1085,7 +1085,7 @@ class HomeViewModel(
                 throw e
             } catch (e: RainError) {
                 SampleLog.w("RainWallet.attach", "send failed ${e.describe()}")
-                _state.update { it.copy(statusText = "Verification code failed (${e.code})") }
+                _state.update { it.copy(statusText = rainWalletAuthFailureText("Verification code failed", e)) }
             } finally {
                 _state.update { it.copy(rainWalletAttachInFlight = false) }
             }
@@ -1095,9 +1095,10 @@ class HomeViewModel(
     /**
      * Confirms the verification code and attaches the contact, which can then sign in to this
      * account by code; the contact goes into its owner slot, so a code login for it reuses the live
-     * session. A rejected code keeps the challenge; a contact another account signs in with is
-     * refused with `RAIN_202` and the slot stays as it was; any other failure restarts from "Send
-     * verification code", which replaces a challenge the SDK kept.
+     * session. A rejected code keeps the challenge; a refused update leaves the slot as it was; any
+     * other failure restarts from "Send verification code", which replaces a challenge the SDK
+     * kept. The SDK does not check whether another account signs in with the contact (a known
+     * issue in the CHANGELOG), so attach only a contact of this user's own.
      */
     fun confirmRainWalletAttach() {
         val s = _state.value
@@ -1124,8 +1125,8 @@ class HomeViewModel(
                     it.copy(rainWalletAttachCode = "", statusText = "That code was not accepted; check it and try again")
                 }
             } catch (e: RainError.Unauthorized) {
-                // The SDK's message says which: another account signs in with that contact, or the
-                // backend refused the update. The code is spent either way, and the slot is untouched.
+                // Rain refused the token or the tenant, or the backend refused the update. The code
+                // is spent either way, and the slot is untouched.
                 SampleLog.w("RainWallet.attach", "attach refused ${e.describe()}")
                 _state.update {
                     it.copy(
@@ -1730,8 +1731,8 @@ data class HomeUiState(
 
     /**
      * The Rain wallet mints its wallet auth tokens through the demo's Rain API client, so a code
-     * login and a passkey sign-up need the sandbox Api-Key and user ID on Home; a passkey sign-in,
-     * an added passkey and a contact attach need no token. A build pointed at production is not
+     * login, a passkey sign-up and a contact attach need the sandbox Api-Key and user ID on Home;
+     * a passkey sign-in and an added passkey need no token. A build pointed at production is not
      * gated here: the SDK refuses `RainWalletEnvironment.Production` at construction, and the card
      * shows that error.
      */

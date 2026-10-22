@@ -5,12 +5,10 @@ import com.rain.sdk.turnkey.rainApiBaseUrlHost
 
 /**
  * Rain's wallet backend identity per [RainWalletEnvironment]: the Turnkey organization the wallets
- * live under, its auth-proxy configuration, which the contact attach runs through, and the Rain
- * API host the authentication runs against. Public identifiers, not secrets: possession grants
- * nothing, because every call to Rain's endpoints needs a wallet auth token the host's backend
- * mints with its Api-Key, the proxy's one-time-code flow still gates the attach, and abuse is
- * bounded by the backends' rate limits. Embedded so a host configures nothing but the environment
- * and the token supplier.
+ * live under and the Rain API host the authentication runs against. Public identifiers, not
+ * secrets: possession grants nothing, because every call to Rain's endpoints needs a wallet auth
+ * token the host's backend mints with its Api-Key and abuse is bounded by Rain's rate limits.
+ * Embedded so a host configures nothing but the environment and the token supplier.
  */
 internal object RainWalletBackend {
     /**
@@ -20,9 +18,6 @@ internal object RainWalletBackend {
      * Rain's other SDKs as a cross-platform contract.
      */
     const val ORGANIZATION_ID: String = "63495e45-8e64-42b5-b602-c68f019ca806"
-
-    /** The auth-proxy configuration of that organization; one for every environment, as the organization is. */
-    const val AUTH_CONFIG_ID: String = "1d8aac5e-f236-4800-bab7-98a9e27b4b2a"
     const val SANDBOX_API_BASE_URL: String = "https://api-dev.rain.xyz"
 
     /** The host production answers from once Rain turns it on; until then [rowFor] refuses [RainWalletEnvironment.Production]. */

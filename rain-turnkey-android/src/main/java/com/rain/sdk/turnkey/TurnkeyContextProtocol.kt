@@ -5,11 +5,9 @@ import com.turnkey.core.TurnkeyContext
 import com.turnkey.core.internal.utils.ClientSignature
 import com.turnkey.core.models.AuthState
 import com.turnkey.core.models.ClientSignaturePayload
-import com.turnkey.core.models.OtpType
 import com.turnkey.core.models.Session
 import com.turnkey.core.models.Wallet
 import com.turnkey.core.models.errors.TurnkeyKotlinError
-import com.turnkey.core.models.otpTypeToFilterTypeMap
 import com.turnkey.crypto.decryptExportBundle
 import com.turnkey.crypto.encryptOtpCodeToBundle
 import com.turnkey.crypto.generateP256KeyPair
@@ -19,7 +17,6 @@ import com.turnkey.passkey.PasskeyUser
 import com.turnkey.passkey.createPasskey
 import com.turnkey.stamper.Stamper
 import com.turnkey.stamper.utils.SignatureFormat
-import com.turnkey.types.ProxyTGetAccountBody
 import com.turnkey.types.TCreateAuthenticatorsBody
 import com.turnkey.types.TCreateWalletAccountsBody
 import com.turnkey.types.TEthSendTransactionBody
@@ -119,8 +116,9 @@ internal interface TurnkeyClientProtocol {
 }
 
 /**
- * The channel a one-time code travels on. Module-owned so the vendor's enum stays inside the
- * adapter; [toVendorOtpType] is the only mapping.
+ * The channel a one-time code travels on. Module-owned: Rain's endpoints read the channel off the
+ * wallet auth token's contact, and the sign-up names the account's email or phone number by it,
+ * so no vendor enum crosses this module for it.
  */
 internal enum class OtpChannel { EMAIL, SMS }
 
@@ -174,9 +172,6 @@ internal interface TurnkeyContextProtocol {
 
     /** Suspends until the vendor singleton has initialized and restored any persisted session. */
     suspend fun awaitReady()
-
-    /** Starts a one-time code for [contact] on [channel]; the returned challenge completes it. */
-    suspend fun sendOtp(contact: String, channel: OtpChannel): OtpChallenge
 
     /**
      * A fresh P-256 key pair in the vendor's keystore, as its compressed public key. The managed
@@ -274,26 +269,12 @@ internal interface TurnkeyContextProtocol {
      */
     suspend fun registerAuthenticator(organizationId: String, userId: String, name: String, registration: PasskeyRegistration)
 
-    // ---- Contact attach (verify a code without logging in, then set the user's contact) ----
+    // ---- Contact attach (a code verified against Rain without logging in, then the user's contact set) ----
 
     /**
-     * Verifies [otpCode] against [challenge] and returns the verification token, without logging
-     * in. Never binds the token to the live session's key: the vendor deletes the bound key on any
-     * failure. The throwaway key it binds instead is deleted before this returns.
+     * Sets the email of user [userId] on [organizationId]; [verificationToken], the token
+     * `POST /otp/verify` answered with for a code sent to that email, marks it verified.
      */
-    suspend fun verifyOtpToken(challenge: OtpChallenge, otpCode: String): String
-
-    /**
-     * The sub-organization whose user signs in with [contact] on [channel], or null when none does:
-     * the auth proxy's Get Account, `POST /v1/account`, filtered by `EMAIL` or `PHONE_NUMBER`. The
-     * proxy requires the [verificationToken] from [verifyOtpToken] to look an email or phone number
-     * up, and the token stays usable afterwards (`TurnkeyContext.loginOrSignUpWithOtp` in sdk-kotlin
-     * 2.1.0 looks the account up with it and then logs in or signs up with the same token). No
-     * session stamps the call.
-     */
-    suspend fun lookupContactOwner(channel: OtpChannel, contact: String, verificationToken: String): String?
-
-    /** Sets the email of user [userId] on [organizationId]; [verificationToken] marks it verified. */
     suspend fun setUserEmail(organizationId: String, userId: String, email: String, verificationToken: String)
 
     /** Sets the phone number, E.164, of user [userId] on [organizationId]; [verificationToken] marks it verified. */
@@ -312,12 +293,6 @@ internal interface TurnkeyContextProtocol {
      * hex without `0x`. The caller checks the length and encodes.
      */
     suspend fun exportAccountPrivateKeyHex(address: String): String
-}
-
-/** The one place the module's channel meets the vendor's enum. */
-internal fun OtpChannel.toVendorOtpType(): OtpType = when (this) {
-    OtpChannel.EMAIL -> OtpType.OTP_TYPE_EMAIL
-    OtpChannel.SMS -> OtpType.OTP_TYPE_SMS
 }
 
 /**
@@ -388,15 +363,6 @@ internal class TurnkeyContextAdapter(
     }
 
     override suspend fun awaitReady() = context.awaitReady()
-
-    override suspend fun sendOtp(contact: String, channel: OtpChannel): OtpChallenge {
-        val result = context.initOtp(otpType = channel.toVendorOtpType(), contact = contact)
-        return OtpChallenge(
-            otpId = result.otpId,
-            encryptionTargetBundle = result.otpEncryptionTargetBundle,
-            channel = channel,
-        )
-    }
 
     // The key pair, the code's encryption, the signatures and the session store all run the
     // vendor's keystore and crypto on the calling thread, and hosts call from the main thread.
@@ -538,42 +504,6 @@ internal class TurnkeyContextAdapter(
                 userId = userId,
             )
         )
-    }
-
-    @Suppress("TooGenericExceptionCaught") // best-effort cleanup: a key that will not delete is logged, the token is already in hand
-    override suspend fun verifyOtpToken(challenge: OtpChallenge, otpCode: String): String = withContext(ioDispatcher) {
-        // The throwaway key pair and the code's encryption are generated on the calling thread.
-        val result = context.verifyOtp(
-            otpId = challenge.otpId,
-            otpCode = otpCode,
-            otpEncryptionTargetBundle = challenge.encryptionTargetBundle,
-            // Never the live session's key: the vendor deletes the bound key on any failure, so a
-            // wrong code would destroy the session. The vendor creates a throwaway key instead.
-            publicKey = null,
-        )
-        // Nothing else removes the throwaway key for a user who never runs a passkey ceremony.
-        try {
-            context.deleteKeyPair(publicKey = result.publicKey)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Timber.w("Rain SDK: could not delete the verification key pair (%s)", e.javaClass.simpleName)
-        }
-        result.verificationToken
-    }
-
-    override suspend fun lookupContactOwner(channel: OtpChannel, contact: String, verificationToken: String): String? {
-        // The vendor's own filter-type map, the one its loginOrSignUpWithOtp hands the same lookup
-        // (docs.turnkey.com/api-reference/auth-proxy/account). The proxy answers an unknown contact
-        // with an empty organizationId, so that reads as "nobody".
-        val response = context.client.proxyGetAccount(
-            ProxyTGetAccountBody(
-                filterType = otpTypeToFilterTypeMap.getValue(channel.toVendorOtpType()).name,
-                filterValue = contact,
-                verificationToken = verificationToken,
-            )
-        )
-        return response.organizationId?.takeIf { it.isNotEmpty() }
     }
 
     override suspend fun setUserEmail(organizationId: String, userId: String, email: String, verificationToken: String) {

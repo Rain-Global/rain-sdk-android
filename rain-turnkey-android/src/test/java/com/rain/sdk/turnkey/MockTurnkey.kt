@@ -369,8 +369,6 @@ internal class MockTurnkey(
 
     // ---- managed auth seams (recorded like the wallet seams above) ----
 
-    data class SendOtpCall(val contact: String, val channel: OtpChannel)
-
     data class EncryptOtpCodeCall(val code: String, val encryptionTargetBundle: String, val publicKey: String)
 
     data class SignUpSignatureCall(val verificationToken: String, val contact: String, val channel: OtpChannel)
@@ -384,16 +382,6 @@ internal class MockTurnkey(
 
     /** When set, [awaitReady] suspends on it — a vendor that never finishes initializing. */
     var awaitReadyGate: CompletableDeferred<Unit>? = null
-
-    val sendOtpCalls = mutableListOf<SendOtpCall>()
-    var sendOtpError: Exception? = null
-
-    /** Returned by [sendOtp] with the requested channel stamped on, like the adapter does. */
-    var stubbedOtpChallenge = OtpChallenge(
-        otpId = "otp-id",
-        encryptionTargetBundle = "bundle",
-        channel = OtpChannel.EMAIL,
-    )
 
     /** Every device key [createDeviceKey] handed out, `device-key-1`, `device-key-2`, ... in order. */
     val createdDeviceKeys = mutableListOf<String>()
@@ -496,29 +484,13 @@ internal class MockTurnkey(
 
     // ---- contact attach seams ----
 
-    data class VerifyOtpTokenCall(val otpId: String, val otpCode: String, val encryptionTargetBundle: String)
-
     data class SetContactCall(val organizationId: String, val userId: String, val contact: String, val verificationToken: String)
-
-    val verifyOtpTokenCalls = mutableListOf<VerifyOtpTokenCall>()
-    var verifyOtpTokenError: Exception? = null
-    var stubbedVerificationToken = "stub-verification-token"
 
     val setUserEmailCalls = mutableListOf<SetContactCall>()
     val setUserPhoneNumberCalls = mutableListOf<SetContactCall>()
 
     /** When set, both contact setters throw this after recording the call. */
     var setUserContactError: Exception? = null
-
-    data class AccountLookupCall(val channel: OtpChannel, val contact: String, val verificationToken: String)
-
-    val accountLookupCalls = mutableListOf<AccountLookupCall>()
-
-    /** The organization [lookupContactOwner] names as the contact's owner; null, the default, is nobody. */
-    var accountLookupResult: String? = null
-
-    /** When set, [lookupContactOwner] throws this after recording the call. */
-    var accountLookupError: Exception? = null
 
     val createWalletCalls = mutableListOf<CreateWalletCall>()
     var createWalletError: Exception? = null
@@ -538,12 +510,6 @@ internal class MockTurnkey(
         awaitReadyCallCount++
         awaitReadyError?.let { throw it }
         awaitReadyGate?.await()
-    }
-
-    override suspend fun sendOtp(contact: String, channel: OtpChannel): OtpChallenge {
-        sendOtpCalls += SendOtpCall(contact, channel)
-        sendOtpError?.let { throw it }
-        return stubbedOtpChallenge.copy(channel = channel)
     }
 
     override suspend fun createDeviceKey(): String {
@@ -630,18 +596,6 @@ internal class MockTurnkey(
     ) {
         registerAuthenticatorCalls += RegisterAuthenticatorCall(organizationId, userId, name, registration)
         registerAuthenticatorError?.let { throw it }
-    }
-
-    override suspend fun verifyOtpToken(challenge: OtpChallenge, otpCode: String): String {
-        verifyOtpTokenCalls += VerifyOtpTokenCall(challenge.otpId, otpCode, challenge.encryptionTargetBundle)
-        verifyOtpTokenError?.let { throw it }
-        return stubbedVerificationToken
-    }
-
-    override suspend fun lookupContactOwner(channel: OtpChannel, contact: String, verificationToken: String): String? {
-        accountLookupCalls += AccountLookupCall(channel, contact, verificationToken)
-        accountLookupError?.let { throw it }
-        return accountLookupResult
     }
 
     override suspend fun setUserEmail(organizationId: String, userId: String, email: String, verificationToken: String) {

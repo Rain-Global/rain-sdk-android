@@ -168,73 +168,7 @@ class TurnkeyErrorMappingTest {
         assertThat(mapping.classify(turnkeyErr)?.errorCode).isEqualTo(RainErrorCode.TOKEN_EXPIRED)
     }
 
-    // ---------- managed auth: rejected login codes (RAIN_203) ----------
-
-    @Test
-    fun `a rejected login code maps to InvalidLoginCode not TokenExpired`() {
-        // The auth proxy answers the verify call with a 4xx and the vendor wraps it twice on the
-        // login-or-signup path. A 401 here is a bad code, not a dead session: no session exists yet.
-        val http = RuntimeException("HTTP error from /v1/otp_verify_v2: 401")
-        val verify = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToVerifyOtp(http)
-        val error = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToLoginOrSignUpWithOtp(verify)
-        val mapped = mapping.mapTurnkeyError(error)
-        assertThat(mapped).isInstanceOf(RainError.InvalidLoginCode::class.java)
-        assertThat(mapped.errorCode).isEqualTo(RainErrorCode.INVALID_LOGIN_CODE)
-    }
-
-    @Test
-    fun `every refused verify status maps to InvalidLoginCode`() {
-        listOf(400, 401, 403).forEach { status ->
-            val http = RuntimeException("HTTP error from /v1/otp_verify_v2: $status")
-            val verify = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToVerifyOtp(http)
-            val error = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToLoginOrSignUpWithOtp(verify)
-            assertThat(mapping.mapTurnkeyError(error)).isInstanceOf(RainError.InvalidLoginCode::class.java)
-        }
-    }
-
-    @Test
-    fun `a proxy 500 on verify is not a rejected code`() {
-        // The Kotlin SDK discards the response body, so no embedded upstream status can be
-        // recovered from a proxy-wrapped rejection: it stays a provider error and the controller
-        // keeps the challenge instead (see isLoginCodeVerifyFailure).
-        val http = RuntimeException("HTTP error from /v1/otp_verify_v2: 500")
-        val verify = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToVerifyOtp(http)
-        assertThat(mapping.mapTurnkeyError(verify)).isInstanceOf(RainError.ProviderError::class.java)
-    }
-
-    @Test
-    fun `isLoginCodeVerifyFailure spots the verify step anywhere in the cause chain`() {
-        val verify = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToVerifyOtp(
-            RuntimeException("HTTP error from /v1/otp_verify_v2: 500")
-        )
-        val wrapped = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToLoginOrSignUpWithOtp(verify)
-        val spent = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToLoginOrSignUpWithOtp(
-            com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToCreateSession(RuntimeException("io"))
-        )
-        assertThat(mapping.isLoginCodeVerifyFailure(verify)).isTrue()
-        assertThat(mapping.isLoginCodeVerifyFailure(wrapped)).isTrue()
-        assertThat(mapping.isLoginCodeVerifyFailure(spent)).isFalse()
-        assertThat(mapping.isLoginCodeVerifyFailure(RuntimeException("boom"))).isFalse()
-    }
-
-    @Test
-    fun `a verify failure without an HTTP status is not a rejected code`() {
-        // verifyOtp wraps every failure; a dropped connection must not read as "retype your code".
-        val verify = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToVerifyOtp(
-            java.io.IOException("unreachable")
-        )
-        val mapped = mapping.mapTurnkeyError(verify)
-        assertThat(mapped).isInstanceOf(RainError.ProviderError::class.java)
-    }
-
-    @Test
-    fun `a rate-limited verify is not a rejected code`() {
-        // 429 is "too many attempts" and the repo classifies it as transient elsewhere.
-        val http = RuntimeException("HTTP error from /v1/otp_verify_v2: 429")
-        val verify = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToVerifyOtp(http)
-        val mapped = mapping.mapTurnkeyError(verify)
-        assertThat(mapped).isInstanceOf(RainError.ProviderError::class.java)
-    }
+    // ---------- the vendor's own OTP wrappers, which the managed login no longer calls ----------
 
     @Test
     fun `a verify failure wrapping InvalidResponse still maps to InternalError`() {
@@ -334,44 +268,6 @@ class TurnkeyErrorMappingTest {
         val turnkeyErr = com.turnkey.core.models.errors.TurnkeyKotlinError.InvalidSession()
         val mapped = mapping.mapAuthError(turnkeyErr)
         assertThat(mapped).isInstanceOf(RainError.TokenExpired::class.java)
-    }
-
-    @Test
-    fun `mapAccountLookupError is ProviderError for every status and passes a RainError through`() {
-        // No session stamps the auth proxy's account lookup, so a 401 or 403 inside its failure is
-        // neither RAIN_201 nor RAIN_202; the status survives in the message, as on a code request.
-        for (status in listOf(400, 401, 403, 429, 500)) {
-            val mapped = mapping.mapAccountLookupError(RuntimeException("HTTP error from /v1/account: $status"))
-            assertThat(mapped).isInstanceOf(RainError.ProviderError::class.java)
-            assertThat(mapped).hasMessageThat().contains(status.toString())
-        }
-        assertThat(mapping.mapAccountLookupError(java.io.IOException("offline")))
-            .isInstanceOf(RainError.ProviderError::class.java)
-
-        val passthrough = RainError.Unauthorized("refused")
-        assertThat(mapping.mapAccountLookupError(passthrough)).isSameInstanceAs(passthrough)
-    }
-
-    @Test
-    fun `mapAccountLookupError never hands the throwable to the log`() {
-        val seen = StringBuilder()
-        val throwables = mutableListOf<Throwable>()
-        val tree = object : timber.log.Timber.Tree() {
-            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
-                seen.append(message).append('\n')
-                if (t != null) throwables += t
-            }
-        }
-        timber.log.Timber.plant(tree)
-        try {
-            mapping.mapAccountLookupError(RuntimeException("HTTP error from /v1/account for someone@example.com: 401"))
-        } finally {
-            timber.log.Timber.uproot(tree)
-        }
-        assertThat(seen.toString()).contains("Authentication error")
-        assertThat(seen.toString()).contains(RainErrorCode.PROVIDER_ERROR.code)
-        assertThat(seen.toString()).doesNotContain("example.com")
-        assertThat(throwables).isEmpty()
     }
 
     // ---------- HTTP statuses the vendor reports as plain exceptions ----------
