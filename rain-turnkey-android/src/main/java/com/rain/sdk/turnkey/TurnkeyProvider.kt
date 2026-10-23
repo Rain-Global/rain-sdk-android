@@ -236,6 +236,7 @@ class TurnkeyProvider internal constructor(
     private val contextOverride: TurnkeyContextProtocol?,
     /** Test seam for the Rain API client. */
     private val rainApiOverride: RainApiAuthClientProtocol? = null,
+    private val pendingPasskeySignupsOverride: PendingPasskeySignupStore? = null,
 ) : ProviderDescriptor {
 
     constructor(config: TurnkeyConfig) : this(config, contextOverride = null)
@@ -281,6 +282,7 @@ class TurnkeyProvider internal constructor(
                     )
                 },
                 passkeyDomain = ids.passkeyDomain,
+                pendingPasskeySignups = pendingPasskeySignupsOverride ?: SharedPreferencesPendingPasskeySignupStore(ids.application),
             )
         }
     }
