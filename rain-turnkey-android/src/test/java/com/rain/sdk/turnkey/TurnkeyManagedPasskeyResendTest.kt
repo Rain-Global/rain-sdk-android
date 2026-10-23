@@ -4,6 +4,7 @@ import android.app.Activity
 import com.google.common.truth.Truth.assertThat
 import com.google.common.truth.Truth.assertWithMessage
 import com.rain.sdk.error.RainError
+import com.rain.sdk.error.RainErrorCode
 import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
@@ -11,14 +12,18 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Before
 import org.junit.Test
+import java.io.IOException
+import java.net.SocketTimeoutException
 
 /**
- * The passkey sign-up's kept registration in [TurnkeyManagedAuthController]: a sign-up whose answer
- * Rain left in doubt keeps the passkey it created, and the next call resends it instead of opening
- * the sheet, so Rain records the account the first call created rather than joining a second one
- * to it. Which answers keep the registration, which settle it and what each resend answers are
- * pinned here; the rest of the passkey flows are in [TurnkeyManagedPasskeyTest], whose controller
- * seam this copies.
+ * The kept registration behind [TurnkeyManagedAuthController.signUpWithPasskey]: a sign-up Rain left
+ * in doubt stays in the [PendingPasskeySignupStore], and the next call resends it under a fresh token
+ * and device key with no sheet. The tests pin which answers keep, drop or settle it, and what a code
+ * login, a logout, `close()` and a relaunch leave of it; the registration is saved before the send,
+ * so a request cancelled in flight is kept the way a lost answer is, and so is one the process died
+ * on. The host-facing rule is the `signUpWithPasskey` row of docs/METHODS.md. The
+ * sign-up itself, the stamp fallback and the device key's deletion are in
+ * [TurnkeyManagedPasskeySignupTest], whose controller seam this copies.
  */
 class TurnkeyManagedPasskeyResendTest {
 
@@ -33,6 +38,7 @@ class TurnkeyManagedPasskeyResendTest {
         turnkey: MockTurnkey,
         rainApi: MockRainApiAuth = MockRainApiAuth(),
         authTokenProvider: suspend (LoginContact?) -> String = { "wat_1" },
+        pendingPasskeySignups: PendingPasskeySignupStore = InMemoryPendingPasskeySignupStore(),
     ) = TurnkeyManagedAuthController(
         context = turnkey,
         rainApi = rainApi,
@@ -43,131 +49,222 @@ class TurnkeyManagedPasskeyResendTest {
         coordinator = TurnkeySessionCoordinator(turnkey = turnkey, onSessionExpired = { hookCalls++ }, retryDelay = { }),
         configure = { null },
         passkeyDomain = "passkeys.example.com",
+        pendingPasskeySignups = pendingPasskeySignups,
         nowEpochSeconds = { 1_700_000_000.5 },
     )
 
-    /** The client's transport failure on the sign-up leg, as [RainApiAuthClient] throws it. */
+    /** The client's transport failure on the sign-up leg. */
     private fun lostAnswer() = RainError.NetworkError(
         "Rain API /v1/issuing/embedded-wallets/signup/passkey: SocketTimeoutException",
-        java.net.SocketTimeoutException(),
+        SocketTimeoutException(),
     )
+
+    private fun unreadable() = RainError.InternalError("Rain API /v1/issuing/embedded-wallets/signup/passkey: unreadable answer")
+
+    private fun tokenRejected() = MockRainApiAuth.tokenRejected(MockRainApiAuth.SIGNUP_PASSKEY_PATH)
 
     private fun inProgress() = MockRainApiAuth.refusal(RainApiAuthFailure.Kind.SignupInProgress, 409, MockRainApiAuth.SIGNUP_PASSKEY_PATH)
 
     private fun passkeyTaken() = MockRainApiAuth.refusal(RainApiAuthFailure.Kind.PasskeyTaken, 409, MockRainApiAuth.SIGNUP_PASSKEY_PATH)
 
-    @Test
-    fun `a sign-up Rain never answered keeps the passkey, and the next call resends it with a fresh token and no sheet`() = runTest {
-        val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-        turnkey.onPasskeyLogin = { turnkey.authenticate() }
-        val rainApi = MockRainApiAuth()
-        var answers = 0
-        rainApi.signupPasskey = { if (answers++ == 0) throw lostAnswer() else RainApiSignup("sub-passkey") }
-        var minted = 0
-        val controller = controller(turnkey, rainApi, authTokenProvider = { "wat_${++minted}" })
+    private fun tokenUsed() = MockRainApiAuth.refusal(RainApiAuthFailure.Kind.TokenUsed, 409, MockRainApiAuth.SIGNUP_PASSKEY_PATH)
 
-        expectThrows<RainError.NetworkError> { controller.signUpWithPasskey(activity) }
+    /** A refusal the client reads as the status alone: a 400, a 404, a phrase-less 409, a 429, a 5xx. */
+    private fun refused(status: Int) = MockRainApiAuth.refusal(RainApiAuthFailure.Kind.Refused, status, MockRainApiAuth.SIGNUP_PASSKEY_PATH)
 
-        assertThat(turnkey.passkeyLoginCalls).isEmpty()
-        assertThat(turnkey.selectedSessionKey).isNull()
-        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
+    /** A row of the in-doubt table: Rain's answers to the first call, what leaves it, and the sends across both calls. */
+    private data class InDoubt(
+        val name: String,
+        val firstCall: List<() -> RainApiSignup>,
+        val code: RainErrorCode,
+        val sends: Int,
+        val message: String? = null,
+        val renewalUnreachable: Boolean = false,
+    )
 
-        controller.signUpWithPasskey(activity)
-
-        // One sheet across both calls; the resend carries the first ceremony's challenge and
-        // attestation under a token minted for this call.
-        assertThat(turnkey.createPasskeyCalls).hasSize(1)
-        assertThat(tokenRequests).containsExactly(null, null)
-        val (first, resent) = rainApi.signupPasskeyCalls
-        assertThat(resent.challenge).isEqualTo(first.challenge)
-        assertThat(resent.attestation).isEqualTo(first.attestation)
-        assertThat(rainApi.signupPasskeyCalls.map { it.token }).containsExactly("wat_1", "wat_2").inOrder()
-        assertThat(turnkey.passkeyLoginCalls.single().organizationId).isEqualTo("sub-passkey")
-        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
-        assertThat(hookCalls).isEqualTo(0)
-    }
+    /** A row of the refusal tables: Rain's answer to every send of the refused call, and the sheets and sends counted across the calls. */
+    private data class RefusedSend(val name: String, val refusal: RainApiAuthFailure, val sheets: Int, val sends: Int)
 
     @Test
-    fun `a 5xx and an unreadable answer from Rain's sign-up keep the passkey like a lost one`() = runTest {
-        val inDoubt = listOf<Pair<String, Throwable>>(
-            "a 503" to MockRainApiAuth.refusal(RainApiAuthFailure.Kind.Refused, 503, MockRainApiAuth.SIGNUP_PASSKEY_PATH),
-            "an unreadable 200" to RainError.InternalError("Rain API /v1/issuing/embedded-wallets/signup/passkey: unreadable answer"),
-        )
-        inDoubt.forEach { (name, failure) ->
+    fun `a sign-up Rain never answered keeps the passkey, and the next call resends it with a fresh token and key and no sheet`() =
+        runTest {
             val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-            turnkey.onPasskeyLogin = { turnkey.authenticate() }
+            turnkey.onStoreSession = { turnkey.authenticate() }
             val rainApi = MockRainApiAuth()
-            var answers = 0
-            rainApi.signupPasskey = { if (answers++ == 0) throw failure else RainApiSignup("sub-passkey") }
-            val controller = controller(turnkey, rainApi)
+            rainApi.signupPasskey = MockRainApiAuth.answers({ throw lostAnswer() }, { RainApiSignup("sub-passkey") })
+            var minted = 0
+            val controller = controller(turnkey, rainApi, authTokenProvider = { "wat_${++minted}" })
 
-            expectThrows<RainError> { controller.signUpWithPasskey(activity) }
+            val lost = expectThrows<RainError.NetworkError> { controller.signUpWithPasskey(activity) }
+            assertThat(lost.errorCode).isEqualTo(RainErrorCode.NETWORK_ERROR)
+            assertThat(turnkey.deviceKeyLoginCalls).isEmpty()
+            assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
+
             controller.signUpWithPasskey(activity)
 
-            assertWithMessage(name).that(turnkey.createPasskeyCalls).hasSize(1)
-            assertWithMessage(name).that(rainApi.signupPasskeyCalls).hasSize(2)
-            assertWithMessage(name).that(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+            assertThat(turnkey.createPasskeyCalls).hasSize(1)
+            assertThat(tokenRequests).containsExactly(null, null)
+            val (first, resent) = rainApi.signupPasskeyCalls
+            assertThat(resent.challenge).isEqualTo(first.challenge)
+            assertThat(resent.attestation).isEqualTo(first.attestation)
+            assertThat(rainApi.signupPasskeyCalls.map { it.token }).containsExactly("wat_1", "wat_2").inOrder()
+            assertThat(rainApi.signupPasskeyCalls.map { it.publicKey }).containsExactly("device-key-1", "device-key-2").inOrder()
+            assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-2", "sub-passkey"))
+            val stored = turnkey.storeSessionCalls.single()
+            assertThat(stored.jwt).isEqualTo("jwt-for-device-key-2")
+            assertThat(turnkey.selectedSessionKey).isEqualTo(stored.sessionKey)
+            assertThat(turnkey.passkeyLoginCalls).isEmpty()
+            assertThat(turnkey.liveDeviceKeys).containsExactly("device-key-2")
+            assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+            assertThat(hookCalls).isEqualTo(0)
+        }
+
+    @Test
+    fun `the passkey is kept before Rain is asked, so a process that dies with the answer outstanding resends it, and a 200 clears it`() =
+        runTest {
+            val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
+            turnkey.onStoreSession = { turnkey.authenticate() }
+            val store = InMemoryPendingPasskeySignupStore()
+            val rainApi = MockRainApiAuth()
+            var keptDuringSend: PasskeyRegistration? = null
+            rainApi.signupPasskey = {
+                keptDuringSend = store.load()
+                RainApiSignup("sub-passkey")
+            }
+
+            val controller = controller(turnkey, rainApi, pendingPasskeySignups = store)
+
+            controller.signUpWithPasskey(activity)
+
+            val sent = rainApi.signupPasskeyCalls.single()
+            assertThat(keptDuringSend?.challenge).isEqualTo(sent.challenge)
+            assertThat(store.load()).isNull()
+            assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+        }
+
+    @Test
+    fun `a sign-up cancelled with Rain's answer outstanding keeps the passkey and frees the device key, and the next call resends it`() =
+        runTest {
+            val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
+            turnkey.onStoreSession = { turnkey.authenticate() }
+            val store = InMemoryPendingPasskeySignupStore()
+            val rainApi = MockRainApiAuth()
+            val inFlight = CompletableDeferred<RainApiSignup>()
+            var answers = 0
+            rainApi.signupPasskey = { if (answers++ == 0) inFlight.await() else RainApiSignup("sub-passkey") }
+            val controller = controller(turnkey, rainApi, pendingPasskeySignups = store)
+
+            val cancelled = launch { controller.signUpWithPasskey(activity) }
+            runCurrent()
+            assertThat(rainApi.signupPasskeyCalls).hasSize(1)
+            cancelled.cancel()
+            cancelled.join()
+
+            assertThat(store.load()).isEqualTo(turnkey.stubbedPasskeyRegistration)
+            assertThat(turnkey.liveDeviceKeys).isEmpty()
+
+            controller.signUpWithPasskey(activity)
+
+            assertThat(turnkey.createPasskeyCalls).hasSize(1)
+            assertThat(rainApi.signupPasskeyCalls).hasSize(2)
+            assertThat(store.load()).isNull()
+            assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+        }
+
+    @Test
+    fun `an answer that leaves the first call in doubt keeps the passkey, and the next call resends it with no sheet`() = runTest {
+        val rejected: () -> RainApiSignup = { throw tokenRejected() }
+        val rows = listOf(
+            InDoubt("a 503", listOf({ throw refused(503) }), RainErrorCode.PROVIDER_ERROR, sends = 2),
+            InDoubt("an unreadable answer", listOf({ throw unreadable() }), RainErrorCode.INTERNAL_ERROR, sends = 2),
+            InDoubt("a 429", listOf({ throw refused(429) }), RainErrorCode.PROVIDER_ERROR, sends = 2),
+            InDoubt("already in progress", listOf({ throw inProgress() }), RainErrorCode.NETWORK_ERROR, sends = 2, message = "still creating"),
+            InDoubt("a 401 then a lost retry", listOf(rejected, { throw lostAnswer() }), RainErrorCode.NETWORK_ERROR, sends = 3),
+            InDoubt("a 401 then an unreadable retry", listOf(rejected, { throw unreadable() }), RainErrorCode.INTERNAL_ERROR, sends = 3),
+            InDoubt(
+                "a 401 then a renewal that threw with an IOException cause",
+                listOf(rejected),
+                RainErrorCode.NETWORK_ERROR,
+                sends = 2,
+                message = "authTokenProvider",
+                renewalUnreachable = true,
+            ),
+        )
+        rows.forEach { row ->
+            val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
+            turnkey.onStoreSession = { turnkey.authenticate() }
+            val rainApi = MockRainApiAuth()
+            val answers = ArrayDeque(row.firstCall)
+            rainApi.signupPasskey = { answers.removeFirstOrNull()?.invoke() ?: RainApiSignup("sub-passkey") }
+            var minted = 0
+            val provider: suspend (LoginContact?) -> String = {
+                minted++
+                if (row.renewalUnreachable && minted == 2) throw IllegalStateException("backend down", IOException()) else "wat_$minted"
+            }
+            val controller = controller(turnkey, rainApi, authTokenProvider = provider)
+
+            val inDoubt = expectThrows<RainError> { controller.signUpWithPasskey(activity) }
+            assertWithMessage(row.name).that(inDoubt.errorCode).isEqualTo(row.code)
+            row.message?.let { assertWithMessage(row.name).that(inDoubt).hasMessageThat().contains(it) }
+
+            controller.signUpWithPasskey(activity)
+
+            assertWithMessage(row.name).that(turnkey.createPasskeyCalls).hasSize(1)
+            assertWithMessage(row.name).that(rainApi.signupPasskeyCalls).hasSize(row.sends)
+            assertWithMessage(row.name).that(turnkey.deviceKeyLoginCalls.single().organizationId).isEqualTo("sub-passkey")
+            assertWithMessage(row.name).that(turnkey.passkeyLoginCalls).isEmpty()
+            assertWithMessage(row.name).that(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
         }
     }
 
     @Test
-    fun `Rain still creating the account on a resend keeps the passkey and arrives as RAIN_301`() = runTest {
-        val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-        turnkey.onPasskeyLogin = { turnkey.authenticate() }
-        val rainApi = MockRainApiAuth()
-        val answers = ArrayDeque<() -> RainApiSignup>(
-            listOf({ throw lostAnswer() }, { throw inProgress() }, { RainApiSignup("sub-passkey") }),
-        )
-        rainApi.signupPasskey = { answers.removeFirst()() }
-        val controller = controller(turnkey, rainApi)
-
-        expectThrows<RainError.NetworkError> { controller.signUpWithPasskey(activity) }
-        val stillCreating = expectThrows<RainError.NetworkError> { controller.signUpWithPasskey(activity) }
-        controller.signUpWithPasskey(activity)
-
-        assertThat(stillCreating).hasMessageThat().contains("still creating")
-        assertThat(stillCreating).hasCauseThat().isInstanceOf(RainError.ProviderError::class.java)
-        assertThat(turnkey.createPasskeyCalls).hasSize(1)
-        assertThat(rainApi.signupPasskeyCalls).hasSize(3)
-        assertThat(turnkey.passkeyLoginCalls.single().organizationId).isEqualTo("sub-passkey")
-        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
-    }
-
-    @Test
-    fun `Rain answering that the passkey already has a wallet drops it and sends the host to loginWithPasskey`() = runTest {
-        // On a resend: the first call's account was saved. On a first send: impossible for a fresh
-        // credential, but Rain's word is final either way.
+    fun `already has a wallet settles a resend through the sheet with no sub-organization id, and drops a first send`() = runTest {
         listOf("on a resend" to true, "on a first send" to false).forEach { (name, resend) ->
-            val turnkey = MockTurnkey(session = null)
+            val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
+            turnkey.onPasskeyLogin = { turnkey.authenticate() }
             val rainApi = MockRainApiAuth()
-            val answers = ArrayDeque<() -> RainApiSignup>()
-            if (resend) answers += { throw lostAnswer() }
-            answers += { throw passkeyTaken() }
-            answers += { throw lostAnswer() }
-            rainApi.signupPasskey = { answers.removeFirst()() }
-            val controller = controller(turnkey, rainApi)
+            var sent = 0
+            rainApi.signupPasskey = { if (resend && sent++ == 0) throw lostAnswer() else throw passkeyTaken() }
+            val store = InMemoryPendingPasskeySignupStore()
+            val controller = controller(turnkey, rainApi, pendingPasskeySignups = store)
 
-            if (resend) expectThrows<RainError.NetworkError> { controller.signUpWithPasskey(activity) }
-            val taken = expectThrows<RainError.InvalidConfig> { controller.signUpWithPasskey(activity) }
-            expectThrows<RainError.NetworkError> { controller.signUpWithPasskey(activity) }
-
-            assertWithMessage(name).that(taken).hasMessageThat().contains("loginWithPasskey")
-            assertWithMessage(name).that(turnkey.passkeyLoginCalls).isEmpty()
-            // The last call opened the sheet again: Rain's answer dropped the registration.
-            assertWithMessage(name).that(turnkey.createPasskeyCalls).hasSize(2)
-            assertWithMessage(name).that(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
+            if (resend) {
+                // The first call's account is saved; the parent organization resolves which one the passkey opens.
+                expectThrows<RainError.NetworkError> { controller.signUpWithPasskey(activity) }
+                controller.signUpWithPasskey(activity)
+                assertThat(turnkey.createPasskeyCalls).hasSize(1)
+                assertThat(turnkey.passkeyLoginCalls.single().organizationId).isNull()
+                assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+            } else {
+                // Rain created nothing, so the next call starts over with a new passkey.
+                val taken = expectThrows<RainError.InvalidConfig> { controller.signUpWithPasskey(activity) }
+                expectThrows<RainError.InvalidConfig> { controller.signUpWithPasskey(activity) }
+                assertThat(taken.errorCode).isEqualTo(RainErrorCode.INVALID_CONFIG)
+                assertThat(taken).hasMessageThat().contains("loginWithPasskey")
+                assertThat(turnkey.createPasskeyCalls).hasSize(2)
+                assertThat(turnkey.passkeyLoginCalls).isEmpty()
+                assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
+            }
+            assertWithMessage(name).that(store.load()).isNull()
+            assertWithMessage(name).that(rainApi.signupPasskeyCalls).hasSize(2)
+            assertWithMessage(name).that(turnkey.deviceKeyLoginCalls).isEmpty()
+            assertWithMessage(name).that(turnkey.liveDeviceKeys).isEmpty()
         }
     }
 
     @Test
     fun `a refusal before Rain created anything drops the passkey, so the next call opens the sheet again`() = runTest {
         val refusals = listOf(
-            "a 403" to MockRainApiAuth.forbidden(MockRainApiAuth.SIGNUP_PASSKEY_PATH),
-            "a 401 after the renewal" to MockRainApiAuth.tokenRejected(MockRainApiAuth.SIGNUP_PASSKEY_PATH),
-            "a 400" to MockRainApiAuth.refusal(RainApiAuthFailure.Kind.Refused, 400, MockRainApiAuth.SIGNUP_PASSKEY_PATH),
-            "a 409 on a first send" to MockRainApiAuth.refusal(RainApiAuthFailure.Kind.Refused, 409, MockRainApiAuth.SIGNUP_PASSKEY_PATH),
+            RefusedSend("a 403", MockRainApiAuth.forbidden(MockRainApiAuth.SIGNUP_PASSKEY_PATH), sheets = 2, sends = 2),
+            RefusedSend("a 401 after the renewal", tokenRejected(), sheets = 2, sends = 4),
+            RefusedSend("a 409 for a spent token after the renewal", tokenUsed(), sheets = 2, sends = 4),
+            RefusedSend("a 400", refused(400), sheets = 2, sends = 2),
+            RefusedSend("a 404 from in front of Rain", refused(404), sheets = 2, sends = 2),
+            RefusedSend("a 409 with no phrase the client reads", refused(409), sheets = 2, sends = 2),
         )
-        refusals.forEach { (name, refusal) ->
+        refusals.forEach { row ->
+            val (name, refusal, sheets) = row
+            val sends = row.sends
             val turnkey = MockTurnkey(session = null)
             val rainApi = MockRainApiAuth()
             rainApi.signupPasskey = { throw refusal }
@@ -176,82 +273,126 @@ class TurnkeyManagedPasskeyResendTest {
             expectThrows<RainError> { controller.signUpWithPasskey(activity) }
             expectThrows<RainError> { controller.signUpWithPasskey(activity) }
 
-            assertWithMessage(name).that(turnkey.createPasskeyCalls).hasSize(2)
+            // A call refused for its token sends once more under a renewed one before the same refusal leaves.
+            assertWithMessage(name).that(turnkey.createPasskeyCalls).hasSize(sheets)
+            assertWithMessage(name).that(rainApi.signupPasskeyCalls).hasSize(sends)
             assertWithMessage(name).that(turnkey.passkeyLoginCalls).isEmpty()
         }
     }
 
     @Test
-    fun `a resend refused for the token, the tenant, the rate or a used token keeps the passkey, and a 400 drops it`() = runTest {
+    fun `a resend refused for the token, the tenant or a 404 keeps the passkey, and a 400 drops it`() = runTest {
         val outcomes = listOf(
-            Triple("a 401 after the renewal", MockRainApiAuth.tokenRejected(MockRainApiAuth.SIGNUP_PASSKEY_PATH), 1),
-            Triple("a 403", MockRainApiAuth.forbidden(MockRainApiAuth.SIGNUP_PASSKEY_PATH), 1),
-            Triple("a 429", MockRainApiAuth.refusal(RainApiAuthFailure.Kind.Refused, 429, MockRainApiAuth.SIGNUP_PASSKEY_PATH), 1),
-            Triple("a 409 for a used token", MockRainApiAuth.refusal(RainApiAuthFailure.Kind.Refused, 409, MockRainApiAuth.SIGNUP_PASSKEY_PATH), 1),
-            Triple("a 400", MockRainApiAuth.refusal(RainApiAuthFailure.Kind.Refused, 400, MockRainApiAuth.SIGNUP_PASSKEY_PATH), 2),
+            RefusedSend("a 401 after the renewal", tokenRejected(), sheets = 1, sends = 4),
+            RefusedSend("a 409 for a spent token after the renewal", tokenUsed(), sheets = 1, sends = 4),
+            RefusedSend("a 403", MockRainApiAuth.forbidden(MockRainApiAuth.SIGNUP_PASSKEY_PATH), sheets = 1, sends = 3),
+            RefusedSend("a 404 from in front of Rain", refused(404), sheets = 1, sends = 3),
+            RefusedSend("a 400", refused(400), sheets = 2, sends = 3),
         )
-        outcomes.forEach { (name, refusal, sheets) ->
+        outcomes.forEach { row ->
+            val (name, refusal, sheets) = row
+            val sends = row.sends
             val turnkey = MockTurnkey(session = null)
             val rainApi = MockRainApiAuth()
-            val answers = ArrayDeque<() -> RainApiSignup>(listOf({ throw lostAnswer() }, { throw refusal }, { throw lostAnswer() }))
-            rainApi.signupPasskey = { answers.firstOrNull()?.also { answers.removeFirst() }?.invoke() ?: throw refusal }
+            // The first and the third call lose their answer; the second is refused on every send.
+            var attempt = 0
+            rainApi.signupPasskey = { if (attempt == 2) throw refusal else throw lostAnswer() }
             val controller = controller(turnkey, rainApi)
 
+            attempt = 1
             expectThrows<RainError.NetworkError> { controller.signUpWithPasskey(activity) }
+            attempt = 2
             expectThrows<RainError> { controller.signUpWithPasskey(activity) }
-            expectThrows<RainError> { controller.signUpWithPasskey(activity) }
+            attempt = 3
+            expectThrows<RainError.NetworkError> { controller.signUpWithPasskey(activity) }
 
-            // The third call opens the sheet only when the second answer settled the first call's outcome.
+            // The third call opens the sheet only when the refusal settled the first call's outcome.
             assertWithMessage(name).that(turnkey.createPasskeyCalls).hasSize(sheets)
+            assertWithMessage(name).that(rainApi.signupPasskeyCalls).hasSize(sends)
             assertWithMessage(name).that(turnkey.passkeyLoginCalls).isEmpty()
         }
     }
 
     @Test
-    fun `a sign-up request cancelled in flight keeps the passkey for the next call`() = runTest {
+    fun `a 409 for a token another call spent is renewed once, like a 401, with the same passkey and device key`() = runTest {
         val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-        turnkey.onPasskeyLogin = { turnkey.authenticate() }
+        turnkey.onStoreSession = { turnkey.authenticate() }
         val rainApi = MockRainApiAuth()
-        val inFlight = CompletableDeferred<RainApiSignup>()
-        var answers = 0
-        rainApi.signupPasskey = { if (answers++ == 0) inFlight.await() else RainApiSignup("sub-passkey") }
-        val controller = controller(turnkey, rainApi)
-
-        val cancelled = launch { controller.signUpWithPasskey(activity) }
-        runCurrent()
-        assertThat(rainApi.signupPasskeyCalls).hasSize(1)
-        cancelled.cancel()
-        cancelled.join()
+        rainApi.signupPasskey = MockRainApiAuth.answers({ throw tokenUsed() }, { RainApiSignup("sub-passkey") })
+        var minted = 0
+        val controller = controller(turnkey, rainApi, authTokenProvider = { "wat_${++minted}" })
 
         controller.signUpWithPasskey(activity)
 
         assertThat(turnkey.createPasskeyCalls).hasSize(1)
-        assertThat(rainApi.signupPasskeyCalls).hasSize(2)
+        assertThat(tokenRequests).containsExactly(null, null)
+        assertThat(rainApi.signupPasskeyCalls.map { it.token }).containsExactly("wat_1", "wat_2").inOrder()
+        assertThat(rainApi.signupPasskeyCalls.map { it.publicKey }).containsExactly("device-key-1", "device-key-1")
+        assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-1", "sub-passkey"))
         assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
     }
 
     @Test
-    fun `a kept passkey survives a refusal over a live session and the logout after it`() = runTest {
+    fun `a kept passkey survives a code login in between, the refusal over its live session and the logout after it`() = runTest {
         val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-        turnkey.onPasskeyLogin = { turnkey.authenticate() }
+        turnkey.onStoreSession = { turnkey.authenticate() }
         val rainApi = MockRainApiAuth()
-        var answers = 0
-        rainApi.signupPasskey = { if (answers++ == 0) throw lostAnswer() else RainApiSignup("sub-passkey") }
-        val controller = controller(turnkey, rainApi)
+        rainApi.signupPasskey = MockRainApiAuth.answers({ throw lostAnswer() }, { RainApiSignup("sub-passkey") })
+        val store = InMemoryPendingPasskeySignupStore()
+        val controller = controller(turnkey, rainApi, pendingPasskeySignups = store)
 
         expectThrows<RainError.NetworkError> { controller.signUpWithPasskey(activity) }
-        // A code login lands in between: the sign-up is refused over the live session, with no sheet and no Rain call.
-        turnkey.selectedSessionKey = MockTurnkey.DEFAULT_SESSION_KEY
-        turnkey.authenticate()
+        controller.sendLoginCode(LoginContact.Email("user@example.com"))
+        controller.confirmLoginCode("123456")
+        assertThat(rainApi.loginCalls).hasSize(1)
+        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+        assertThat(store.load()).isEqualTo(turnkey.stubbedPasskeyRegistration)
+        // Over the live session the sign-up is refused with no sheet and no Rain call.
         expectThrows<RainError.InvalidConfig> { controller.signUpWithPasskey(activity) }
         assertThat(turnkey.createPasskeyCalls).hasSize(1)
         assertThat(rainApi.signupPasskeyCalls).hasSize(1)
+        assertThat(store.load()).isEqualTo(turnkey.stubbedPasskeyRegistration)
 
         controller.logout()
         controller.signUpWithPasskey(activity)
 
         assertThat(turnkey.createPasskeyCalls).hasSize(1)
         assertThat(rainApi.signupPasskeyCalls).hasSize(2)
+        assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-3", "sub-passkey"))
+        assertThat(turnkey.passkeyLoginCalls).isEmpty()
+        assertThat(store.load()).isNull()
+        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+    }
+
+    @Test
+    fun `a kept passkey survives close() and a relaunch, and the controller that shares its store resends it with no ceremony`() = runTest {
+        // A relaunch is a fresh vendor, Rain client and controller over the same store.
+        val store = InMemoryPendingPasskeySignupStore()
+        val firstLaunch = MockTurnkey(session = null)
+        val firstRain = MockRainApiAuth()
+        firstRain.signupPasskey = { throw lostAnswer() }
+        val firstController = controller(firstLaunch, firstRain, pendingPasskeySignups = store)
+
+        expectThrows<RainError.NetworkError> { firstController.signUpWithPasskey(activity) }
+        firstController.close()
+
+        assertThat(store.load()).isEqualTo(firstLaunch.stubbedPasskeyRegistration)
+        val relaunch = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
+        relaunch.onStoreSession = { relaunch.authenticate() }
+        val relaunchRain = MockRainApiAuth()
+        relaunchRain.signupPasskey = { RainApiSignup("sub-passkey") }
+        val controller = controller(relaunch, relaunchRain, pendingPasskeySignups = store)
+
+        controller.signUpWithPasskey(activity)
+
+        assertThat(relaunch.createPasskeyCalls).isEmpty()
+        val first = firstRain.signupPasskeyCalls.single()
+        val resent = relaunchRain.signupPasskeyCalls.single()
+        assertThat(resent.challenge).isEqualTo(first.challenge)
+        assertThat(resent.attestation).isEqualTo(first.attestation)
+        assertThat(relaunch.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-1", "sub-passkey"))
+        assertThat(relaunch.passkeyLoginCalls).isEmpty()
+        assertThat(store.load()).isNull()
         assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
     }
 }

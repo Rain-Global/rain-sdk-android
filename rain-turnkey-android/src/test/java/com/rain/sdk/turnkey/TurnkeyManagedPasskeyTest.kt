@@ -3,7 +3,6 @@ package com.rain.sdk.turnkey
 import android.app.Activity
 import com.google.common.truth.Truth.assertThat
 import com.rain.sdk.error.RainError
-import com.rain.sdk.error.RainErrorCode
 import com.turnkey.core.models.AuthState
 import com.turnkey.types.V1AddressFormat
 import io.mockk.mockk
@@ -20,10 +19,10 @@ import org.junit.Test
  * The passkey flows of [TurnkeyManagedAuthController], sign-in and sign-up, over the seam: the
  * session handling the code login pins in [TurnkeyManagedAuthTest], where a passkey login differs
  * (the user's other sessions revoked, so a failed switch signs the device out with the host hook
- * held silent), plus what a passkey ceremony adds (the domain, the sign-up refusal over a live
- * session, the fresh key cleared after a failed ceremony), and the sign-up's own legs: a
- * contact-less wallet auth token, Rain's passkey sign-up with the attestation, then the vendor's
- * passkey login on the new sub-organization. Vendor types stay inside method bodies (see
+ * held silent), plus what a passkey ceremony adds (the domain, the fresh key cleared after a
+ * failed ceremony). The sign-up's own legs are pinned in
+ * [TurnkeyManagedPasskeySignupTest] and the registration a sign-up in doubt keeps and resends in
+ * [TurnkeyManagedPasskeyResendTest]. Vendor types stay inside method bodies (see
  * [TurnkeyErrorMappingTest] for why); the Activity is a MockK stand-in the mock never touches.
  */
 class TurnkeyManagedPasskeyTest {
@@ -268,9 +267,10 @@ class TurnkeyManagedPasskeyTest {
         assertThat(login.clearSessionCalls).isEmpty()
         assertThat(login.clearSelectedSessionCallCount).isEqualTo(0)
 
-        // The same shape on the login that ends a sign-up: Rain created the account, the vendor
-        // stored and selected the session, then its cleanup threw.
+        // The same shape on the fallback sheet that ends a sign-up whose stamp Turnkey refused: Rain
+        // created the account, the vendor stored and selected the session, then its cleanup threw.
         val signUp = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
+        signUp.deviceKeyLogin = { null }
         signUp.passkeyStoresBeforeThrowing = true
         signUp.onPasskeyLogin = { signUp.authenticate() }
         signUp.passkeyLoginError = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToLoginWithPasskey(
@@ -328,199 +328,6 @@ class TurnkeyManagedPasskeyTest {
         assertThat(turnkey.selectedSessionKey).isEqualTo(turnkey.passkeyLoginCalls.single().sessionKey)
         assertThat(turnkey.clearSessionCalls).containsExactly(MockTurnkey.DEFAULT_SESSION_KEY)
         assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
-    }
-
-    // ---------- sign-up ----------
-
-    @Test
-    fun `passkey sign-up takes a contact-less token, the ceremony, Rain's sign-up, a login on the new organization, then backfills`() =
-        runTest {
-            val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.defaultWallet()), session = null)
-            turnkey.onPasskeyLogin = { turnkey.authenticate() }
-            val rainApi = MockRainApiAuth()
-            rainApi.signupPasskey = { RainApiSignup("sub-passkey") }
-            val controller = controller(turnkey, rainApi, nowEpochSeconds = { 1_700_000_000.9 })
-
-            controller.signUpWithPasskey(activity)
-
-            // The token binds no contact: the host is asked with null, once.
-            assertThat(tokenRequests).containsExactly(null)
-            assertThat(turnkey.createPasskeyCalls).containsExactly(MockTurnkey.CreatePasskeyCall(domain, "passkey-1700000000"))
-            val signup = rainApi.signupPasskeyCalls.single()
-            assertThat(signup.token).isEqualTo("wat_1")
-            assertThat(signup.challenge).isEqualTo("stub-challenge")
-            assertThat(signup.attestation).isEqualTo(stubbedAttestation)
-            // The login lands on the sub-organization Rain created, under a fresh session key.
-            val login = turnkey.passkeyLoginCalls.single()
-            assertThat(login.organizationId).isEqualTo("sub-passkey")
-            assertThat(login.sessionKey).startsWith("rain-turnkey-")
-            assertThat(turnkey.selectedSessionKey).isEqualTo(login.sessionKey)
-            assertThat(turnkey.selectSessionCalls).isEmpty()
-            // The fixture wallet lacks Solana, so the backfill adds it; a real sign-up needs nothing.
-            assertThat(turnkey.createWalletAccountsCalls.single().accounts.map { it.addressFormat })
-                .containsExactly(V1AddressFormat.ADDRESS_FORMAT_SOLANA)
-            assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
-            assertThat(hookCalls).isEqualTo(0)
-        }
-
-    @Test
-    fun `a cancelled passkey sign-up propagates the cancellation and keeps a session the vendor already selected`() = runTest {
-        // The login that ends the sign-up stored and, with nothing selected, selected the fresh session
-        // before the cancellation landed: the account exists, so the device stays signed in.
-        val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-        turnkey.passkeyStoresBeforeThrowing = true
-        turnkey.passkeyLoginError = CancellationException("cancelled")
-        val controller = controller(turnkey)
-
-        expectThrows<CancellationException> { controller.signUpWithPasskey(activity) }
-
-        val fresh = turnkey.passkeyLoginCalls.single().sessionKey
-        assertThat(turnkey.selectedSessionKey).isEqualTo(fresh)
-        assertThat(turnkey.clearSessionCalls).isEmpty()
-        assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
-        assertThat(hookCalls).isEqualTo(0)
-
-        // Cancelled at the ceremony, before Rain was asked: nothing is selected, nothing was cleared, no account exists.
-        val early = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-        early.createPasskeyError = CancellationException("cancelled")
-        val earlyRain = MockRainApiAuth()
-
-        expectThrows<CancellationException> { controller(early, earlyRain).signUpWithPasskey(activity) }
-
-        assertThat(early.selectedSessionKey).isNull()
-        assertThat(early.clearSelectedSessionCallCount).isEqualTo(0)
-        assertThat(earlyRain.signupPasskeyCalls).isEmpty()
-        assertThat(early.passkeyLoginCalls).isEmpty()
-    }
-
-    @Test
-    fun `passkey sign-up with a live session selected is refused up front with no vendor, host or Rain call`() = runTest {
-        val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()))
-        val rainApi = MockRainApiAuth()
-        val controller = controller(turnkey, rainApi)
-
-        val refused = expectThrows<RainError.InvalidConfig> { controller.signUpWithPasskey(activity) }
-
-        assertThat(refused).hasMessageThat().contains("log out")
-        assertThat(turnkey.createPasskeyCalls).isEmpty()
-        assertThat(rainApi.signupPasskeyCalls).isEmpty()
-        assertThat(tokenRequests).isEmpty()
-        assertThat(turnkey.selectedSessionKey).isEqualTo(MockTurnkey.DEFAULT_SESSION_KEY)
-        assertThat(turnkey.clearSessionCalls).isEmpty()
-        assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
-    }
-
-    @Test
-    fun `Rain refusing the passkey sign-up maps, runs no login and leaves nothing selected`() = runTest {
-        val turnkey = MockTurnkey(session = null)
-        val rainApi = MockRainApiAuth()
-        rainApi.signupPasskey = {
-            throw MockRainApiAuth.refusal(RainApiAuthFailure.Kind.Refused, 409, MockRainApiAuth.SIGNUP_PASSKEY_PATH)
-        }
-        val controller = controller(turnkey, rainApi)
-
-        val refused = expectThrows<RainError.ProviderError> { controller.signUpWithPasskey(activity) }
-
-        assertThat(refused.errorCode).isEqualTo(RainErrorCode.PROVIDER_ERROR)
-        assertThat(turnkey.passkeyLoginCalls).isEmpty()
-        assertThat(turnkey.selectedSessionKey).isNull()
-        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
-        assertThat(hookCalls).isEqualTo(0)
-        // The token refetch and the refused tenant follow the code login's rule, pinned in TurnkeyManagedCodeOutcomeTest.
-    }
-
-    @Test
-    fun `passkey sign-up over a live session inside the refresh buffer is still refused`() = runTest {
-        // hasActiveSession() reads false inside the buffer, but the session is live, and one account
-        // is signed in at a time.
-        val session = MockTurnkey.nearExpirySession()
-        val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = session)
-        // The controller's clock sits ten seconds before the expiry the fixture set on the real clock.
-        val controller = controller(turnkey, nowEpochSeconds = { session.expiry - 10 })
-        assertThat(controller.hasActiveSession()).isFalse()
-
-        expectThrows<RainError.InvalidConfig> { controller.signUpWithPasskey(activity) }
-
-        assertThat(turnkey.createPasskeyCalls).isEmpty()
-        assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
-    }
-
-    @Test
-    fun `passkey sign-up over a dead selected session clears it silently and proceeds`() = runTest {
-        val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = MockTurnkey.expiredSession())
-        turnkey.onPasskeyLogin = { turnkey.authenticate() }
-        val controller = controller(turnkey)
-        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
-
-        controller.signUpWithPasskey(activity)
-
-        // The dead session went the way a logout takes it, before the sheet, without the host hook.
-        assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(1)
-        assertThat(hookCalls).isEqualTo(0)
-        val call = turnkey.passkeyLoginCalls.single()
-        // Nothing was selected when the vendor stored the new session, so it selected it itself.
-        assertThat(turnkey.selectedSessionKey).isEqualTo(call.sessionKey)
-        assertThat(turnkey.selectSessionCalls).isEmpty()
-        assertThat(turnkey.clearSessionCalls).isEmpty()
-        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
-    }
-
-    @Test
-    fun `a dismissed passkey sign-up over a dead selected session leaves the device signed out and asks Rain for nothing`() = runTest {
-        val turnkey = MockTurnkey(session = MockTurnkey.expiredSession())
-        turnkey.createPasskeyError = com.turnkey.passkey.utils.TurnkeyPasskeyError.RegistrationFailed(
-            androidx.credentials.exceptions.CreateCredentialCancellationException("dismissed")
-        )
-        val rainApi = MockRainApiAuth()
-        val controller = controller(turnkey, rainApi)
-
-        expectThrows<RainError.UserRejected> { controller.signUpWithPasskey(activity) }
-
-        assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(1)
-        // The sheet closed before any session existed: nothing stored, nothing to clear, no account.
-        assertThat(turnkey.clearSessionCalls).isEmpty()
-        assertThat(rainApi.signupPasskeyCalls).isEmpty()
-        assertThat(turnkey.passkeyLoginCalls).isEmpty()
-        assertThat(turnkey.selectedSessionKey).isNull()
-        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
-        assertThat(hookCalls).isEqualTo(0)
-    }
-
-    @Test
-    fun `a dead session that will not clear aborts the sign-up before the sheet`() = runTest {
-        val turnkey = MockTurnkey(session = MockTurnkey.expiredSession())
-        turnkey.clearSelectedSessionError = RuntimeException("storage locked")
-        val controller = controller(turnkey)
-
-        expectThrows<RainError.ProviderError> { controller.signUpWithPasskey(activity) }
-
-        assertThat(turnkey.createPasskeyCalls).isEmpty()
-        assertThat(tokenRequests).isEmpty()
-        assertThat(turnkey.selectedSessionKey).isEqualTo(MockTurnkey.DEFAULT_SESSION_KEY)
-    }
-
-    @Test
-    fun `a login that fails after Rain's passkey sign-up leaves nothing selected and the fresh key cleared`() = runTest {
-        // The account exists on Rain's side; the passkey still reaches it through loginWithPasskey.
-        val turnkey = MockTurnkey(session = null)
-        turnkey.passkeyLoginError = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToLoginWithPasskey(
-            com.turnkey.stamper.utils.TurnkeyStamperError.AssertionFailed(
-                com.turnkey.passkey.utils.TurnkeyPasskeyError.AssertionFailed(
-                    androidx.credentials.exceptions.GetCredentialCancellationException("dismissed")
-                )
-            )
-        )
-        val rainApi = MockRainApiAuth()
-        val controller = controller(turnkey, rainApi)
-
-        expectThrows<RainError.UserRejected> { controller.signUpWithPasskey(activity) }
-
-        assertThat(rainApi.signupPasskeyCalls).hasSize(1)
-        val fresh = turnkey.passkeyLoginCalls.single().sessionKey
-        assertThat(turnkey.clearSessionCalls).containsExactly(fresh)
-        assertThat(turnkey.selectedSessionKey).isNull()
-        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
-        assertThat(hookCalls).isEqualTo(0)
     }
 
     // ---------- add-passkey ----------
