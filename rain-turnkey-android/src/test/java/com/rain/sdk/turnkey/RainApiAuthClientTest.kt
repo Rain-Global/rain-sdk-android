@@ -230,6 +230,8 @@ class RainApiAuthClientTest {
             Triple(404, "No wallet exists for this contact", RainApiAuthFailure.Kind.NoWallet),
             Triple(409, "Token already used", RainApiAuthFailure.Kind.Refused),
             Triple(409, "Signup in progress", RainApiAuthFailure.Kind.Refused),
+            Triple(409, "A signup is already in progress", RainApiAuthFailure.Kind.SignupInProgress),
+            Triple(409, "This passkey already has a wallet", RainApiAuthFailure.Kind.PasskeyTaken),
             Triple(429, "Too many attempts", RainApiAuthFailure.Kind.Refused),
             Triple(503, "Turnkey is not configured", RainApiAuthFailure.Kind.Refused),
             Triple(418, "teapot", RainApiAuthFailure.Kind.Refused),
@@ -256,8 +258,6 @@ class RainApiAuthClientTest {
 
     @Test
     fun `a 404 is NoWallet only with rain-api's own body, so one from in front of rain-api is never read as no wallet`() {
-        // Cloud Run has answered a share of requests with Google's HTML 404 before they reached rain-api.
-        // Read as "no wallet", the login leg would sign up and the attach would skip its ownership check.
         val html = "<!DOCTYPE html><html><head><title>Error 404 (Not Found)</title></head><body>Not Found</body></html>"
         listOf(
             MockResponse().setResponseCode(404).setHeader("Content-Type", "text/html").setBody(html),
@@ -290,10 +290,15 @@ class RainApiAuthClientTest {
             assertWithMessage("$status $message").that(refused).isInstanceOf(RainError.Unauthorized::class.java)
             assertWithMessage("$status $message").that(refused.errorCode).isEqualTo(RainErrorCode.UNAUTHORIZED)
         }
+        val taken = mapped(409, "This passkey already has a wallet")
+        assertThat(taken).isInstanceOf(RainError.InvalidConfig::class.java)
+        assertThat(taken.errorCode).isEqualTo(RainErrorCode.INVALID_CONFIG)
+        assertThat(taken).hasMessageThat().contains("loginWithPasskey")
         listOf(
             400 to "Verification failed",
             404 to "No wallet exists for this contact",
             409 to "Signup in progress",
+            409 to "A signup is already in progress",
             429 to "Too many attempts",
             503 to "Turnkey is not configured",
             418 to "teapot",

@@ -43,8 +43,8 @@ internal data class RainApiVerification(val verificationToken: String) {
 internal data class RainApiSignup(val subOrganizationId: String)
 
 /**
- * `POST /login`'s answer: the two fields the SDK reads of the six rain-api's `RainWalletContextSchema`
- * requires. The session JWT names the wallet and its user, so `toString()` redacts it.
+ * `POST /login`'s answer, the two fields the SDK reads. The session JWT names the wallet and its
+ * user, so `toString()` redacts it.
  */
 internal data class RainApiLogin(
     /** The Turnkey session JWT to store under the device key. */
@@ -56,8 +56,7 @@ internal data class RainApiLogin(
 
 /**
  * The vendor's `v1ClientSignature`, encoded here so the wire shape is pinned in this module:
- * `{publicKey, scheme, message, signature}` with [CLIENT_SIGNATURE_SCHEME_API_P256] as the
- * scheme, the one value rain-api's `ClientSignatureSchema` allows.
+ * `{publicKey, scheme, message, signature}` with [CLIENT_SIGNATURE_SCHEME_API_P256] as the scheme.
  */
 internal data class RainApiClientSignature(
     val publicKey: String,
@@ -98,7 +97,7 @@ internal data class RainApiPasskeyAttestation(
 
 /**
  * A device endpoint's refusal: the status, the request path and a [Kind] the controller branches
- * on. The kind is read off the status and, for 400, 401 and 404, rain-api's own
+ * on. The kind is read off the status and, for 400, 401, 404 and 409, rain-api's own
  * `{statusCode, error, message}` body; the body is then dropped before this is thrown, so the
  * message names the path, the status and, on a 500, the `correlationId` that finds Rain's server
  * log, and nothing else Rain said. Not a vendor failure for `carriesVendorData`: it carries nothing
@@ -132,8 +131,21 @@ internal class RainApiAuthFailure(
         NoWallet,
 
         /**
-         * Every other refusal, told apart by [status] where it matters: another 400, a 409, a 429,
-         * a 5xx, a 3xx (redirects are off), or a 404 whose body is not rain-api's.
+         * 409 "A signup is already in progress": rain-api holds a create lock for two minutes after a
+         * create, because the create can finish after the device gave up on the call. On a passkey
+         * sign-up the controller keeps the passkey and the user retries; elsewhere a refusal like any.
+         */
+        SignupInProgress,
+
+        /**
+         * 409 "This passkey already has a wallet": the account exists and Rain has it on file, so the
+         * user signs in with it. The one 409 the mapper names, as `RainError.InvalidConfig`.
+         */
+        PasskeyTaken,
+
+        /**
+         * Every other refusal, told apart by [status] where it matters: another 400, another 409, a
+         * 429, a 5xx, a 3xx (redirects are off), or a 404 whose body is not rain-api's.
          */
         Refused,
     }
@@ -271,9 +283,11 @@ internal class RainApiAuthClient(
      * also a 400 and must not read as a wrong code before any code was sent. "Invalid tenant" is a
      * 401 too, but a new token fails the same way, so it joins the tenant refusals and the controller
      * never loops on the host's token provider. A 404 is [RainApiAuthFailure.Kind.NoWallet] only when
-     * the body is rain-api's own, because a 404 from in front of it (Cloud Run has answered a share of
-     * requests with Google's HTML 404 before they reached rain-api) says nothing about the wallet, and
-     * the controller must neither sign up nor attach on it. Everything else is the status alone.
+     * the body is rain-api's own, because a 404 from a proxy in front of it says nothing about the
+     * wallet, and the controller must neither sign up nor attach on it. Two 409 phrases are read, both from
+     * `/signup/passkey`: "already has a wallet" is [RainApiAuthFailure.Kind.PasskeyTaken] and "already
+     * in progress" is [RainApiAuthFailure.Kind.SignupInProgress]; a 409 for a token already used stays
+     * [RainApiAuthFailure.Kind.Refused]. Everything else is the status alone.
      */
     private fun classify(status: Int, body: String, path: String): RainApiAuthFailure {
         val rainBody = rainApiBody(body)
@@ -286,6 +300,7 @@ internal class RainApiAuthClient(
             HttpURLConnection.HTTP_FORBIDDEN -> RainApiAuthFailure.Kind.Forbidden
             HttpURLConnection.HTTP_NOT_FOUND ->
                 if (rainBody?.optInt("statusCode") == status) RainApiAuthFailure.Kind.NoWallet else RainApiAuthFailure.Kind.Refused
+            HttpURLConnection.HTTP_CONFLICT -> conflictKind(message)
             else -> RainApiAuthFailure.Kind.Refused
         }
         // A 500's `correlationId` is the one value that finds Rain's server log; kept only when it is a UUID.
@@ -345,9 +360,18 @@ internal class RainApiAuthClient(
 
         private const val INVALID_CODE_PHRASE = "invalid or expired code"
         private const val INVALID_TENANT_PHRASE = "invalid tenant"
+        private const val SIGNUP_IN_PROGRESS_PHRASE = "already in progress"
+        private const val PASSKEY_TAKEN_PHRASE = "already has a wallet"
+
+        /** The two 409 phrases `/signup/passkey` answers with; a 409 for a token already used stays Refused. */
+        private fun conflictKind(message: String): RainApiAuthFailure.Kind = when {
+            PASSKEY_TAKEN_PHRASE in message -> RainApiAuthFailure.Kind.PasskeyTaken
+            SIGNUP_IN_PROGRESS_PHRASE in message -> RainApiAuthFailure.Kind.SignupInProgress
+            else -> RainApiAuthFailure.Kind.Refused
+        }
         private val UUID_PATTERN = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
-        /** Whole call and each read: above rain-api's 30-second sub-organization create, so its own answer reaches the device. */
+        /** Whole call and each read: above rain-api's slowest leg, the sub-organization create, so its own answer reaches the device. */
         private const val TIMEOUT_SECONDS = 45L
 
         /** Redirects and connection-failure retries off: either would re-send the bearer, and every leg has a side effect. */
