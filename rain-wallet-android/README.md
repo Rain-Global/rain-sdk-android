@@ -96,7 +96,9 @@ domain does not work in an app on another. Partners host
 their own file; Rain runs no shared domain. Every call to `signUpWithPasskey` creates a new account,
 so returning users sign in or add a passkey, and accounts are never merged; the sheet opens twice on
 a sign-up, once for the passkey and once for the login on the new account, and `authTokenProvider`
-is called with no contact first. A passkey-only account is meant to get an email or phone as a
+is called with no contact first. A sign-up whose answer was lost keeps its passkey: the next call
+resends it without opening the sheet, so Rain records that account instead of a second one (the
+kept passkey does not survive the process). A passkey-only account is meant to get an email or phone as a
 second login through `sendContactVerificationCode(contact)` and `confirmContactVerification(code)`,
 which attach the verified contact to this account and never move wallets (what an attach refuses
 and what it replaces today is in the `confirmContactVerification` row of

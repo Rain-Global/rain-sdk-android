@@ -325,8 +325,11 @@ class RainProvider internal constructor(
      * that has already expired is cleared first, with the `onSessionExpired` hook silent. What a
      * failure leaves behind depends on when it happened: before Rain's sign-up answered, no account
      * exists; once it answered, the account exists and [loginWithPasskey] reaches it, a dismissed
-     * second sheet included; when its answer was lost or could not be read, the account may exist,
-     * so offer [loginWithPasskey] before calling this again. The `signUpWithPasskey` row under
+     * second sheet included; when its answer was lost, could not be read or said Rain is still
+     * creating it, the passkey is kept and the next call resends it with no sheet, so Rain records
+     * that account instead of a second one, and a sign-up Rain answers with "already has a wallet"
+     * throws `RainError.InvalidConfig` naming [loginWithPasskey]; the kept passkey does not survive
+     * the process. The `signUpWithPasskey` row under
      * *Rain wallet provider* in `docs/METHODS.md` says which code says which.
      * [exportRecoveryPhrase] is the backup path for an account whose only login is a passkey;
      * [sendContactVerificationCode] adds an email or phone as a second one.
@@ -335,12 +338,14 @@ class RainProvider internal constructor(
      *   for its lifetime and what cancellation does.
      * @throws RainError.InvalidConfig (`RAIN_102`) without a `passkeyDomain`, when the association
      *   file does not vouch for this build, while a live session is stored, on a failed token
-     *   provider, a configuration conflict or a closed provider.
+     *   provider, a configuration conflict or a closed provider, or when Rain answers that the
+     *   passkey already has a wallet (sign in with [loginWithPasskey]).
      * @throws RainError.UserRejected (`RAIN_401`) when either sheet was dismissed.
      * @throws RainError.Unauthorized (`RAIN_202`) when Rain refuses the token or the tenant, or from
      *   the account backfill.
      * @throws RainError.NetworkError (`RAIN_301`) when Rain, or your backend behind the token
-     *   provider, cannot be reached.
+     *   provider, cannot be reached, or when Rain is still creating the account from an earlier
+     *   call (the passkey is kept; call again in a moment).
      * @throws RainError.ProviderError (`RAIN_501`) for a ceremony, sign-up or login the device or
      *   Rain refused.
      * @throws RainError.TokenExpired (`RAIN_201`) from the session switch after the sign-up succeeded.

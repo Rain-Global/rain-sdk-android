@@ -563,8 +563,11 @@ class TurnkeyProvider internal constructor(
      * stored session that has already expired is cleared first, with the `onSessionExpired` hook
      * silent, and the sign-up proceeds. What a failure leaves behind depends on when it happened:
      * before Rain's sign-up answered, no account exists; once it answered, the account exists and
-     * [loginWithPasskey] reaches it; when its answer was lost or could not be read, the account may
-     * exist, so the host offers [loginWithPasskey] before another sign-up. Throws
+     * [loginWithPasskey] reaches it; when its answer was lost, could not be read or said Rain is
+     * still creating it, the passkey is kept and the next call resends it with no sheet, so Rain
+     * records that account instead of a second one, and a sign-up Rain answers with "already has a
+     * wallet" throws `RainError.InvalidConfig` naming [loginWithPasskey]; the kept passkey does not
+     * survive the process. Throws
      * `RainError.InvalidConfig`, `RainError.UserRejected`, `RainError.Unauthorized`,
      * `RainError.NetworkError`, `RainError.ProviderError`, `RainError.InternalError` or, after the
      * ceremony, `RainError.TokenExpired`; the `signUpWithPasskey` row under *Members* in
