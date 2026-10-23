@@ -53,7 +53,6 @@ internal object RainWalletBackend {
             if (rainApiBaseUrlHost(environment.apiBaseUrl) == PRODUCTION_HOST) throw RainError.InvalidConfig(PRODUCTION_NOT_AVAILABLE_MESSAGE)
             Row(ORGANIZATION_ID, environment.apiBaseUrl)
         }
-        Reserved -> throw RainError.InvalidConfig("RainWalletEnvironment's reserved case names no deployment")
     }
 
     private val PRODUCTION_HOST = PRODUCTION_API_BASE_URL.removePrefix("https://")

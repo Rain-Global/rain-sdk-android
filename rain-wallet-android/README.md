@@ -143,7 +143,7 @@ Notes:
   and a send there throws `RainError.ChainNotSupported` (`RAIN_104`) before any network work.
 - `RainWalletSessionState` and `RainWalletAuthState` are exhaustive: a `when` over them needs no
   `else` branch, and a new state is a breaking change shipped in a major version.
-  `RainWalletEnvironment` is the other way round: a `when` over it needs an `else` branch, so a
+  `RainWalletEnvironment` is the other way round: include an `else` branch in a `when` over it, so a
   deployment can be added without one.
 - Every public signature of this module stays free of wallet-backend types, and the backend adapter
   is an `implementation` dependency, so your compile classpath never sees it.

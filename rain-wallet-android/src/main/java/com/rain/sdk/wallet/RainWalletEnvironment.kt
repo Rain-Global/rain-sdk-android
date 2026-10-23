@@ -2,9 +2,8 @@ package com.rain.sdk.wallet
 
 /**
  * Which Rain deployment the wallet's authentication runs against: the host your backend mints
- * wallet auth tokens with, and the one the SDK sends them to. A `when` over it needs an `else`
- * branch, which is how a deployment can be added without a breaking release. [Custom] compares by
- * URL; a field can be added to it later through a new constructor overload.
+ * wallet auth tokens with, and the one the SDK sends them to. More environments may be added;
+ * include an `else` branch when you switch over it. [Custom] compares by URL.
  */
 sealed interface RainWalletEnvironment {
     /**
@@ -39,10 +38,3 @@ sealed interface RainWalletEnvironment {
         override fun toString(): String = "Custom(apiBaseUrl=$apiBaseUrl)"
     }
 }
-
-/**
- * Not a deployment, and never a value a host sees. It exists so that a `when` over
- * [RainWalletEnvironment] needs an `else` branch, which is what lets a deployment be added without a
- * breaking release. File-level because an interface member cannot be `internal`.
- */
-internal data object Reserved : RainWalletEnvironment
