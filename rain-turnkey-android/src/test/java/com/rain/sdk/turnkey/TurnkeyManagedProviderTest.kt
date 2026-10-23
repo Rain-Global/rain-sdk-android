@@ -47,7 +47,7 @@ class TurnkeyManagedProviderTest {
         Dispatchers.setMain(StandardTestDispatcher())
         mainSet = true
         TurnkeyManagedConfigurator.resetForTest()
-        TurnkeyManagedConfigurator.initImpl = { _, _, _, _ -> }
+        TurnkeyManagedConfigurator.initImpl = { _, _, _ -> }
         TurnkeyManagedConfigurator.vendorInitializedProbe = { false }
     }
 
@@ -134,18 +134,15 @@ class TurnkeyManagedProviderTest {
 
     @Test
     fun `managed mode exports after running the one-shot configuration`() = runTest {
-        val configured = mutableListOf<Pair<String, String>>()
-        TurnkeyManagedConfigurator.initImpl = { _, organizationId, rainApiBaseUrl, _ ->
-            configured += organizationId to rainApiBaseUrl
-        }
+        val configured = mutableListOf<String>()
+        TurnkeyManagedConfigurator.initImpl = { _, organizationId, _ -> configured += organizationId }
         val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithVectorAccounts())) // restored live session
         val provider = TurnkeyProvider(managedConfig("org-a", "https://api-dev.rain.xyz/"), contextOverride = turnkey)
 
         val phrase = provider.exportRecoveryPhrase()
 
         assertThat(phrase).isEqualTo(turnkey.stubbedMnemonic)
-        // The base URL is keyed without its trailing slash, however the host wrote it.
-        assertThat(configured).containsExactly("org-a" to "https://api-dev.rain.xyz")
+        assertThat(configured).containsExactly("org-a")
         assertThat(turnkey.awaitReadyCallCount).isEqualTo(1)
         assertThat(turnkey.exportMnemonicCalls).containsExactly("wallet-id")
 
@@ -158,10 +155,8 @@ class TurnkeyManagedProviderTest {
 
     @Test
     fun `managed mode configures the vendor with the config's ids on the first auth call, not at construction`() = runTest {
-        val configured = mutableListOf<Pair<String, String>>()
-        TurnkeyManagedConfigurator.initImpl = { _, organizationId, rainApiBaseUrl, _ ->
-            configured += organizationId to rainApiBaseUrl
-        }
+        val configured = mutableListOf<String>()
+        TurnkeyManagedConfigurator.initImpl = { _, organizationId, _ -> configured += organizationId }
         val turnkey = MockTurnkey(session = null)
         val rainApi = MockRainApiAuth()
         val provider = TurnkeyProvider(managedConfig("org-a"), contextOverride = turnkey, rainApiOverride = rainApi)
@@ -169,7 +164,7 @@ class TurnkeyManagedProviderTest {
 
         provider.sendLoginCode(LoginContact.Email("user@example.com"))
 
-        assertThat(configured).containsExactly("org-a" to "https://api-dev.rain.xyz")
+        assertThat(configured).containsExactly("org-a")
         assertThat(tokenRequests).containsExactly(LoginContact.Email("user@example.com"))
         assertThat(rainApi.initOtpCalls).containsExactly("wat_1")
     }
@@ -373,7 +368,7 @@ class TurnkeyManagedProviderTest {
     fun `managed mode forwards both passkey flows with the domain and configures once`() = runTest {
         var initCalls = 0
         val configuredDomains = mutableListOf<String?>()
-        TurnkeyManagedConfigurator.initImpl = { _, _, _, domain ->
+        TurnkeyManagedConfigurator.initImpl = { _, _, domain ->
             initCalls++
             configuredDomains += domain
         }

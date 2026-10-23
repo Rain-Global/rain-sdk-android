@@ -68,7 +68,7 @@ internal object TurnkeyManagedConfigurator {
     @Volatile
     private var initAttempted = false
 
-    private val defaultInit: suspend (Application, String, String, String?) -> Unit = { app, organizationId, _, passkeyDomain ->
+    private val defaultInit: suspend (Application, String, String?) -> Unit = { app, organizationId, passkeyDomain ->
         // The vendor's own `init` launches `initSuspend` on Dispatchers.Main.immediate. Running it
         // there ourselves keeps its lifecycle-observer registration on the main thread while
         // surfacing a failure to this coroutine instead of an uncaught crash on the vendor's scope.
@@ -95,7 +95,7 @@ internal object TurnkeyManagedConfigurator {
 
     /** Test seam: replaces the vendor configure call. */
     @Volatile
-    internal var initImpl: suspend (Application, String, String, String?) -> Unit = defaultInit
+    internal var initImpl: suspend (Application, String, String?) -> Unit = defaultInit
 
     /** Test seam: whether the vendor singleton was already initialized, by anyone. */
     @Volatile
@@ -151,7 +151,7 @@ internal object TurnkeyManagedConfigurator {
     private suspend fun initializeVendor(application: Application, requested: Triple<String, String, String?>): RainError? {
         initAttempted = true
         try {
-            initImpl(application, requested.first, requested.second, requested.third)
+            initImpl(application, requested.first, requested.third)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
