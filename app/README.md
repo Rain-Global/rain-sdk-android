@@ -88,16 +88,24 @@ methods:
   Api-Key `RAIN_102`, each with a hint. Two more buttons sit under the code
   step while signed out: *Sign in with passkey* opens the system passkey sheet for an existing
   account, and *Create wallet with passkey* makes a new account whose only login is the passkey, with
-  the same wallet setup as a code sign-up, through two passkey prompts (one creates the passkey, one
-  signs the new account in); a returning user who taps it ends up with a second,
-  empty wallet, and accounts are never merged. Both need the domain in `RainSession.prepareRainWallet`
+  the same wallet setup as a code sign-up, through one passkey prompt: the sheet creates the passkey,
+  and the device signs the new account in with a key Rain registers on it for a minute. The sheet
+  opens a second time only when that key cannot sign the account in: Turnkey refused its login or
+  answered it without a session, or a resend found the account already saved, so nothing was
+  stamped. That sheet signs the account in. A returning user who taps the button ends up with a
+  second, empty wallet, and accounts are never merged. Both need the domain in
+  `RainSession.prepareRainWallet`
   (`passkeys.uptop.xyz`) to vouch for this build's signing key, see *Demo keystore* under Notes.
   Signed in, *Add a passkey to this account* registers a passkey for a code-created account, and
   the *Add a login contact* step sends a verification code to an email or phone and attaches it on
   *Verify and attach*, after which that contact signs in to this account by code; a contact another
   account signs in with is refused (`RAIN_202`) and the card shows the reason. A closed passkey
-  sheet shows `RAIN_401`; after *Create wallet with passkey* the status says to try *Sign in with
-  passkey* first, because the second sheet closes after Rain created the account.
+  sheet shows `RAIN_401`; after *Create wallet with passkey* the status adds that if Rain answered
+  the sign-up, the account exists and *Sign in with passkey* reaches it, because the closed sheet
+  may have been the fallback sheet that opens after Rain created the account. A sign-up that failed
+  with any code but `RAIN_102`, `RAIN_202` or the `RAIN_401` above says the account may exist, so
+  try *Sign in with passkey* before creating another; when the sign-in went through and a later
+  step failed, the card carries on signed in, as after a code.
 - **Export keys** — once the Rain Wallet session is active, an *Export keys* card under the Rain Wallet card reveals the recovery phrase,
   the Ethereum private key or the Solana private key, one at a time, through `exportRecoveryPhrase`
   and `exportPrivateKey`, on a restored or reused session before *Initialize Rain*, and after it. While a value shows, the window

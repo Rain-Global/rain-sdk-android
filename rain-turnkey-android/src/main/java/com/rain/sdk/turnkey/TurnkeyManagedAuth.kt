@@ -365,26 +365,14 @@ constructor(
     }
 
     /**
-     * Creates a new account whose only login method is a passkey bound to the configured domain:
-     * a contact-less wallet auth token from the host, the passkey ceremony on the device, then
-     * `POST /signup/passkey` with the challenge and attestation, which creates the account with
-     * [MANAGED_WALLET]; then the vendor's passkey login on the sub-organization Rain answered with,
-     * a second passkey prompt, since Rain's sign-up issues no session yet; then the session steps
-     * [loginWithPasskey] runs. Every call mints a fresh account; returning users sign in or add a
-     * passkey instead.
-     *
-     * Refused with [RainError.InvalidConfig] while a live session is selected on this device: one
-     * account is signed in at a time, and the sample offers the sign-up only while signed out. A
-     * selected session that is already dead carries no such risk and is cleared first, the way
-     * [logout] clears one, with the host's re-auth hook silent; a ceremony that then fails leaves
-     * the device signed out, as a logout would. Waiting out a restore in flight first keeps a
-     * session that is still loading from being read as "nothing selected"; one still loading after
-     * the bounded wait is refused like a live one. A failure after `POST /signup/passkey` answered
-     * (the login prompt, the session store) leaves an account the passkey can still sign into. A
-     * sign-up whose answer Rain left in doubt keeps its registration ([pendingPasskeySignup]), and the
-     * next call resends it with a fresh token instead of opening the sheet, so the account that call
-     * created is recorded by Rain rather than joined by a second one; [signUpOnRain] says which
-     * answers keep it and which settle it.
+     * Creates a passkey account and signs it in with one prompt: the host's contact-less token, the
+     * ceremony, `POST /signup/passkey` with the attestation and a device key Rain registers on the
+     * account for a minute, then Turnkey's `stampLogin` with that key, whose session stays on it
+     * like a code login's. An account with no key for the device (adopted from an earlier attempt,
+     * or found saved on a resend) signs in through the sheet instead. Refused over a live session; a
+     * dead one is cleared first. A sign-up Rain left in doubt is resent from [pendingPasskeySignups]
+     * by the next call; [signUpOnRain] has the rule, and the `signUpWithPasskey` row in
+     * `docs/METHODS.md` says what each failure leaves behind.
      */
     suspend fun signUpWithPasskey(activity: Activity) {
         flowMutex.withLock {
@@ -599,8 +587,8 @@ constructor(
 
     /**
      * One leg against Rain under [token], through [guarded], which passes the client's own refusal
-     * through raw so its kind can be read here. A refused token gets one fresh token from the host
-     * and one retry, and the fresh token replaces the old one for the legs that follow; a second
+     * through raw so its kind can be read here. A refused or spent token gets one fresh token from
+     * the host and one retry, and the fresh token replaces the old one for the legs that follow; a second
      * refusal is an error like any other. A refusal [consume] accepts returns null for the caller
      * to act on; every other refusal leaves through [TurnkeyErrorMapping.mapAuthError]. [onRefusal]
      * sees every refusal raw, before the renewal or the mapping.
@@ -635,21 +623,15 @@ constructor(
         checkNotNull(rainLegOrNull(token, consume = { false }, call = call)) { "a leg that consumes no refusal answered null" }
 
     /**
-     * `POST /signup/passkey` for [registration] and [publicKey] under [token], with [rainLeg]'s one token renewal,
-     * and the registration's fate decided from the answer. A 200 settles it: the slot is cleared and
-     * the account is Rain's. An answer that leaves the account in doubt keeps the registration in
-     * [pendingPasskeySignup] for the next call: a transport failure or an unreadable answer (the
-     * client's [RainError.NetworkError] and [RainError.InternalError]; a renewal the host could not
-     * serve lands here too, and keeping a credential Rain never saw costs nothing), a 5xx (rain-api's
-     * create outlives the device's deadline and may still finish), a cancelled request, and Rain's
-     * own "already in progress", which leaves as [RainError.NetworkError] so the host retries it as
-     * it would a dropped connection. Rain's "already has a wallet" settles it on any send: the account
-     * exists and Rain has it, so the registration is dropped and the mapper's [RainError.InvalidConfig]
-     * sends the host to [loginWithPasskey]. On a first send every other refusal drops it too: Rain
-     * refused before creating anything. On a [resend] only Rain's word on the credential settles it:
-     * that 409, or a 400 (Turnkey refused the attestation, so no account holds it); a refused token or
-     * tenant, a 429, a 404 from in front of Rain or a 409 for a token already used say nothing about
-     * the first call, so the registration stays for the call after.
+     * `POST /signup/passkey` for [registration] and the device key [publicKey], with [rainLeg]'s one
+     * token renewal, and the fate of the registration, saved before the send, decided from the
+     * answer: a 200 clears it ([PasskeySignup.Created]), and so does a [resend] answered "already has
+     * a wallet" ([PasskeySignup.Saved]: the first call's account was saved). In doubt, so left for the
+     * next call: a lost or unreadable answer, a 5xx, a 429, a cancellation, and "already in progress",
+     * which leaves as [RainError.NetworkError] for the host to retry. Dropped: every other refusal
+     * on a first send (Rain created nothing; "already has a wallet" leaves as the mapper's
+     * [RainError.InvalidConfig]), and a 400 on a resend (Turnkey refused the attestation). A refused
+     * token or tenant or a 404 on a resend say nothing about the first call, so the registration stays.
      */
     private suspend fun signUpOnRain(
         token: AuthToken,
@@ -771,7 +753,6 @@ constructor(
         }
     }
 
-    /** The ceremony's attestation in the shape `POST /signup/passkey` validates: the four fields, the vendor's transport names. */
     private fun PasskeyRegistration.toRainApi(): RainApiPasskeyAttestation = RainApiPasskeyAttestation(
         credentialId = attestation.credentialId,
         clientDataJson = attestation.clientDataJson,
@@ -971,8 +952,8 @@ constructor(
 
     /**
      * Makes this controller inert: every auth call throws, the state reads unauthenticated, and
-     * both pending codes are dropped, the login one with the host's bearer token it holds, and so
-     * is a kept passkey registration.
+     * both pending codes are dropped, the login one with the host's bearer token it holds. A kept
+     * passkey registration stays in its store for the next controller to resend.
      */
     fun close() {
         closed.set(true)

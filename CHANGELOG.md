@@ -159,19 +159,18 @@ Notable changes to the Rain Android SDK, newest first. The format follows
     does), so other devices stay signed in until their sessions lapse, and a failed switch to the
     new session after a code login keeps the previous session selected, where 5.0.0-beta.1 signed
     the device out.
-  - `signUpWithPasskey` opens the passkey sheet twice. A dismissal of the second sheet arrives as
-    `RAIN_401` with the account already created, so offer `loginWithPasskey` then. When Rain's
-    answer to the sign-up was lost, could not be read or said the sign-up is still in progress
-    (`RAIN_301`, `RAIN_502`), the passkey is kept and the next call resends it without opening the
-    sheet, so Rain records the account the first call created instead of a second one; a sign-up
-    Rain answers with "already has a wallet" is `RAIN_102` naming `loginWithPasskey`.
-  - New codes on the login methods: a token Rain refuses is fetched once more from
-    `authTokenProvider` and then arrives as `RAIN_202`, which a refused tenant also carries; a 404
-    from any leg but the login, a 409 and a 429 arrive as `RAIN_501`; a code request, confirm or
-    passkey sign-up that cannot reach Rain, or whose `authTokenProvider` could not reach
-    your backend, arrives as `RAIN_301`, where 5.0.0-beta.1 answered `RAIN_501`; any other failure
-    of `authTokenProvider` is `RAIN_102`. The conditions per method are in the Rain wallet rows of
-    [docs/METHODS.md](docs/METHODS.md#rain-wallet-provider).
+  - `signUpWithPasskey` opens the passkey sheet once: Rain registers a device key the sign-up
+    carries on the account for a minute, and the device signs in with a login stamped by that key.
+    When the account holds no key for the device, the sheet opens again and signs in; dismissing it
+    is `RAIN_401` with the account created, so offer `loginWithPasskey`. A sign-up Rain left in
+    doubt keeps the passkey across a relaunch; the next call resends it, no sheet. "Already has a
+    wallet" is `RAIN_102` on a first send and signs in on a resend. The code per condition is in the
+    `signUpWithPasskey` row of [docs/METHODS.md](docs/METHODS.md#rain-wallet-provider).
+  - New codes on the login methods: a token Rain refuses or reports as already used is fetched once
+    more from `authTokenProvider`, then arrives as `RAIN_202`, as a refused tenant does; a call that
+    cannot reach Rain or your backend behind `authTokenProvider` is `RAIN_301` (5.0.0-beta.1
+    answered `RAIN_501`); any other failure of `authTokenProvider` is `RAIN_102`. Conditions per
+    method are in the Rain wallet rows of [docs/METHODS.md](docs/METHODS.md#rain-wallet-provider).
   - Wallets are per tenant: a user known to another tenant signs up afresh in yours.
   - Accounts created under 5.0.0-beta.1 through the auth proxy are not found by Rain's login: a code
     login creates a new, empty wallet for the contact; a passkey added under 5.0.0-beta.1 still
@@ -199,13 +198,6 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   `getTransactions` falls back to leaves out sends the backend failed or rejected, on EVM and
   Solana, since nothing was broadcast. 5.0.0-beta.1 listed them as rows with the activity id as the
   hash.
-
-### Known issues
-
-- A passkey sign-up whose answer was lost keeps its passkey only for the life of the process: a
-  relaunch before the retry starts over with a new passkey and a new account, and Rain never records
-  the first one until a backend route can adopt a sub-organization the device stamps for. Retry the
-  sign-up in the same launch.
 
 ## [5.0.0-beta.1] - 2026-09-30
 
