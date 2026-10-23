@@ -461,6 +461,13 @@ internal class MockTurnkey(
     /** Runs after a recorded [completePasskeyLogin] with the new session key — install the session here. */
     var onPasskeyLogin: (suspend (sessionKey: String) -> Unit)? = null
 
+    data class DeviceKeyLoginCall(val publicKey: String, val organizationId: String)
+
+    val deviceKeyLoginCalls = mutableListOf<DeviceKeyLoginCall>()
+
+    /** Turnkey's answer to the key-stamped login: a session JWT, or null when it refuses the stamp. */
+    var deviceKeyLogin: suspend (DeviceKeyLoginCall) -> String? = { "jwt-for-${it.publicKey}" }
+
     /**
      * When true, a failing passkey login stores (and, with nothing selected, selects) its session
      * *before* throwing — the vendor's shape when its key cleanup fails after `createSession`, or when
@@ -605,6 +612,12 @@ internal class MockTurnkey(
         clearSessionCalls += sessionKey
         clearSessionError?.let { throw it }
         if (sessionKey == selectedSessionKey) resetToUnauthenticated()
+    }
+
+    override suspend fun stampLoginWithDeviceKey(publicKey: String, organizationId: String): String? {
+        val call = DeviceKeyLoginCall(publicKey, organizationId)
+        deviceKeyLoginCalls += call
+        return deviceKeyLogin(call)
     }
 
     override suspend fun completePasskeyLogin(activity: android.app.Activity, sessionKey: String, organizationId: String?) {

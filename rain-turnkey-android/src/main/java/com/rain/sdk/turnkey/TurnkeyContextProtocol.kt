@@ -1,12 +1,14 @@
 package com.rain.sdk.turnkey
 
 import android.app.Activity
+import com.rain.sdk.error.RainError
 import com.turnkey.core.TurnkeyContext
 import com.turnkey.core.internal.utils.ClientSignature
 import com.turnkey.core.models.AuthState
 import com.turnkey.core.models.ClientSignaturePayload
 import com.turnkey.core.models.OtpType
 import com.turnkey.core.models.Session
+import com.turnkey.core.models.SessionStorage
 import com.turnkey.core.models.Wallet
 import com.turnkey.core.models.errors.TurnkeyKotlinError
 import com.turnkey.core.models.otpTypeToFilterTypeMap
@@ -15,6 +17,7 @@ import com.turnkey.crypto.encryptOtpCodeToBundle
 import com.turnkey.crypto.generateP256KeyPair
 import com.turnkey.crypto.models.KeyFormat
 import com.turnkey.http.TurnkeyClient
+import com.turnkey.http.utils.TurnkeyHttpError
 import com.turnkey.passkey.PasskeyUser
 import com.turnkey.passkey.createPasskey
 import com.turnkey.stamper.Stamper
@@ -39,6 +42,8 @@ import com.turnkey.types.TListEthTransactionHistoryResponse
 import com.turnkey.types.TListSolTransactionHistoryBody
 import com.turnkey.types.TListSolTransactionHistoryResponse
 import com.turnkey.types.TSolSendTransactionBody
+import com.turnkey.types.TStampLoginBody
+import com.turnkey.types.TStampLoginResponse
 import com.turnkey.types.TUpdateUserEmailBody
 import com.turnkey.types.TUpdateUserPhoneNumberBody
 import com.turnkey.types.V1Activity
@@ -57,6 +62,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import timber.log.Timber
+import java.io.IOException
 import java.util.UUID
 
 /**
@@ -219,6 +225,14 @@ internal interface TurnkeyContextProtocol {
      */
     suspend fun storeSession(jwt: String, sessionKey: String)
 
+    /**
+     * Turnkey's `stampLogin` on [organizationId], stamped with the device key [publicKey] and bound to
+     * it: the session JWT for [storeSession], or null when Turnkey refused the stamp (no API key for
+     * [publicKey] on the organization) or answered the login activity without a session. Revokes the
+     * user's other sessions. A transport failure is [RainError.NetworkError]; the rest leaves as thrown.
+     */
+    suspend fun stampLoginWithDeviceKey(publicKey: String, organizationId: String): String?
+
     /** The key of the session the vendor currently treats as selected, or null when none is. */
     val selectedSessionKey: String?
 
@@ -312,6 +326,41 @@ internal interface TurnkeyContextProtocol {
 internal fun OtpChannel.toVendorOtpType(): OtpType = when (this) {
     OtpChannel.EMAIL -> OtpType.OTP_TYPE_EMAIL
     OtpChannel.SMS -> OtpType.OTP_TYPE_SMS
+}
+
+/** The statuses Turnkey answers a stamp it does not accept with; a 5xx is Turnkey failing, not refusing. */
+private val TURNKEY_REFUSED_STAMP = 400..499
+
+/**
+ * The stamp-login body for the device key [publicKey] on [organizationId]: a session bound to that
+ * same key, the vendor's default lifetime, the user's other sessions revoked.
+ */
+internal fun deviceKeyStampLoginBody(publicKey: String, organizationId: String): TStampLoginBody = TStampLoginBody(
+    organizationId = organizationId,
+    publicKey = publicKey,
+    expirationSeconds = SessionStorage.DEFAULT_EXPIRATION_SECONDS,
+    invalidateExisting = true,
+)
+
+/**
+ * Runs [stamp]: the session it answered; null for a refused stamp (a 4xx) or a login activity
+ * without a session; [RainError.NetworkError], named by class only, for a transport failure; the
+ * rest as thrown, for the mapper.
+ */
+// The generated client reports a non-2xx as a RuntimeException; a refusal is an answer here, not an error.
+@Suppress("TooGenericExceptionCaught", "SwallowedException")
+internal suspend fun stampLoginSessionOrNull(stamp: suspend () -> TStampLoginResponse): String? = try {
+    stamp().result.session
+} catch (e: CancellationException) {
+    throw e
+} catch (e: TurnkeyHttpError.ActivityNotCompleted) {
+    null
+} catch (e: IOException) {
+    throw RainError.NetworkError("Turnkey stamp login: ${e.javaClass.simpleName}", e)
+} catch (e: RuntimeException) {
+    val status = TurnkeyErrorMapping.turnkeyHttpStatus(e)
+    if (status == null || status !in TURNKEY_REFUSED_STAMP) throw e
+    null
 }
 
 /**
@@ -436,6 +485,13 @@ internal class TurnkeyContextAdapter(
     override suspend fun storeSession(jwt: String, sessionKey: String) {
         withContext(ioDispatcher) { context.createSession(jwt = jwt, sessionKey = sessionKey) }
     }
+
+    // The vendor's passkey-login client with the device key as the stamper; the API host is the vendor's default.
+    override suspend fun stampLoginWithDeviceKey(publicKey: String, organizationId: String): String? =
+        withContext(ioDispatcher) {
+            val client = TurnkeyClient(stamper = Stamper.fromPublicKey(publicKey), organizationId = organizationId)
+            stampLoginSessionOrNull { client.stampLogin(deviceKeyStampLoginBody(publicKey, organizationId)) }
+        }
 
     override val selectedSessionKey: String?
         get() = context.selectedSessionKey.value
