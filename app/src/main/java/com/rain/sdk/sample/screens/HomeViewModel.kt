@@ -567,8 +567,8 @@ class HomeViewModel(
     }
 
     /**
-     * The status line for a failed Rain wallet authentication call: the three codes the Rain
-     * endpoints add get a hint a tester can act on, every other failure shows the SDK's message. A
+     * The status line for a failed Rain wallet authentication call: the three failures the demo
+     * can explain get a hint a tester can act on, every other failure shows the SDK's message. A
      * mint the demo could not make offline arrives as the same `RAIN_301` as Rain being unreachable.
      */
     private fun rainWalletAuthFailureText(label: String, e: Exception): String = when {
@@ -1730,11 +1730,10 @@ data class HomeUiState(
         }
 
     /**
-     * The Rain wallet mints its wallet auth tokens through the demo's Rain API client, so a code
-     * login, a passkey sign-up and a contact attach need the sandbox Api-Key and user ID on Home;
-     * a passkey sign-in and an added passkey need no token. A build pointed at production is not
-     * gated here: the SDK refuses `RainWalletEnvironment.Production` at construction, and the card
-     * shows that error.
+     * Whether a code login, a passkey sign-up or a contact attach can start: the demo mints the
+     * wallet auth token with the sandbox Api-Key and user ID on Home. A passkey sign-in and an added
+     * passkey need no token. A production build is not gated here: the SDK refuses
+     * `RainWalletEnvironment.Production` at construction and the card shows that error.
      */
     val rainWalletAuthAvailable: Boolean
         get() = rainApiKey.isNotBlank() && userId.isNotBlank()

@@ -78,7 +78,7 @@ data class CollateralToken(
 /**
  * A wallet auth token from `POST /v1/issuing/embedded-wallets/auth-tokens`: what a host's backend
  * hands the app for `RainWalletConfig.authTokenProvider`. Lives ten minutes; bound to the tenant
- * and, when minted for one, the contact. The token is a bearer credential, so `toString()` redacts it.
+ * and, when minted for one, the contact. A bearer credential, so `toString()` redacts it.
  */
 data class WalletAuthToken(val token: String, val expiresAt: String) {
     override fun toString(): String = "WalletAuthToken(token=<redacted>, expiresAt=$expiresAt)"
@@ -122,12 +122,12 @@ sealed class RainApiError(message: String, cause: Throwable? = null) : Exception
 }
 
 /**
- * Minimal OkHttp client for the two Rain API calls the wallet flows need. Every request carries the
+ * Minimal OkHttp client for the Rain API calls the wallet flows need. Every request carries the
  * program key in the `Api-Key` header, so the base URL must be https; the loopback host is allowed
  * for tests. Plain Kotlin, no Android types, so it also runs under JVM tests and reads as host
  * reference code; callers do the logging.
  */
-@Suppress("TooManyFunctions") // one function per Rain endpoint the demo calls, plus the HTTP plumbing under them
+@Suppress("TooManyFunctions") // one function per Rain endpoint, plus the HTTP plumbing
 class RainApiClient(
     baseUrl: String,
     private val apiKey: String,
@@ -174,10 +174,8 @@ class RainApiClient(
 
     /**
      * `POST /v1/issuing/embedded-wallets/auth-tokens`: a wallet auth token for [contact], the
-     * canonical contact the SDK names, or for no contact on a passkey sign-up, minted with the
-     * Api-Key, which needs the `embeddedWallets:write` scope. This is what a host's backend does
-     * behind `RainWalletConfig.authTokenProvider`; the demo does it from the device for want of a
-     * backend. The token is never logged here: it is the bearer of every call the SDK makes to Rain's endpoints.
+     * canonical contact the SDK names, minted with the Api-Key, which needs the
+     * `embeddedWallets:write` scope.
      */
     suspend fun mintWalletAuthToken(contact: RainWalletContact?): WalletAuthToken {
         val url = baseUrl.newBuilder().addPathSegments("v1/issuing/embedded-wallets/auth-tokens").build()

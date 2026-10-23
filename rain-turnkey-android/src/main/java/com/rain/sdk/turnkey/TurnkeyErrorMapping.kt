@@ -31,9 +31,8 @@ import timber.log.Timber
  *   in its message it claims only 401 (`TokenExpired`) and 403 (`Unauthorized`); any other status
  *   returns null on purpose so the shared prose rules can read the body, pinned by the test
  *   `an unclassified HTTP status falls through to the prose checks`.
- * - It is total for a [RainApiAuthFailure], the Rain client's refusal on the managed-auth legs,
- *   which run against Rain's embedded-wallet endpoints, by the kind the client read off the status;
- *   see [mapRainApiAuthFailure].
+ * - It is total for a [RainApiAuthFailure], the Rain client's refusal on a managed-auth leg, by
+ *   the kind the client read off the status; see [mapRainApiAuthFailure].
  * - It returns null for everything else, which leaves the shared prose fallback in charge.
  *
  * A failed passkey ceremony is the one place the vendor's own type says nothing: the login and
@@ -77,20 +76,30 @@ internal object TurnkeyErrorMapping {
 
     /**
      * A refusal from Rain's embedded-wallet endpoints, by [RainApiAuthFailure.Kind]: a wrong code is
-     * [RainError.InvalidLoginCode], a refused token or tenant is [RainError.Unauthorized], and
-     * everything else is [RainError.ProviderError] over the failure, which carries the status, the
-     * path and a 500's correlation id, and no body.
+     * [RainError.InvalidLoginCode], a refused or spent token or a refused tenant is
+     * [RainError.Unauthorized], a passkey that already has a wallet is [RainError.InvalidConfig]
+     * naming `loginWithPasskey` (a state error, as the other session-state refusals are; the message
+     * is true whenever Rain says it), and everything else is [RainError.ProviderError] over the
+     * failure, which carries the status, the path and a 500's correlation id, and no body.
      */
     fun mapRainApiAuthFailure(e: RainApiAuthFailure): RainError = when (e.kind) {
         RainApiAuthFailure.Kind.InvalidCode -> RainError.InvalidLoginCode()
         RainApiAuthFailure.Kind.TokenRejected ->
             RainError.Unauthorized("Rain rejected the wallet auth token on ${e.path}: HTTP ${e.status}")
+        RainApiAuthFailure.Kind.TokenUsed ->
+            RainError.Unauthorized("Rain answered that another call already spent the wallet auth token (${e.path}: HTTP ${e.status})")
         RainApiAuthFailure.Kind.Forbidden ->
             RainError.Unauthorized(
                 "Rain refused embedded-wallet auth on ${e.path}: HTTP ${e.status}; " +
                     "the tenant cannot use embedded wallets, or the wallet auth token is of the wrong kind for this route",
             )
+        RainApiAuthFailure.Kind.PasskeyTaken ->
+            RainError.InvalidConfig(
+                "Rain answered that this passkey already has a wallet (${e.path}: HTTP ${e.status}); " +
+                    "sign in with loginWithPasskey instead of signing up",
+            )
         RainApiAuthFailure.Kind.NoWallet,
+        RainApiAuthFailure.Kind.SignupInProgress,
         RainApiAuthFailure.Kind.Refused -> RainError.ProviderError(e)
     }
 
@@ -106,7 +115,7 @@ internal object TurnkeyErrorMapping {
         return mapped
     }
 
-    /** No throwable in this log line: an authentication failure can echo the user's contact address. */
+    /** No throwable in this log line; see [mapAuthError]. */
     private fun logAuthFailure(mapped: RainError, e: Throwable) {
         Timber.e(
             "Rain SDK: Authentication error %s (%s)",
@@ -130,7 +139,7 @@ internal object TurnkeyErrorMapping {
      *  - Everything else → ProviderError
      *
      * Logs nothing itself: the session coordinator records an unmapped failure at its boundary, and
-     * the authentication calls must not put the throwable in the log at all.
+     * the authentication calls keep the throwable out of the log; see [mapAuthError].
      */
     @Suppress("ReturnCount") // one return per vendor variant reads better than a nested when
     fun mapTurnkeyError(e: TurnkeyKotlinError): RainError {

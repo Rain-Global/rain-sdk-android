@@ -26,6 +26,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 import java.io.IOException
+import java.net.HttpURLConnection
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
@@ -182,31 +183,27 @@ internal object TurnkeyManagedConfigurator {
  * flows, sign-in, sign-up and add-passkey, when a relying-party domain is configured; and contact
  * attach, a verified email or phone added to the signed-in account as a login method. Every Rain
  * leg carries a wallet auth token the host's backend mints through [authTokenProvider], bound to
- * the tenant and to the contact of the flow, so no leg sends a contact as a field of its own: it
- * reaches Rain inside the verification token and the signed sign-up message, both of which name
- * it. Every vendor and Rain failure is mapped to a [RainError] before it surfaces; cancellation
+ * the tenant and to the contact of the flow; no leg sends the contact as a field of its own: it
+ * reaches Rain inside the verification token and the signed sign-up message. Every vendor and
+ * Rain failure is mapped to a [RainError] before it surfaces; cancellation
  * is never mapped.
  *
  * Sessions: each login stores its session under a fresh key and then selects it. The vendor's
  * `createSession` rejects only a duplicate *key*, so no stored session has to be cleared before a
  * login, and a rejected code cannot cost the user the session they already have. Once the switch
- * succeeds the previous session is cleared locally. A code login leaves the user's sessions on
- * other devices alone (`POST /login` issues a session and revokes nothing); a passkey login still
- * revokes them, the vendor's `invalidateExisting`.
+ * succeeds the previous session is cleared locally. A code login revokes nothing on the server; a
+ * passkey login revokes the user's other sessions, the vendor's `invalidateExisting`.
  *
  * One auth operation runs at a time: send, confirm, logout and provisioning all read-then-write
  * the same process-wide vendor state.
  */
-@Suppress("TooManyFunctions") // one mutex serializes the whole auth flow
+@Suppress("TooManyFunctions", "LargeClass") // one mutex serializes the whole auth flow
 internal class TurnkeyManagedAuthController
-@Suppress("LongParameterList") // the vendor seam, the Rain client, the host's token supplier, the coordinator, the configurator and two knobs
+@Suppress("LongParameterList")
 constructor(
     private val context: TurnkeyContextProtocol,
     private val rainApi: RainApiAuthClientProtocol,
-    /**
-     * The host's wallet auth token for a contact: the canonical contact of the flow, or null for a
-     * passkey sign-up, whose token binds no contact. See [authToken] for the contract.
-     */
+    /** The host's wallet auth token for the flow's canonical contact, or for none on a passkey sign-up; [authToken] has the contract. */
     private val authTokenProvider: suspend (LoginContact?) -> String,
     private val coordinator: TurnkeySessionCoordinator,
     private val configure: suspend () -> RainError?,
@@ -215,8 +212,8 @@ constructor(
     private val nowEpochSeconds: () -> Double = { System.currentTimeMillis() / MILLIS_PER_SECOND },
 ) {
     /**
-     * The host's token for one contact. Replaced in place when Rain refuses it and a fresh one is
-     * fetched, so the legs that follow in the same flow carry the fresh one.
+     * The host's token for one contact, replaced in place after a refused token so the legs that
+     * follow in the flow carry the fresh one.
      */
     private class AuthToken(val contact: LoginContact?, @Volatile var value: String)
 
@@ -231,6 +228,18 @@ constructor(
      * cannot consume a verification code and a verification cannot consume a login code.
      */
     private var pendingContactOtp: PendingOtp? = null
+
+    /**
+     * The passkey registration of a sign-up whose outcome Rain left in doubt, kept for the next
+     * [signUpWithPasskey] to resend instead of creating a second passkey. Rain's create can finish
+     * after the device gave up on the call, and the passkey then signs into an account Rain never
+     * saved, which nothing built on Rain's wallet list sees; only the same credential sent to
+     * `POST /signup/passkey` again makes Rain adopt it. Set by [signUpOnRain] on a lost answer, a
+     * 5xx, a cancelled request or Rain's "already in progress"; cleared by a settled answer and by
+     * [close]. A logout or a code login in between leaves it, since it concerns an account nobody is
+     * signed into. Lost with the process: a relaunch starts over with a new passkey.
+     */
+    private var pendingPasskeySignup: PasskeyRegistration? = null
     private val closed = AtomicBoolean(false)
     private val closedFlow = MutableStateFlow(false)
 
@@ -283,12 +292,10 @@ constructor(
      * the token is bound to. Touches no session. A second call for the same contact replaces the
      * pending challenge on success and keeps it on failure, so a failed resend leaves a code the
      * user can still type; a call for another contact or channel retires the pending challenge
-     * before anything is sent, so a failed switch leaves nothing confirmable. The contact becomes
-     * the account's identity on sign-up, so it is canonicalized once here and the very same string
-     * names the account on sign-up: an email is trimmed and lowercased, because the backend matches
-     * it case-sensitively and a second spelling would be a second account; a phone number is
-     * trimmed, stripped of separators and checked against E.164. A blank or malformed contact
-     * throws [RainError.InvalidConfig] before the host or Rain is called and changes nothing.
+     * before anything is sent, so a failed switch leaves nothing confirmable. The contact is
+     * canonicalized once here ([canonicalize]) and that string names the account on sign-up. A
+     * blank or malformed contact throws [RainError.InvalidConfig] before the host or Rain is
+     * called and changes nothing.
      */
     suspend fun sendLoginCode(contact: LoginContact) {
         flowMutex.withLock {
@@ -311,16 +318,14 @@ constructor(
      * selected, the previous session is cleared, then the Ethereum and Solana accounts are checked.
      *
      * A rejected code throws [RainError.InvalidLoginCode] and keeps the challenge, so the user can
-     * simply retype it. So does any other failure of the verify step, a transport failure or a
-     * 5xx included, so the user can retry or request a new code. A failure once the verify
-     * answered (the login, the sign-up, the session store) drops the challenge, because the
-     * verification token cannot be reused. The device key is deleted on every failure exit before
-     * the session store; a store that failed follows [storeSession]'s rule, which keeps a session
-     * the vendor selected before failing, key included. A failure while selecting the new
-     * session keeps the previous session selected: Rain's login revoked nothing, so that session is
-     * as live as before, and the thrown error is the host's signal. A provisioning failure once the
-     * new session is live throws with the session kept: [ensureAccounts] runs again at provider
-     * resolution, so it heals without a new code.
+     * retype it; so does any other failure of the verify step, a transport failure or a 5xx
+     * included. A failure once the verify answered (the login, the sign-up, the session store)
+     * drops the challenge, because the verification token cannot be reused. The device key is
+     * deleted on every failure before the session store; a failed store follows [storeSession]'s
+     * rule. A failure while selecting the new session keeps the previous session selected, since
+     * Rain's login revoked nothing, and the thrown error is the host's signal. A provisioning
+     * failure once the new session is live throws with the session kept: [ensureAccounts] runs
+     * again at provider resolution, so it heals without a new code.
      */
     suspend fun confirmLoginCode(code: String) {
         flowMutex.withLock {
@@ -330,7 +335,7 @@ constructor(
             val previousKey = context.selectedSessionKey
             val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
             val deviceKey = guarded { context.createDeviceKey() }
-            val login = withDeviceKeyOnFailure(deviceKey) {
+            val login = onFailure({ deleteDeviceKey(deviceKey) }) {
                 val verificationToken = verifyCode(pending, trimmed, deviceKey, ::clearPendingOtp)
                 loginOrSignUp(pending, verificationToken)
             }
@@ -346,14 +351,13 @@ constructor(
      * Signs an existing user in with a passkey bound to the configured domain, through the system
      * passkey sheet presented from [activity]. The account is the one the passkey was created for.
      * A successful login stores the session under a fresh key, selects it, clears the previous
-     * session, revokes the user's other sessions on every device and backfills a missing account:
-     * the session steps of [confirmLoginCode], with one difference, that this login revoked the
-     * previous session server-side, so a failed switch signs the device out ([abandonSwitch]) where
-     * the code login keeps the previous session. A dismissed sheet, a refused passkey or a failed
-     * ceremony leaves the current session untouched; a session the vendor stored under the fresh
-     * key without selecting it is cleared. A pending login code survives, because it binds no
-     * device key; a pending contact verification does not, because the account it named changed.
-     * Throws [RainError.InvalidConfig] before touching the vendor when no domain is configured.
+     * session, revokes the user's other sessions on every device and backfills a missing account.
+     * A failed switch signs the device out ([abandonSwitch]), since this login revoked the previous
+     * session server-side. A dismissed sheet, a refused passkey or a failed ceremony leaves the
+     * current session untouched; a session the vendor stored under the fresh key without selecting
+     * it is cleared. A pending login code survives, because it binds no device key; a pending
+     * contact verification does not, because the account it named changed. Throws
+     * [RainError.InvalidConfig] before touching the vendor when no domain is configured.
      */
     suspend fun loginWithPasskey(activity: Activity) {
         flowMutex.withLock {
@@ -383,7 +387,11 @@ constructor(
      * the device signed out, as a logout would. Waiting out a restore in flight first keeps a
      * session that is still loading from being read as "nothing selected"; one still loading after
      * the bounded wait is refused like a live one. A failure after `POST /signup/passkey` answered
-     * (the login prompt, the session store) leaves an account the passkey can still sign into.
+     * (the login prompt, the session store) leaves an account the passkey can still sign into. A
+     * sign-up whose answer Rain left in doubt keeps its registration ([pendingPasskeySignup]), and the
+     * next call resends it with a fresh token instead of opening the sheet, so the account that call
+     * created is recorded by Rain rather than joined by a second one; [signUpOnRain] says which
+     * answers keep it and which settle it.
      */
     suspend fun signUpWithPasskey(activity: Activity) {
         flowMutex.withLock {
@@ -393,9 +401,19 @@ constructor(
             clearDeadSessionOrRefuse()
             val token = AuthToken(contact = null, value = authToken(null))
             val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
-            val passkeyName = TurnkeyPasskeys.authenticatorName(nowEpochSeconds())
-            val registration = guarded { context.createPasskeyCredential(activity, rpId, passkeyName) }
-            val signup = rainLeg(token) { rainApi.signupPasskey(it, registration.challenge, registration.toRainApi()) }
+            val kept = pendingLock.withJavaLock { pendingPasskeySignup }
+            val registration = kept ?: guarded {
+                context.createPasskeyCredential(activity, rpId, TurnkeyPasskeys.authenticatorName(nowEpochSeconds()))
+            }
+            // Rain requires a device public key with the sign-up and registers it on the account as a
+            // one-minute API key; the login below still runs through the sheet, so the key is deleted
+            // once the leg answered.
+            val deviceKey = guarded { context.createDeviceKey() }
+            val signup = try {
+                signUpOnRain(token, registration, deviceKey, resend = kept != null)
+            } finally {
+                withContext(NonCancellable) { deleteDeviceKey(deviceKey) }
+            }
             ceremony(sessionKey) { context.completePasskeyLogin(activity, sessionKey, organizationId = signup.subOrganizationId) }
             switchToSession(sessionKey, previousKey = null, previousRevoked = true)
             ensureAccountsLocked()
@@ -528,17 +546,16 @@ constructor(
 
     /**
      * The verify step: the code encrypted to the challenge's bundle with [deviceKey], then
-     * `POST /otp/verify` under the pending token. The challenge is kept through every failure of
-     * this step, a wrong code first of all, so the user can retype it; [clearPending] runs once the
-     * verify answered, because the code is spent then, whether the answer decoded or not.
+     * `POST /otp/verify` under the pending token. [clearPending] runs once Rain accepted the code,
+     * whether or not the answer decoded, since the code is spent then; a rejected code and any
+     * failure before that keep the challenge.
      */
     private suspend fun verifyCode(pending: PendingOtp, code: String, deviceKey: String, clearPending: () -> Unit): String {
         val encrypted = guarded { context.encryptOtpCode(code, pending.challenge.encryptionTargetBundle, deviceKey) }
         val verification = try {
             rainLeg(pending.token) { rainApi.verifyOtp(it, pending.challenge.otpId, encrypted) }
         } catch (e: RainError.InternalError) {
-            // The one failure past the answer: a 2xx the client could not read. Rain accepted the
-            // code, so it is spent.
+            // A 2xx the client could not read: Rain accepted the code, so it is spent.
             clearPending()
             throw e
         }
@@ -547,10 +564,9 @@ constructor(
     }
 
     /**
-     * Login first, sign-up on a 404: `POST /login` with the login signature; when Rain answers that
-     * no wallet exists for this contact in this tenant, `POST /signup` with the sign-up signature
-     * naming the canonical contact, then `POST /login` again with the sub-organization id the
-     * sign-up answered with, which spares Rain its lookup. Every other refusal maps as it comes.
+     * `POST /login`; on a no-wallet refusal, `POST /signup` and then `POST /login` again with the
+     * sub-organization id the sign-up answered with, which spares Rain its lookup. Every other
+     * refusal maps as it comes.
      */
     private suspend fun loginOrSignUp(pending: PendingOtp, verificationToken: String): RainApiLogin {
         val loginSignature = guarded { context.clientSignatureForLogin(verificationToken) }
@@ -568,17 +584,17 @@ constructor(
     }
 
     /**
-     * One leg against Rain under [token], through [guarded], which lets the client's own refusal
-     * through raw so its kind can be read here. A refused token, a 401 other than "invalid tenant",
-     * gets one fresh token from the host and one retry, and the fresh token replaces the old one
-     * for the legs that follow; a second refusal is an error like any other. A refusal [consume]
-     * accepts is returned as null for the caller to act on; every other refusal leaves mapped, with
-     * the authentication log line. A transport failure and an unreadable answer leave as the
-     * [RainError] the client threw; anything else is mapped as a vendor failure.
+     * One leg against Rain under [token], through [guarded], which passes the client's own refusal
+     * through raw so its kind can be read here. A refused token gets one fresh token from the host
+     * and one retry, and the fresh token replaces the old one for the legs that follow; a second
+     * refusal is an error like any other. A refusal [consume] accepts returns null for the caller
+     * to act on; every other refusal leaves through [TurnkeyErrorMapping.mapAuthError]. [onRefusal]
+     * sees every refusal raw, before the renewal or the mapping.
      */
     private suspend fun <T> rainLegOrNull(
         token: AuthToken,
         consume: (RainApiAuthFailure) -> Boolean,
+        onRefusal: (RainApiAuthFailure) -> Unit = {},
         call: suspend (token: String) -> T,
     ): T? {
         var refetched = false
@@ -588,6 +604,7 @@ constructor(
             } catch (e: RainApiAuthFailure) {
                 e
             }
+            onRefusal(refusal)
             when {
                 refusal.kind == RainApiAuthFailure.Kind.TokenRejected && !refetched -> {
                     refetched = true
@@ -601,19 +618,81 @@ constructor(
 
     /** [rainLegOrNull] for a leg that consumes no refusal. */
     private suspend fun <T> rainLeg(token: AuthToken, call: suspend (token: String) -> T): T =
-        checkNotNull(rainLegOrNull(token, consume = { false }, call)) { "a leg that consumes no refusal answered null" }
+        checkNotNull(rainLegOrNull(token, consume = { false }, call = call)) { "a leg that consumes no refusal answered null" }
 
     /**
-     * A wallet auth token from the host for [contact]: the canonical contact of the flow, or null
-     * for a passkey sign-up; the class KDoc says what the token binds and carries. A [RainError]
-     * from the host passes through as it is, and so does this coroutine's own cancellation. Any
-     * other throwable, a cancellation the host raised while this coroutine is still active included
-     * (its own `withTimeout`, a `Deferred` in a scope of its own), surfaces as
-     * [RainError.NetworkError] when an `IOException` is in its cause chain and as
-     * [RainError.InvalidConfig] otherwise, each naming the class and nothing else, because the
-     * host's message may carry the contact. A blank token is refused as a configuration error too.
+     * `POST /signup/passkey` for [registration] and [publicKey] under [token], with [rainLeg]'s one token renewal,
+     * and the registration's fate decided from the answer. A 200 settles it: the slot is cleared and
+     * the account is Rain's. An answer that leaves the account in doubt keeps the registration in
+     * [pendingPasskeySignup] for the next call: a transport failure or an unreadable answer (the
+     * client's [RainError.NetworkError] and [RainError.InternalError]; a renewal the host could not
+     * serve lands here too, and keeping a credential Rain never saw costs nothing), a 5xx (rain-api's
+     * create outlives the device's deadline and may still finish), a cancelled request, and Rain's
+     * own "already in progress", which leaves as [RainError.NetworkError] so the host retries it as
+     * it would a dropped connection. Rain's "already has a wallet" settles it on any send: the account
+     * exists and Rain has it, so the registration is dropped and the mapper's [RainError.InvalidConfig]
+     * sends the host to [loginWithPasskey]. On a first send every other refusal drops it too: Rain
+     * refused before creating anything. On a [resend] only Rain's word on the credential settles it:
+     * that 409, or a 400 (Turnkey refused the attestation, so no account holds it); a refused token or
+     * tenant, a 429, a 404 from in front of Rain or a 409 for a token already used say nothing about
+     * the first call, so the registration stays for the call after.
      */
-    // The host's failure is untyped and reported by class only; a blank token is a second refusal.
+    private suspend fun signUpOnRain(
+        token: AuthToken,
+        registration: PasskeyRegistration,
+        publicKey: String,
+        resend: Boolean,
+    ): RainApiSignup {
+        // The refusal that ended the leg, raw: the mapped error does not always carry it.
+        var refusal: RainApiAuthFailure? = null
+        val signup = try {
+            rainLegOrNull(token, consume = { false }, onRefusal = { refusal = it }) {
+                rainApi.signupPasskey(it, registration.challenge, registration.toRainApi(), publicKey)
+            }
+        } catch (e: CancellationException) {
+            pendingLock.withJavaLock { pendingPasskeySignup = registration }
+            throw e
+        } catch (e: RainError) {
+            throw settlePasskeySignup(e, refusal, registration, resend)
+        }
+        pendingLock.withJavaLock { pendingPasskeySignup = null }
+        return checkNotNull(signup) { "a leg that consumes no refusal answered null" }
+    }
+
+    /** [signUpOnRain]'s failure exit: keeps or drops [registration], and names the error that leaves. */
+    private fun settlePasskeySignup(
+        e: RainError,
+        refusal: RainApiAuthFailure?,
+        registration: PasskeyRegistration,
+        resend: Boolean,
+    ): RainError {
+        val inProgress = refusal?.kind == RainApiAuthFailure.Kind.SignupInProgress
+        val lostOrFailed = (refusal == null && (e is RainError.NetworkError || e is RainError.InternalError)) ||
+            (refusal != null && refusal.status >= HttpURLConnection.HTTP_INTERNAL_ERROR)
+        val keep = when {
+            inProgress || lostOrFailed -> true
+            refusal?.kind == RainApiAuthFailure.Kind.PasskeyTaken -> false
+            resend -> refusal?.status != HttpURLConnection.HTTP_BAD_REQUEST
+            else -> false
+        }
+        pendingLock.withJavaLock { pendingPasskeySignup = registration.takeIf { keep } }
+        return if (inProgress) {
+            RainError.NetworkError(
+                "Rain is still creating this account from an earlier sign-up; call signUpWithPasskey again in a " +
+                    "moment, which resends the same passkey",
+                e,
+            )
+        } else {
+            e
+        }
+    }
+
+    /**
+     * The host's token for [contact], null on a passkey sign-up. A [RainError] the host throws and
+     * this coroutine's own cancellation pass through; anything else becomes NetworkError (an
+     * IOException in its causes) or InvalidConfig, named by class only, because the host's message
+     * may carry the contact. A blank token is InvalidConfig too.
+     */
     @Suppress("TooGenericExceptionCaught", "ThrowsCount", "SwallowedException")
     private suspend fun authToken(contact: LoginContact?): String {
         val token = try {
@@ -621,9 +700,9 @@ constructor(
         } catch (e: RainError) {
             throw e
         } catch (e: CancellationException) {
-            // As in ready(): only this coroutine's own cancellation passes. A timeout or a cancelled
-            // scope inside the host's provider is the provider failing, and left as a cancellation
-            // it would skip every `catch (e: RainError)` a host has and, on a refetch, spend the code silently.
+            // Only this coroutine's own cancellation passes, as in ready(). A cancellation raised
+            // inside the host's provider is the provider failing; left as one it would skip the
+            // host's `catch (e: RainError)` and, on a refetch, spend the code silently.
             currentCoroutineContext().ensureActive()
             throw providerFailure(e)
         } catch (e: Exception) {
@@ -634,7 +713,7 @@ constructor(
         return token
     }
 
-    /** The host's failure by class only: its own backend out of reach is retryable, anything else is configuration. */
+    /** A host failure under [authToken]'s rule: class name only, NetworkError when its backend was out of reach. */
     private fun providerFailure(e: Exception): RainError {
         val name = e.javaClass.simpleName
         return if (e.causeChain().any { it is IOException }) {
@@ -646,24 +725,20 @@ constructor(
         }
     }
 
-    /**
-     * Runs [block] and deletes the device key [publicKey] on every failure exit, the caller's
-     * cancellation included, so a key no session will ever stamp with does not stay in the
-     * keystore. On success the key goes to [storeSession], whose rule governs it from there.
-     */
-    private suspend fun <T> withDeviceKeyOnFailure(publicKey: String, block: suspend () -> T): T {
+    /** Runs [block]; on a [RainError] or the caller's cancellation, runs [cleanup] first, then rethrows. */
+    private suspend fun <T> onFailure(cleanup: suspend () -> Unit, block: suspend () -> T): T {
         try {
             return block()
         } catch (e: CancellationException) {
-            withContext(NonCancellable) { deleteDeviceKey(publicKey) }
+            withContext(NonCancellable) { cleanup() }
             throw e
         } catch (e: RainError) {
-            deleteDeviceKey(publicKey)
+            cleanup()
             throw e
         }
     }
 
-    /** Best-effort removal of a device key no session uses: a key that will not delete is logged, never surfaced. */
+    /** Best-effort removal of a device key no session uses; a failed delete is logged, not surfaced. */
     @Suppress("TooGenericExceptionCaught") // best-effort cleanup; the failure that matters is the caller's
     private suspend fun deleteDeviceKey(publicKey: String) {
         try {
@@ -745,25 +820,15 @@ constructor(
     }
 
     /**
-     * Stores the session Rain issued under [sessionKey], the vendor's `createSession`: it persists
-     * the JWT and, when nothing is selected, selects the session and refreshes the user and the
-     * wallets over the network before returning, so a failure or the caller's cancellation can land
-     * with the session already stored, selected or not. The [ceremony] rule applies. A session the
-     * vendor selected before the failure is left signed in with [deviceKey], since the device
-     * stamps with that key from then on and deleting it would sign the user out at the next
-     * relaunch; otherwise the key is deleted and a session stored without being selected is
-     * cleared, so the failed login leaves neither behind.
+     * Stores the session Rain issued under [sessionKey], the vendor's `createSession`, which, when
+     * nothing is selected, also selects it and refreshes the user and the wallets over the network,
+     * so a failure or the caller's cancellation can land with the session already stored, selected
+     * or not. A session the vendor selected is left signed in with [deviceKey], since the device
+     * stamps with that key from then on; otherwise [abandonStore] deletes the key and clears the
+     * stored session, so the failed login leaves neither behind.
      */
     private suspend fun storeSession(jwt: String, sessionKey: String, deviceKey: String) {
-        try {
-            guarded { context.storeSession(jwt, sessionKey) }
-        } catch (e: CancellationException) {
-            withContext(NonCancellable) { abandonStore(sessionKey, deviceKey) }
-            throw e
-        } catch (e: RainError) {
-            abandonStore(sessionKey, deviceKey)
-            throw e
-        }
+        onFailure({ abandonStore(sessionKey, deviceKey) }) { guarded { context.storeSession(jwt, sessionKey) } }
     }
 
     /**
@@ -786,15 +851,7 @@ constructor(
      * login leaves it.
      */
     private suspend fun ceremony(sessionKey: String, block: suspend () -> Unit) {
-        try {
-            guarded(block = block)
-        } catch (e: CancellationException) {
-            withContext(NonCancellable) { clearUnselected(sessionKey) }
-            throw e
-        } catch (e: RainError) {
-            clearUnselected(sessionKey)
-            throw e
-        }
+        onFailure({ clearUnselected(sessionKey) }) { guarded(block = block) }
     }
 
     /** Drops a pending challenge issued for another contact or channel; a same-contact resend keeps it. */
@@ -892,9 +949,9 @@ constructor(
     }
 
     /**
-     * Makes this controller inert: every auth call throws, the state reads unauthenticated, and the
-     * two pending slots are dropped, since each holds the host's bearer token and nothing may spend
-     * one after this.
+     * Makes this controller inert: every auth call throws, the state reads unauthenticated, and
+     * both pending codes are dropped, each with the host's bearer token it holds, and so is a kept
+     * passkey registration.
      */
     fun close() {
         closed.set(true)
@@ -902,6 +959,7 @@ constructor(
         pendingLock.withJavaLock {
             pendingOtp = null
             pendingContactOtp = null
+            pendingPasskeySignup = null
         }
     }
 
@@ -937,24 +995,16 @@ constructor(
      * On a first login the vendor selects the new session itself; over a live session it only
      * stores it, so the switch has to be explicit. Afterwards the coordinator's death count
      * advances and stales the manager's cached addresses, since an Active→Active transition is not
-     * a death the watcher notices, and the previous session is cleared locally. A switch that
-     * fails is abandoned the same way on both exits: see [abandonSwitch], which [previousRevoked]
-     * tells whether the login revoked the previous session server-side.
+     * a death the watcher notices, and the previous session is cleared locally. A failed switch is
+     * abandoned on both exits by [abandonSwitch]; [previousRevoked] says whether the login revoked
+     * the previous session server-side.
      */
     private suspend fun switchToSession(sessionKey: String, previousKey: String?, previousRevoked: Boolean) {
         if (context.selectedSessionKey != sessionKey) {
-            try {
-                guarded { context.selectSession(sessionKey) }
-            } catch (e: CancellationException) {
-                withContext(NonCancellable) { abandonSwitch(sessionKey, previousKey, previousRevoked) }
-                throw e
-            } catch (e: RainError) {
-                abandonSwitch(sessionKey, previousKey, previousRevoked)
-                throw e
-            }
+            onFailure({ abandonSwitch(sessionKey, previousKey, previousRevoked) }) { guarded { context.selectSession(sessionKey) } }
         }
-        // The account changed, and the verification slot named the one left behind. Cleared only
-        // now: a switch that failed above kept the previous account, whose pending attach still stands.
+        // The account changed and the verification slot named the one left behind. Not earlier: a
+        // switch that failed above kept the previous account, whose pending attach still stands.
         clearPendingContactOtp()
         coordinator.notifySessionReplaced()
         if (previousKey != null) clearUnselected(previousKey)
@@ -962,15 +1012,12 @@ constructor(
 
     /**
      * Cleans up after a switch that failed. The fresh key is cleared only when the selection
-     * really did not take effect — the vendor persists it before its auto-refresh can fail. What
-     * happens to the previous session, still the selected one, depends on what the login did to it
-     * server-side ([previousRevoked]). A passkey login revoked the user's other sessions
-     * (`invalidateExisting`), so leaving it selected would only move the failure to the next wallet
-     * call, where it would read as an unexplained expiry: the device is signed out, with the
-     * re-auth hook silent, because the caller's exception is the host's signal, as after [logout].
-     * A code login through Rain revoked nothing, so the previous session is as live as before and
-     * stays selected: the host keeps the account it had and reads the thrown error as the failed
-     * login it is.
+     * really did not take effect: the vendor persists it before its auto-refresh can fail. The
+     * previous session, still the selected one, is signed out only when the login revoked it
+     * server-side ([previousRevoked], a passkey login's `invalidateExisting`): left selected, it
+     * would fail at the next wallet call as an unexplained expiry. The re-auth hook stays silent
+     * for that sign-out, because the caller's exception is the host's signal, as after [logout].
+     * After a code login, which revoked nothing, it stays selected and as live as before.
      */
     @Suppress(
         "TooGenericExceptionCaught"
@@ -1075,12 +1122,12 @@ constructor(
 
     /**
      * Runs a vendor or Rain call under the error contract: cancellation propagates untouched, a
-     * [RainError] passes through, the Rain client's own [RainApiAuthFailure] passes through raw so
-     * that [rainLegOrNull] can read its kind before it is mapped, and anything else is mapped
-     * through [TurnkeyErrorMapping.mapAuthError]. `ensureActive()`, not a cause-chain walk, decides
-     * whether a caught exception is really this coroutine's cancellation: the vendor wraps
-     * cancellation in its own error types, but it also re-emits a sibling's failure as a wrapped
-     * `JobCancellationException` while this caller is still active.
+     * [RainError] passes through, a [RainApiAuthFailure] passes through raw so [rainLegOrNull] can
+     * read its kind, and anything else is mapped through [TurnkeyErrorMapping.mapAuthError].
+     * `ensureActive()`, not a cause-chain walk, decides whether a caught exception is really this
+     * coroutine's cancellation: the vendor wraps cancellation in its own error types, but it also
+     * re-emits a sibling's failure as a wrapped `JobCancellationException` while this caller is
+     * still active.
      */
     @Suppress("TooGenericExceptionCaught", "ThrowsCount") // the mapping boundary: three pass-throughs and one mapped exit
     private suspend fun <T> guarded(block: suspend () -> T): T {
@@ -1136,7 +1183,7 @@ constructor(
          * endpoints create it inside the sign-up itself, from a spec of their own that equals this
          * one, and [ensureAccounts] completes an older organization to the same shape. Name,
          * mnemonic length (Turnkey's default of 12) and derivation paths are a cross-platform
-         * contract shared by Rain's SDKs and rain-api — change it everywhere or nowhere.
+         * contract shared by Rain's SDKs and rain-api: change it everywhere or nowhere.
          */
         val MANAGED_WALLET = TurnkeyWalletSpec(MANAGED_WALLET_NAME, listOf(ETHEREUM_ACCOUNT, SOLANA_ACCOUNT))
     }
