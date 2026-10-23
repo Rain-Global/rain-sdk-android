@@ -76,20 +76,30 @@ internal object TurnkeyErrorMapping {
 
     /**
      * A refusal from Rain's embedded-wallet endpoints, by [RainApiAuthFailure.Kind]: a wrong code is
-     * [RainError.InvalidLoginCode], a refused token or tenant is [RainError.Unauthorized], and
-     * everything else is [RainError.ProviderError] over the failure, which carries the status, the
-     * path and a 500's correlation id, and no body.
+     * [RainError.InvalidLoginCode], a refused or spent token or a refused tenant is
+     * [RainError.Unauthorized], a passkey that already has a wallet is [RainError.InvalidConfig]
+     * naming `loginWithPasskey` (a state error, as the other session-state refusals are; the message
+     * is true whenever Rain says it), and everything else is [RainError.ProviderError] over the
+     * failure, which carries the status, the path and a 500's correlation id, and no body.
      */
     fun mapRainApiAuthFailure(e: RainApiAuthFailure): RainError = when (e.kind) {
         RainApiAuthFailure.Kind.InvalidCode -> RainError.InvalidLoginCode()
         RainApiAuthFailure.Kind.TokenRejected ->
             RainError.Unauthorized("Rain rejected the wallet auth token on ${e.path}: HTTP ${e.status}")
+        RainApiAuthFailure.Kind.TokenUsed ->
+            RainError.Unauthorized("Rain answered that another call already spent the wallet auth token (${e.path}: HTTP ${e.status})")
         RainApiAuthFailure.Kind.Forbidden ->
             RainError.Unauthorized(
                 "Rain refused embedded-wallet auth on ${e.path}: HTTP ${e.status}; " +
                     "the tenant cannot use embedded wallets, or the wallet auth token is of the wrong kind for this route",
             )
+        RainApiAuthFailure.Kind.PasskeyTaken ->
+            RainError.InvalidConfig(
+                "Rain answered that this passkey already has a wallet (${e.path}: HTTP ${e.status}); " +
+                    "sign in with loginWithPasskey instead of signing up",
+            )
         RainApiAuthFailure.Kind.NoWallet,
+        RainApiAuthFailure.Kind.SignupInProgress,
         RainApiAuthFailure.Kind.Refused -> RainError.ProviderError(e)
     }
 

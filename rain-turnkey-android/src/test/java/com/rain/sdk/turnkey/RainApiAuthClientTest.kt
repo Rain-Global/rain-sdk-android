@@ -52,6 +52,9 @@ class RainApiAuthClientTest {
 
     private val signature = RainApiClientSignature(publicKey = "pk", message = "m", signature = "sig")
 
+    /** A device key as the vendor's `createKeyPair` returns it: compressed P-256, 33 bytes of hex. */
+    private val publicKey = "02" + "ab".repeat(32)
+
     private val attestation = RainApiPasskeyAttestation(
         credentialId = "cred-1",
         clientDataJson = "eyJ0eXBlIjoi",
@@ -104,7 +107,7 @@ class RainApiAuthClientTest {
             assertThat(client.signup("wat_1", "vt", signature)).isEqualTo(RainApiSignup("sub-1"))
             assertThat(client.login("wat_1", "vt", signature, subOrganizationId = null))
                 .isEqualTo(RainApiLogin(sessionToken = "jwt", providerUserId = "u"))
-            assertThat(client.signupPasskey("wat_2", "Y2hhbGxlbmdl", attestation)).isEqualTo(RainApiSignup("sub-2"))
+            assertThat(client.signupPasskey("wat_2", "Y2hhbGxlbmdl", attestation, publicKey)).isEqualTo(RainApiSignup("sub-2"))
         }
 
         val requests = List(5) { takeRequest() }
@@ -159,14 +162,15 @@ class RainApiAuthClientTest {
     }
 
     @Test
-    fun `the passkey attestation is an object with exactly the four fields rain-api validates`() {
+    fun `the passkey sign-up body carries the challenge, the device key and an attestation with exactly the four fields rain-api validates`() {
         server.enqueue(answer(200, """{"subOrganizationId":"sub-2"}"""))
-        runBlocking { client.signupPasskey("wat", "Y2hhbGxlbmdl", attestation) }
+        runBlocking { client.signupPasskey("wat", "Y2hhbGxlbmdl", attestation, publicKey) }
 
         val body = takeRequest().json()
         // rain-api rejects unknown keys at both levels, so nothing else may ride along.
-        assertThat(body.keyList()).containsExactly("challenge", "attestation")
+        assertThat(body.keyList()).containsExactly("challenge", "attestation", "publicKey")
         assertThat(body.getString("challenge")).isEqualTo("Y2hhbGxlbmdl")
+        assertThat(body.getString("publicKey")).isEqualTo(publicKey)
         val sent = body.getJSONObject("attestation")
         assertThat(sent.keyList()).containsExactly("credentialId", "clientDataJson", "attestationObject", "transports")
         assertThat(sent.getString("credentialId")).isEqualTo("cred-1")
@@ -181,11 +185,27 @@ class RainApiAuthClientTest {
     // ---------- answers ----------
 
     @Test
+    fun `the verify answer's saved wallet is read when present, null when absent or null, and unreadable when not a string`() {
+        server.enqueue(answer(200, """{"verificationToken":"vt","walletSubOrganizationId":"sub-7"}"""))
+        server.enqueue(answer(200, """{"verificationToken":"vt","walletSubOrganizationId":null}"""))
+        server.enqueue(answer(200, """{"verificationToken":"vt"}"""))
+        server.enqueue(answer(200, """{"verificationToken":"vt","walletSubOrganizationId":7}"""))
+        runBlocking {
+            assertThat(client.verifyOtp("wat", "otp-1", "enc")).isEqualTo(RainApiVerification("vt", walletSubOrganizationId = "sub-7"))
+            assertThat(client.verifyOtp("wat", "otp-1", "enc")).isEqualTo(RainApiVerification("vt", walletSubOrganizationId = null))
+            assertThat(client.verifyOtp("wat", "otp-1", "enc").walletSubOrganizationId).isNull()
+        }
+        val unreadable = assertThrows(RainError.InternalError::class.java) { runBlocking { client.verifyOtp("wat", "otp-1", "enc") } }
+        assertThat(unreadable).hasMessageThat().contains("/v1/issuing/embedded-wallets/otp/verify")
+    }
+
+    @Test
     fun `the answers that carry a JWT redact it from toString and still compare by value`() {
         // The verification token names the contact and the session token names the wallet and its user.
-        val verification = RainApiVerification(verificationToken = "vt-naming-the-contact")
+        val verification = RainApiVerification(verificationToken = "vt-naming-the-contact", walletSubOrganizationId = "sub-1")
         assertThat(verification.toString()).doesNotContain("vt-naming-the-contact")
-        assertThat(verification).isEqualTo(RainApiVerification("vt-naming-the-contact"))
+        assertThat(verification.toString()).contains("sub-1")
+        assertThat(verification).isEqualTo(RainApiVerification("vt-naming-the-contact", "sub-1"))
 
         val login = RainApiLogin(sessionToken = "jwt-the-log-must-not-see", providerUserId = "sub-1")
         assertThat(login.toString()).doesNotContain("jwt-the-log-must-not-see")
@@ -229,7 +249,10 @@ class RainApiAuthClientTest {
             Triple(403, "Feature not enabled for tenant", RainApiAuthFailure.Kind.Forbidden),
             Triple(404, "No wallet exists for this contact", RainApiAuthFailure.Kind.NoWallet),
             Triple(409, "Token already used", RainApiAuthFailure.Kind.Refused),
+            Triple(409, "This wallet auth token has already been used", RainApiAuthFailure.Kind.TokenUsed),
             Triple(409, "Signup in progress", RainApiAuthFailure.Kind.Refused),
+            Triple(409, "A signup is already in progress", RainApiAuthFailure.Kind.SignupInProgress),
+            Triple(409, "This passkey already has a wallet", RainApiAuthFailure.Kind.PasskeyTaken),
             Triple(429, "Too many attempts", RainApiAuthFailure.Kind.Refused),
             Triple(503, "Turnkey is not configured", RainApiAuthFailure.Kind.Refused),
             Triple(418, "teapot", RainApiAuthFailure.Kind.Refused),
@@ -256,8 +279,6 @@ class RainApiAuthClientTest {
 
     @Test
     fun `a 404 is NoWallet only with rain-api's own body, so one from in front of rain-api is never read as no wallet`() {
-        // Cloud Run has answered a share of requests with Google's HTML 404 before they reached rain-api.
-        // Read as "no wallet", the login leg would sign up and the attach would skip its ownership check.
         val html = "<!DOCTYPE html><html><head><title>Error 404 (Not Found)</title></head><body>Not Found</body></html>"
         listOf(
             MockResponse().setResponseCode(404).setHeader("Content-Type", "text/html").setBody(html),
@@ -276,7 +297,7 @@ class RainApiAuthClientTest {
     }
 
     @Test
-    fun `through the mapper a wrong code is RAIN_203, a refused token or tenant RAIN_202, the rest RAIN_501`() {
+    fun `through the mapper a wrong code is RAIN_203, a refused or spent token or tenant RAIN_202, a taken passkey RAIN_102, the rest RAIN_501`() {
         fun mapped(status: Int, message: String): RainError {
             server.enqueue(refusal(status, message))
             return TurnkeyErrorMapping.map(failedLogin())
@@ -290,10 +311,19 @@ class RainApiAuthClientTest {
             assertWithMessage("$status $message").that(refused).isInstanceOf(RainError.Unauthorized::class.java)
             assertWithMessage("$status $message").that(refused.errorCode).isEqualTo(RainErrorCode.UNAUTHORIZED)
         }
+        val spent = mapped(409, "This wallet auth token has already been used")
+        assertThat(spent).isInstanceOf(RainError.Unauthorized::class.java)
+        assertThat(spent.errorCode).isEqualTo(RainErrorCode.UNAUTHORIZED)
+        assertThat(spent).hasMessageThat().contains("already spent")
+        val taken = mapped(409, "This passkey already has a wallet")
+        assertThat(taken).isInstanceOf(RainError.InvalidConfig::class.java)
+        assertThat(taken.errorCode).isEqualTo(RainErrorCode.INVALID_CONFIG)
+        assertThat(taken).hasMessageThat().contains("loginWithPasskey")
         listOf(
             400 to "Verification failed",
             404 to "No wallet exists for this contact",
             409 to "Signup in progress",
+            409 to "A signup is already in progress",
             429 to "Too many attempts",
             503 to "Turnkey is not configured",
             418 to "teapot",
