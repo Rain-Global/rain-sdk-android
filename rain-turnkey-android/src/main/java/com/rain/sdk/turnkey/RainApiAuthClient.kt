@@ -358,12 +358,10 @@ internal class RainApiAuthClient(
 }
 
 /**
- * [raw] as the Rain API base URL a managed configuration carries: trimmed, parsed by the client's own
- * parser, https, and nothing but a host and a port (a path other than `/`, a query, a fragment or
- * userinfo is refused, because the client appends its routes to whatever it is given), or
- * [RainError.InvalidConfig] (`RAIN_102`) naming the rule. Validated at construction so a typo fails
- * there and not as a network error on the first login. The loopback exemption the client itself
- * keeps for its mock-server tests does not apply here: a configuration names a real host.
+ * [raw] as the Rain API base URL a managed configuration carries: trimmed, parsed by the client's
+ * own parser, https, and nothing but a host and a port (the client appends its routes to it), or
+ * [RainError.InvalidConfig] (`RAIN_102`) naming the rule. The loopback exemption the client keeps
+ * for its mock-server tests does not apply here: a configuration names a real host.
  */
 internal fun rainApiBaseUrlOrThrow(raw: String): HttpUrl {
     val trimmed = raw.trim()
@@ -380,7 +378,6 @@ internal fun rainApiBaseUrlOrThrow(raw: String): HttpUrl {
     return checkNotNull(url)
 }
 
-/** A path of `/`, no query, no fragment and no userinfo: the client appends its routes to the URL as given. */
 private fun HttpUrl.namesHostOnly(): Boolean {
     val bare = encodedPath == "/" && query == null && fragment == null
     return bare && username.isEmpty() && password.isEmpty()
@@ -390,7 +387,7 @@ private fun HttpUrl.namesHostOnly(): Boolean {
  * The host of [rainApiBaseUrl] as [rainApiBaseUrlOrThrow] parses it, lowercased with a trailing dot
  * stripped: the one spelling a deployment check compares, so no second parser can read
  * `https://api%2Erain.xyz` or `https://api.rain.xyz.` differently from the one the configuration
- * is validated with. Internal API for the Rain wallet; throws as [rainApiBaseUrlOrThrow] does.
+ * is validated with. Throws as [rainApiBaseUrlOrThrow] does.
  */
 @InternalRainTurnkeyApi
 fun rainApiBaseUrlHost(rainApiBaseUrl: String): String =

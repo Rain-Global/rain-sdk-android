@@ -5,10 +5,9 @@ import com.rain.sdk.turnkey.TurnkeyConfig
 
 /**
  * Configuration for the Rain wallet provider. The wallet backend identity (Rain's organization and
- * API host per environment) is embedded in the SDK; a host supplies the one thing only its backend
- * can, the wallet auth token, picks the environment, and tunes behaviour. Every parameter but the
- * token supplier has a default. The hooks are passed by name: the parameter order matches the
- * SDK's other provider configs, so none is a trailing lambda.
+ * API host per environment) is embedded in the SDK; a host supplies the wallet auth token, picks
+ * the environment, and tunes behaviour. The hooks are passed by name: the parameter order matches
+ * the SDK's other provider configs, so none is a trailing lambda.
  *
  * There is no address override: a Rain wallet holds one Ethereum account, the one the SDK provisions
  * on first login, and the SDK signs with it and reads for it. A choice of account arrives with
@@ -16,24 +15,19 @@ import com.rain.sdk.turnkey.TurnkeyConfig
  *
  * @param authTokenProvider Returns the wallet auth token your backend mints with its Api-Key
  *                          (`POST /v1/issuing/embedded-wallets/auth-tokens`) for the contact the
- *                          SDK passes, the canonical contact of a code request. Called once per
- *                          code request, and once more for each leg Rain refuses the token on.
- *                          It runs under the
+ *                          SDK passes, the canonical contact of a code request. It runs under the
  *                          provider's authentication lock, so it must not call back into the
  *                          provider, and it should carry its own timeout. Throw a `RainError` to
  *                          pass it through; a backend it could not reach arrives as
  *                          `RainError.NetworkError` (`RAIN_301`) and any other exception as
- *                          `RainError.InvalidConfig` (`RAIN_102`), each naming the class only. Your
- *                          mint endpoint authenticates the app user and throttles before minting,
- *                          because Rain limits by IP only. The `RainWalletConfig` row of
- *                          docs/METHODS.md has the rules, the token's lifetime and the threading
- *                          included.
+ *                          `RainError.InvalidConfig` (`RAIN_102`). The `RainWalletConfig` row of
+ *                          docs/METHODS.md has the rules: the token's lifetime, the retry on a
+ *                          refused token, the threading and the mint endpoint's duties.
  * @param environment The Rain deployment the authentication runs against:
  *                    [RainWalletEnvironment.Production] by default, which the [RainProvider]
- *                    constructor refuses with `RainError.InvalidConfig` until the release that turns
- *                    production on, so pass [RainWalletEnvironment.Sandbox] until then, or a
- *                    [RainWalletEnvironment.Custom]. The `RainWalletConfig` row of docs/METHODS.md
- *                    has the rules.
+ *                    constructor refuses with `RainError.InvalidConfig`, so pass
+ *                    [RainWalletEnvironment.Sandbox] or a [RainWalletEnvironment.Custom]. The
+ *                    `RainWalletConfig` row of docs/METHODS.md has the rules.
  * @param sessionPolicy Expiry/refresh/retry behaviour for the session guarding every wallet call.
  * @param onSessionExpired Re-auth hook: invoked once per session death when the session dies and
  *                         cannot be refreshed, whether that is discovered during a wallet call or
@@ -90,9 +84,8 @@ class RainWalletConfig(
 }
 
 /**
- * The backing adapter's configuration for this wallet: the environment's embedded backend identity,
- * the host's token supplier in the backing's own contact terms, plus the host's behaviour, field
- * for field. A function of its own so the mapping is testable.
+ * The backing adapter's configuration for this wallet, field for field. A function of its own so
+ * the mapping is testable.
  */
 @JvmSynthetic
 internal fun RainWalletConfig.toBacking(application: Application): TurnkeyConfig {
