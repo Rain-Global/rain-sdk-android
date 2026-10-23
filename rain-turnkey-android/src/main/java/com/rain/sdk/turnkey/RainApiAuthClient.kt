@@ -34,10 +34,12 @@ internal data class RainApiOtpChallenge(val otpId: String, val otpEncryptionTarg
 /**
  * `POST /otp/verify`'s answer: Turnkey's verification token, a JWT good for ten minutes that
  * carries the public key the code was encrypted with and names the contact, so `toString()`
- * redacts it.
+ * redacts it; and [walletSubOrganizationId], the wallet this tenant saved for the token's contact,
+ * null when there is none or when the answer omits the field.
  */
-internal data class RainApiVerification(val verificationToken: String) {
-    override fun toString(): String = "RainApiVerification(verificationToken=<redacted>)"
+internal data class RainApiVerification(val verificationToken: String, val walletSubOrganizationId: String? = null) {
+    override fun toString(): String =
+        "RainApiVerification(verificationToken=<redacted>, walletSubOrganizationId=$walletSubOrganizationId)"
 }
 
 /** `POST /signup` and `POST /signup/passkey`'s answer. */
@@ -120,6 +122,12 @@ internal class RainApiAuthFailure(
         TokenRejected,
 
         /**
+         * 409 "This wallet auth token has already been used": another call spent the token while this
+         * one was in flight; a token spent before the call is refused as a 401. A fresh token works.
+         */
+        TokenUsed,
+
+        /**
          * 403, or 401 "Invalid tenant": the tenant cannot use embedded wallets (flag off, no API
          * access) or the token is of the wrong kind for the route. A new token does not help.
          */
@@ -129,15 +137,15 @@ internal class RainApiAuthFailure(
         NoWallet,
 
         /**
-         * 409 "A signup is already in progress": rain-api holds a create lock for two minutes after a
-         * create, because the create can finish after the device gave up on the call. On a passkey
-         * sign-up the controller keeps the passkey and the user retries; elsewhere a refusal like any.
+         * 409 "A signup is already in progress": rain-api holds a create lock for two minutes around a
+         * create. On a passkey sign-up the controller keeps the passkey and the user retries; elsewhere
+         * a refusal like any.
          */
         SignupInProgress,
 
         /**
          * 409 "This passkey already has a wallet": the account exists and Rain has it on file, so the
-         * user signs in with it. The one 409 the mapper names, as `RainError.InvalidConfig`.
+         * user signs in with it.
          */
         PasskeyTaken,
 
@@ -166,7 +174,12 @@ internal interface RainApiAuthClientProtocol {
         subOrganizationId: String?,
     ): RainApiLogin
 
-    suspend fun signupPasskey(token: String, challenge: String, attestation: RainApiPasskeyAttestation): RainApiSignup
+    suspend fun signupPasskey(
+        token: String,
+        challenge: String,
+        attestation: RainApiPasskeyAttestation,
+        publicKey: String,
+    ): RainApiSignup
 }
 
 /**
@@ -201,7 +214,10 @@ internal class RainApiAuthClient(
     /** `POST /otp/verify`: the typed code, encrypted to the challenge's bundle with the device key. */
     override suspend fun verifyOtp(token: String, otpId: String, encryptedOtpBundle: String): RainApiVerification =
         post(OTP_VERIFY, token, JSONObject().put("otpId", otpId).put("encryptedOtpBundle", encryptedOtpBundle)) { json ->
-            RainApiVerification(verificationToken = json.requiredString("verificationToken"))
+            RainApiVerification(
+                verificationToken = json.requiredString("verificationToken"),
+                walletSubOrganizationId = json.optionalString("walletSubOrganizationId"),
+            )
         }
 
     /** `POST /signup`: a wallet for the token's contact in the token's tenant. */
@@ -233,11 +249,22 @@ internal class RainApiAuthClient(
         }
     }
 
-    /** `POST /signup/passkey`: a wallet whose root user has the passkey as its only authenticator. */
-    override suspend fun signupPasskey(token: String, challenge: String, attestation: RainApiPasskeyAttestation): RainApiSignup =
-        post(SIGNUP_PASSKEY, token, JSONObject().put("challenge", challenge).put("attestation", attestation.toJson())) { json ->
+    /**
+     * `POST /signup/passkey`: a wallet whose root user has the passkey as its authenticator and
+     * [publicKey], the compressed P-256 hex the vendor's `createKeyPair` returns, as an API key
+     * rain-api expires after a minute. The schema requires the key.
+     */
+    override suspend fun signupPasskey(
+        token: String,
+        challenge: String,
+        attestation: RainApiPasskeyAttestation,
+        publicKey: String,
+    ): RainApiSignup {
+        val body = JSONObject().put("challenge", challenge).put("attestation", attestation.toJson()).put("publicKey", publicKey)
+        return post(SIGNUP_PASSKEY, token, body) { json ->
             RainApiSignup(subOrganizationId = json.requiredString("subOrganizationId"))
         }
+    }
 
     // ---------- HTTP ----------
 
@@ -280,10 +307,10 @@ internal class RainApiAuthClient(
      * 401 too, but a new token fails the same way, so it joins the tenant refusals and the controller
      * never loops on the host's token provider. A 404 is [RainApiAuthFailure.Kind.NoWallet] only when
      * the body is rain-api's own, because a 404 from a proxy in front of it says nothing about the
-     * wallet, and the controller must neither sign up nor attach on it. Two 409 phrases are read, both from
-     * `/signup/passkey`: "already has a wallet" is [RainApiAuthFailure.Kind.PasskeyTaken] and "already
-     * in progress" is [RainApiAuthFailure.Kind.SignupInProgress]; a 409 for a token already used stays
-     * [RainApiAuthFailure.Kind.Refused]. Everything else is the status alone.
+     * wallet, and the controller must neither sign up nor attach on it. Three 409 phrases are read:
+     * "already has a wallet" is [RainApiAuthFailure.Kind.PasskeyTaken], "already in progress" is
+     * [RainApiAuthFailure.Kind.SignupInProgress] and "already been used" is
+     * [RainApiAuthFailure.Kind.TokenUsed]. Everything else is the status alone.
      */
     private fun classify(status: Int, body: String, path: String): RainApiAuthFailure {
         val rainBody = rainApiBody(body)
@@ -358,11 +385,13 @@ internal class RainApiAuthClient(
         private const val INVALID_TENANT_PHRASE = "invalid tenant"
         private const val SIGNUP_IN_PROGRESS_PHRASE = "already in progress"
         private const val PASSKEY_TAKEN_PHRASE = "already has a wallet"
+        private const val TOKEN_USED_PHRASE = "already been used"
 
-        /** The two 409 phrases `/signup/passkey` answers with; a 409 for a token already used stays Refused. */
+        /** Any 409 without one of the three phrases is Refused. */
         private fun conflictKind(message: String): RainApiAuthFailure.Kind = when {
             PASSKEY_TAKEN_PHRASE in message -> RainApiAuthFailure.Kind.PasskeyTaken
             SIGNUP_IN_PROGRESS_PHRASE in message -> RainApiAuthFailure.Kind.SignupInProgress
+            TOKEN_USED_PHRASE in message -> RainApiAuthFailure.Kind.TokenUsed
             else -> RainApiAuthFailure.Kind.Refused
         }
         private val UUID_PATTERN = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
@@ -382,12 +411,10 @@ internal class RainApiAuthClient(
 }
 
 /**
- * [raw] as the Rain API base URL a managed configuration carries: trimmed, parsed by the client's own
- * parser, https, and nothing but a host and a port (a path other than `/`, a query, a fragment or
- * userinfo is refused, because the client appends its routes to whatever it is given), or
- * [RainError.InvalidConfig] (`RAIN_102`) naming the rule. Validated at construction so a typo fails
- * there and not as a network error on the first login. The loopback exemption the client itself
- * keeps for its mock-server tests does not apply here: a configuration names a real host.
+ * [raw] as the Rain API base URL a managed configuration carries: trimmed, parsed by the client's
+ * own parser, https, and nothing but a host and a port (the client appends its routes to it), or
+ * [RainError.InvalidConfig] (`RAIN_102`) naming the rule. The loopback exemption the client keeps
+ * for its mock-server tests does not apply here: a configuration names a real host.
  */
 internal fun rainApiBaseUrlOrThrow(raw: String): HttpUrl {
     val trimmed = raw.trim()
@@ -404,7 +431,6 @@ internal fun rainApiBaseUrlOrThrow(raw: String): HttpUrl {
     return checkNotNull(url)
 }
 
-/** A path of `/`, no query, no fragment and no userinfo: the client appends its routes to the URL as given. */
 private fun HttpUrl.namesHostOnly(): Boolean {
     val bare = encodedPath == "/" && query == null && fragment == null
     return bare && username.isEmpty() && password.isEmpty()
@@ -414,7 +440,7 @@ private fun HttpUrl.namesHostOnly(): Boolean {
  * The host of [rainApiBaseUrl] as [rainApiBaseUrlOrThrow] parses it, lowercased with a trailing dot
  * stripped: the one spelling a deployment check compares, so no second parser can read
  * `https://api%2Erain.xyz` or `https://api.rain.xyz.` differently from the one the configuration
- * is validated with. Internal API for the Rain wallet; throws as [rainApiBaseUrlOrThrow] does.
+ * is validated with. Throws as [rainApiBaseUrlOrThrow] does.
  */
 @InternalRainTurnkeyApi
 fun rainApiBaseUrlHost(rainApiBaseUrl: String): String =
@@ -435,3 +461,10 @@ private fun HttpUrl.isLoopback(): Boolean = host == "localhost" || host == "127.
  */
 private fun JSONObject.requiredString(key: String): String =
     opt(key) as? String ?: throw JSONException("$key is missing")
+
+/** An optional string field: a missing field or a JSON null is null, a string is itself, anything else is unreadable. */
+private fun JSONObject.optionalString(key: String): String? = when (val value = opt(key)) {
+    null, JSONObject.NULL -> null
+    is String -> value
+    else -> throw JSONException("$key is not a string")
+}

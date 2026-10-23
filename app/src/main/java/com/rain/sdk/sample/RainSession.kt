@@ -163,11 +163,10 @@ class RainSession {
     fun requireRainApi(): RainApiClient = rainApi ?: error(RAIN_API_CREDENTIALS_REQUIRED)
 
     /**
-     * What the Rain wallet runs its authentication under: a wallet auth token minted through the
-     * demo's Rain API client for the contact the SDK names, or for none on a passkey sign-up. A host
-     * mints on its backend; the demo mints from the device with the typed Api-Key, so the Rain
-     * Wallet card needs the sandbox Api-Key and user ID on Home first. Without them the SDK reports
-     * the provider's failure as `RainError.InvalidConfig` naming `IllegalStateException`.
+     * The demo's `RainWalletConfig.authTokenProvider`: a wallet auth token minted through
+     * [requireRainApi] for the contact the SDK names. Without the Api-Key and user ID from Home
+     * the mint throws, and the SDK reports it as `RainError.InvalidConfig` naming
+     * `IllegalStateException`.
      */
     fun walletAuthTokenProvider(): suspend (RainWalletContact?) -> String = { contact ->
         requireRainApi().mintWalletAuthToken(contact).token
@@ -298,12 +297,9 @@ class RainSession {
 
     /**
      * Creates the Rain wallet provider. The SDK owns the wallet backend's configuration, the
-     * one-time-code flow, email or SMS, and the passkey flows from here on; the demo supplies the
-     * wallet auth token through [walletAuthTokenProvider] and the environment this build points at
-     * through [SampleEnvironment.rainWallet], which the SDK refuses while it is production. The
-     * previous provider is retired first, whether or not
-     * it was built into an SDK: two providers must never share the process-wide wallet backend.
-     * Session expiry is reported through [expiredProvider].
+     * one-time-code flow, email or SMS, and the passkey flows from here on. The previous provider
+     * is retired first, whether or not it was built into an SDK: two providers must never share
+     * the process-wide wallet backend. Session expiry is reported through [expiredProvider].
      */
     fun prepareRainWallet(application: Application): RainProvider {
         val previous = rainWalletProvider

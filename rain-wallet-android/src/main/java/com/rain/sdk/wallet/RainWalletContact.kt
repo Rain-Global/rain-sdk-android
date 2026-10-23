@@ -10,9 +10,9 @@ import com.rain.sdk.turnkey.LoginContact
  * channel is a new account. [RainProvider.sendLoginCode] and [RainProvider.sendContactVerificationCode]
  * canonicalize the value once (trim and lowercase for an email, since the backend matches it
  * case-sensitively; trim, separator removal and an E.164 check for a phone number), and that
- * canonical string names the account: the instance [RainWalletConfig.authTokenProvider] receives
- * is rebuilt from it, so it is not `equals` to the one the host passed. `toString()` hides the
- * value, which is personal data.
+ * canonical string names the account; [RainWalletConfig.authTokenProvider] receives a contact
+ * built from it, not the instance the host passed. `toString()` hides the value, which is personal
+ * data.
  */
 sealed interface RainWalletContact {
     /**
@@ -61,7 +61,7 @@ internal fun RainWalletContact.toBacking(): LoginContact = when (this) {
     is RainWalletContact.Phone -> LoginContact.Phone(value)
 }
 
-/** The backing's contact in the wallet's own terms, for the host's token supplier; the value as the backing holds it. */
+/** The backing's contact in the wallet's own terms, for [RainWalletConfig.authTokenProvider]. */
 @JvmSynthetic
 internal fun LoginContact.toRainWallet(): RainWalletContact = when (this) {
     is LoginContact.Email -> RainWalletContact.Email(value)

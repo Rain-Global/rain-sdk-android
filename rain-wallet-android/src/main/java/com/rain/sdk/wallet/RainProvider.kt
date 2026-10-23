@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *     RainWalletConfig(
  *         // Your backend mints it with your Api-Key: POST /v1/issuing/embedded-wallets/auth-tokens
  *         authTokenProvider = { contact -> myBackend.mintWalletAuthToken(contact) },
- *         // Production is the default and is refused until Rain turns it on
+ *         // The default, Production, is refused
  *         environment = RainWalletEnvironment.Sandbox,
  *     ),
  * )
@@ -46,10 +46,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Send a one-time login code to the user's email or phone, confirm it (a first login signs the
  * user up and creates one wallet holding an Ethereum and a Solana account on a single seed; a
  * returning login finds the account), then register the provider and resolve
- * `rain.provider(ProviderId.RAIN)`. Every call to Rain's endpoints (the code request, the confirm
- * and the passkey sign-up) runs under a wallet auth token your backend mints with its Api-Key and
- * hands the app through [RainWalletConfig.authTokenProvider]; what leaves the device is
- * listed in the module README. Resolving before a session is live fails with
+ * `rain.provider(ProviderId.RAIN)`. The code request, the confirm and the passkey sign-up run under
+ * a wallet auth token your backend mints and hands the app through
+ * [RainWalletConfig.authTokenProvider]; what leaves the device is listed in the module README.
+ * Resolving before a session is live fails with
  * `RainError.TokenExpired` (`RAIN_201`). With [RainWalletConfig.passkeyDomain] set, a passkey is
  * the other first login: [signUpWithPasskey] creates the account, [loginWithPasskey] returns to
  * it, [addPasskey] gives a code-created account a passkey too, and [sendContactVerificationCode]
@@ -77,15 +77,14 @@ class RainProvider internal constructor(
      * Creates the Rain wallet provider for this app.
      *
      * @param application The host application; the wallet backend needs it for secure storage.
-     * @param config The token supplier, the environment and behaviour the host may tune; the
-     *   defaults are the product, and the default environment, [RainWalletEnvironment.Production],
-     *   is refused this release, so pass [RainWalletEnvironment.Sandbox].
+     * @param config The token supplier, the environment and behaviour the host may tune. Pass
+     *   [RainWalletEnvironment.Sandbox] as the environment, because the default,
+     *   [RainWalletEnvironment.Production], is refused.
      * @throws RainError.InvalidConfig (`RAIN_102`) when [RainWalletConfig.passkeyDomain] is not a
      *   registrable domain of at least two labels made of letters, digits and hyphens (a scheme,
      *   port, path or a single label such as `localhost` is refused), when a
      *   [RainWalletEnvironment.Custom] URL is not absolute https naming a host and nothing more, or
-     *   is on production's host, or when the environment is [RainWalletEnvironment.Production],
-     *   which this release refuses.
+     *   is on production's host, or when the environment is [RainWalletEnvironment.Production].
      */
     constructor(application: Application, config: RainWalletConfig) : this(
         TurnkeyProvider(config.toBacking(application))
@@ -205,20 +204,19 @@ class RainProvider internal constructor(
     }
 
     /**
-     * Sends a one-time login code to [contact], by email or by SMS: asks
-     * [RainWalletConfig.authTokenProvider] for a wallet auth token bound to the canonical contact,
-     * then has Rain deliver the code; touches no existing session. Calling it again for the same
-     * contact issues a new code and replaces the pending one, which is how a code is resent (a code
-     * lives 5 minutes, and Rain limits code requests). Calling it for another contact or channel
-     * retires the pending code first, so a failed switch leaves nothing confirmable. The contact is
-     * canonicalized once, an email trimmed and lowercased (see [RainWalletContact]), and that string
-     * names the account. The `sendLoginCode` row under *Rain wallet provider* in `docs/METHODS.md`
-     * says which condition maps to which code.
+     * Sends a one-time login code to [contact], by email or by SMS, under a wallet auth token from
+     * [RainWalletConfig.authTokenProvider] bound to the canonical contact; touches no existing
+     * session. Calling it again for the same contact issues a new code and replaces the pending
+     * one, which is how a code is resent (a code lives 5 minutes, and Rain limits code requests).
+     * Calling it for another contact or channel retires the pending code first, so a failed
+     * switch leaves nothing confirmable. The contact is canonicalized first (see
+     * [RainWalletContact]) and that string names the account. The `sendLoginCode` row under
+     * *Rain wallet provider* in `docs/METHODS.md` says which condition maps to which code.
      *
      * @throws RainError.InvalidConfig (`RAIN_102`) on a bad contact, a failed token provider, a
      *   configuration conflict or a closed provider.
-     * @throws RainError.Unauthorized (`RAIN_202`) when Rain refuses the token (after one fresh one)
-     *   or the tenant.
+     * @throws RainError.Unauthorized (`RAIN_202`) when Rain refuses the token (after one fresh
+     *   token) or the tenant.
      * @throws RainError.NetworkError (`RAIN_301`) when Rain, or your backend behind the token
      *   provider, cannot be reached.
      * @throws RainError.ProviderError (`RAIN_501`) when Rain refuses the code request.

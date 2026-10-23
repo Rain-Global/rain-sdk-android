@@ -25,9 +25,7 @@ import com.rain.sdk.sample.ui.theme.RainTheme
 /** The notices above the contact fields: a backend another tab configured, or a missing Api-Key. */
 @Composable
 private fun RainWalletNotices(state: HomeUiState) {
-    // The Turnkey tab configured the shared backend this launch: a login here fails until a relaunch.
     state.sharedBackendNotice?.let { RainMuted(it) }
-    // The code login mints its wallet auth token with the Api-Key on Home; without it the token minting fails.
     state.rainWalletAuthNotice?.let { RainMuted(it) }
 }
 

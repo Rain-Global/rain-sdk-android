@@ -19,7 +19,7 @@ internal class MockRainApiAuth : RainApiAuthClientProtocol {
         val subOrganizationId: String?,
     )
 
-    data class SignupPasskeyCall(val token: String, val challenge: String, val attestation: RainApiPasskeyAttestation)
+    data class SignupPasskeyCall(val token: String, val challenge: String, val attestation: RainApiPasskeyAttestation, val publicKey: String)
 
     val initOtpCalls = mutableListOf<String>()
     val verifyOtpCalls = mutableListOf<VerifyOtpCall>()
@@ -62,8 +62,13 @@ internal class MockRainApiAuth : RainApiAuthClientProtocol {
         return login.invoke(call)
     }
 
-    override suspend fun signupPasskey(token: String, challenge: String, attestation: RainApiPasskeyAttestation): RainApiSignup {
-        val call = SignupPasskeyCall(token, challenge, attestation)
+    override suspend fun signupPasskey(
+        token: String,
+        challenge: String,
+        attestation: RainApiPasskeyAttestation,
+        publicKey: String,
+    ): RainApiSignup {
+        val call = SignupPasskeyCall(token, challenge, attestation, publicKey)
         signupPasskeyCalls += call
         return signupPasskey.invoke(call)
     }
@@ -79,7 +84,7 @@ internal class MockRainApiAuth : RainApiAuthClientProtocol {
             verifyOtpCalls.flatMap { listOf(it.token, it.otpId, it.encryptedOtpBundle) } +
             signupCalls.flatMap { listOf(it.token, it.verificationToken) + it.clientSignature.strings() } +
             loginCalls.flatMap { listOf(it.token, it.verificationToken, it.subOrganizationId.orEmpty()) + it.clientSignature.strings() } +
-            signupPasskeyCalls.flatMap { listOf(it.token, it.challenge) + it.attestation.strings() }
+            signupPasskeyCalls.flatMap { listOf(it.token, it.challenge, it.publicKey) + it.attestation.strings() }
 
     private fun RainApiClientSignature.strings() = listOf(publicKey, message, signature)
 

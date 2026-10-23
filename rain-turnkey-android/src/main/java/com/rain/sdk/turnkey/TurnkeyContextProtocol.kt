@@ -127,9 +127,7 @@ internal enum class OtpChannel { EMAIL, SMS }
 /**
  * An in-flight one-time code: the id and the enclave-signed encryption bundle `POST /otp/init`
  * answered with, plus the channel the code was issued on, which the sign-up names the account's
- * contact by. The wallet auth token the code was requested under travels beside it in the
- * controller's pending record, because Rain can refuse that token and a fresh one then replaces it.
- * Module-owned so test doubles never construct the client's answer type.
+ * contact by. Module-owned so test doubles never construct the client's answer type.
  */
 internal data class OtpChallenge(val otpId: String, val encryptionTargetBundle: String, val channel: OtpChannel)
 
@@ -179,12 +177,10 @@ internal interface TurnkeyContextProtocol {
     suspend fun sendOtp(contact: String, channel: OtpChannel): OtpChallenge
 
     /**
-     * A fresh P-256 key pair in the vendor's keystore, as its compressed public key. The managed
-     * login creates one per attempt: the typed code is encrypted to Rain with it, the verification
-     * token Rain answers with is bound to it, and the session `POST /login` issues stamps with it,
-     * so on success it is the session's key pair, and on a failure exit the controller deletes it
-     * through [deleteDeviceKey] unless the vendor had already selected the session. The vendor's
-     * `createKeyPair`.
+     * A fresh P-256 key pair in the vendor's keystore, as its compressed public key; the vendor's
+     * `createKeyPair`. The managed login creates one per attempt: the typed code is encrypted to
+     * Rain with it, the verification token Rain answers with is bound to it, and the session
+     * `POST /login` issues stamps with it.
      */
     suspend fun createDeviceKey(): String
 
@@ -193,17 +189,15 @@ internal interface TurnkeyContextProtocol {
 
     /**
      * The typed [code] encrypted to the enclave bundle a code request answered with, carrying the
-     * device key [publicKey] inside the ciphertext: the body `POST /otp/verify` takes, and the key
-     * the verification token it answers with is bound to. The vendor's `encryptOtpCodeToBundle`,
-     * which checks the bundle's enclave signature first.
+     * device key [publicKey] inside the ciphertext: the body `POST /otp/verify` takes. The vendor's
+     * `encryptOtpCodeToBundle`, which checks the bundle's enclave signature first.
      */
     suspend fun encryptOtpCode(code: String, encryptionTargetBundle: String, publicKey: String): String
 
     /**
      * The client signature `POST /login` takes: the vendor's login message for [verificationToken],
      * signed raw with the device key the token is bound to. The vendor's `ClientSignature.forLogin`
-     * and `Stamper.fromPublicKey(...).sign(format = raw)`, the same steps its own OTP login runs
-     * before the proxy call this module no longer makes.
+     * and `Stamper.fromPublicKey(...).sign(format = raw)`.
      */
     suspend fun clientSignatureForLogin(verificationToken: String): RainApiClientSignature
 
@@ -249,12 +243,12 @@ internal interface TurnkeyContextProtocol {
      * Signs a user in with a passkey bound to the relying-party domain of the one-shot
      * configuration, through the system passkey sheet presented from [activity], and stores the
      * session under [sessionKey]. [organizationId] is the organization the login is stamped on:
-     * null for the configured parent organization, which resolves the passkey's sub-organization
-     * itself, or the sub-organization id `POST /signup/passkey` just answered with, so the login
-     * lands on the account the sign-up created. Revokes the user's other sessions server-side. The
-     * vendor selects the new session itself only when none is selected; over a live session the
-     * caller switches. On return, success or failure, the vendor deletes every stored device key no
-     * session references. Suspends for the whole ceremony.
+     * null for the configured parent organization, or the sub-organization id
+     * `POST /signup/passkey` just answered with, so the login lands on the account the sign-up
+     * created. Revokes the user's other sessions server-side. The vendor selects the new session
+     * itself only when none is selected; over a live session the caller switches. On return,
+     * success or failure, the vendor deletes every stored device key no session references.
+     * Suspends for the whole ceremony.
      */
     suspend fun completePasskeyLogin(activity: Activity, sessionKey: String, organizationId: String?)
 
@@ -430,10 +424,9 @@ internal class TurnkeyContextAdapter(
     }
 
     /**
-     * The vendor's own steps between its sign-up or login message and its proxy call (sdk-kotlin
-     * 2.1.0 `TurnkeyContext.loginWithOtp`): the message's public key is the device key the
-     * verification token is bound to, and the signature is that key's raw P-256 signature over the
-     * message. The scheme is pinned in [RainApiClientSignature].
+     * The vendor's own signing steps (sdk-kotlin 2.1.0 `TurnkeyContext.loginWithOtp`): the message's
+     * public key is the device key the verification token is bound to, and the signature is that
+     * key's raw P-256 signature over the message. The scheme is pinned in [RainApiClientSignature].
      */
     private fun ClientSignaturePayload.signed(): RainApiClientSignature {
         val signature = Stamper.fromPublicKey(clientSignaturePublicKey).sign(payload = message, format = SignatureFormat.raw)
@@ -496,9 +489,8 @@ internal class TurnkeyContextAdapter(
                 // `TurnkeyContext.loginWithPasskey`); a sub-organization id lands it there directly.
                 organizationId = organizationId,
                 // Revokes this user's other Turnkey sessions server-side on a successful login; a
-                // refused passkey never reaches this point. The code login no longer does this, since
-                // Rain's login endpoint issues the session and revokes nothing. The relying party
-                // comes from the one-shot configuration's authConfig.
+                // refused passkey never reaches this point. The relying party comes from the
+                // one-shot configuration's authConfig.
                 invalidateExisting = true,
             )
         }
