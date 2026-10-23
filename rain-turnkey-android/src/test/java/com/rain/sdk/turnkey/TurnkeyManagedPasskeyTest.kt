@@ -63,14 +63,6 @@ class TurnkeyManagedPasskeyTest {
         nowEpochSeconds = nowEpochSeconds,
     )
 
-    /** The attestation the stubbed ceremony produces, in the shape Rain's sign-up takes. */
-    private val stubbedAttestation = RainApiPasskeyAttestation(
-        credentialId = "stub-credential",
-        clientDataJson = "stub-client-data",
-        attestationObject = "stub-attestation",
-        transports = listOf("AUTHENTICATOR_TRANSPORT_INTERNAL"),
-    )
-
     // ---------- sign-in ----------
 
     @Test
