@@ -1100,8 +1100,8 @@ class HomeViewModel(
      * account by code; the contact goes into its owner slot, so a code login for it reuses the live
      * session. A rejected code keeps the challenge; a refused update leaves the slot as it was; any
      * other failure restarts from "Send verification code", which replaces a challenge the SDK
-     * kept. The SDK does not check whether another account signs in with the contact (a known
-     * issue in the CHANGELOG), so attach only a contact of this user's own.
+     * kept. A contact another account signs in with is refused (`RAIN_202`) and the status shows
+     * the reason.
      */
     fun confirmRainWalletAttach() {
         val s = _state.value
@@ -1128,8 +1128,8 @@ class HomeViewModel(
                     it.copy(rainWalletAttachCode = "", statusText = "That code was not accepted; check it and try again")
                 }
             } catch (e: RainError.Unauthorized) {
-                // Rain refused the token or the tenant, or the backend refused the update. The code
-                // is spent either way, and the slot is untouched.
+                // Rain refused the token or the tenant, the contact signs in to another account, or
+                // the backend refused the update. The code is spent either way, and the slot is untouched.
                 SampleLog.w("RainWallet.attach", "attach refused ${e.describe()}")
                 _state.update {
                     it.copy(

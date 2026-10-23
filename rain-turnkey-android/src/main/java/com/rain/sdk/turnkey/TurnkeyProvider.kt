@@ -592,8 +592,8 @@ class TurnkeyProvider internal constructor(
      * deliver the code. The contact is canonicalized like a login contact (see [LoginContact]) and
      * that string is what the account stores; calling it again for the same contact replaces the
      * pending code, a call for another contact or channel retires it before anything is sent, and a
-     * login or a [logout] drops it. Accounts are never merged, and nothing checks whether another
-     * account signs in with the contact; see [confirmContactVerification]. Throws
+     * login or a [logout] drops it. Accounts are never merged; a contact another account signs in
+     * with is refused on confirm, see [confirmContactVerification]. Throws
      * `RainError.InvalidConfig` for a blank or malformed contact or a failed token provider,
      * `RainError.Unauthorized` when Rain refuses the token or the tenant, `RainError.NetworkError`
      * when Rain cannot be reached, `RainError.ProviderError` when the code request is refused, and
@@ -607,8 +607,8 @@ class TurnkeyProvider internal constructor(
     /**
      * Confirms the code from [sendContactVerificationCode] and attaches the verified contact. The
      * session is checked before the code is spent. Once the code is accepted, the account's email or
-     * phone is set to the contact under the live session; nothing checks whether another wallet in
-     * the tenant signs in with it (a known issue in the CHANGELOG). A rejected code keeps the
+     * phone is set to the contact under the live session; a contact another wallet in the tenant
+     * signs in with is refused with `RainError.Unauthorized` first, the code spent. A rejected code keeps the
      * challenge, so the user can retype it; a failure after the code was accepted drops it, so the
      * user requests a new code. Fails with `RainError.InvalidConfig`, `RainError.TokenExpired`,
      * `RainError.InvalidLoginCode`, `RainError.Unauthorized`, `RainError.NetworkError`,

@@ -330,7 +330,7 @@ constructor(
             val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
             val deviceKey = guarded { context.createDeviceKey() }
             val login = onFailure({ deleteDeviceKey(deviceKey) }) {
-                val verificationToken = verifyCode(pending, trimmed, deviceKey, ::clearPendingOtp)
+                val verificationToken = verifyCode(pending, trimmed, deviceKey, ::clearPendingOtp).verificationToken
                 loginOrSignUp(pending, verificationToken)
             }
             storeSession(login.sessionToken, sessionKey, deviceKey)
@@ -444,8 +444,8 @@ constructor(
      * and that string is what the account stores. The pending code follows the login send's rule:
      * a second call for the same contact replaces it on success and keeps it on failure, and a call
      * for another contact or channel retires it before anything is sent, so a failed switch leaves
-     * nothing confirmable. Accounts are never merged, and nothing checks whether another account in
-     * this tenant signs in with the contact; see [confirmContactVerification].
+     * nothing confirmable. Accounts are never merged; a contact another account in this tenant signs
+     * in with is refused on confirm, see [confirmContactVerification].
      */
     suspend fun sendContactVerificationCode(contact: LoginContact) {
         flowMutex.withLock {
@@ -468,27 +468,28 @@ constructor(
      * the challenge, as [confirmLoginCode] does, and so does any other failure of the verify step.
      * Once the verify answered the code is spent, so the challenge is dropped whether or not what
      * follows succeeds: the account's email or phone is set through the vendor's update-user
-     * activity under the live session with the verification token. Nothing asks Rain whether
-     * another wallet in the tenant signs in with the contact, because the one lookup Rain has is
-     * its login, which issues a session on that wallet; until a lookup that issues no session
-     * exists, an attach of such a contact succeeds and rain-api's `findSavedSubOrg` then fails
-     * every code login for the contact the two saved wallets share (a known issue in the
-     * CHANGELOG). A failed update surfaces as its own error with the code spent, and the user
-     * requests a new code.
+     * activity under the live session with the verification token. Rain's verify names the wallet
+     * this tenant saved for the contact, when one exists: another wallet's contact is refused with
+     * [RainError.Unauthorized] before anything changes, the code spent; a contact two saved wallets
+     * already share fails the verify itself with a 5xx. A failed update surfaces as its own error
+     * with the code spent, and the user requests a new code.
      */
     suspend fun confirmContactVerification(code: String) {
         flowMutex.withLock {
             prepare()
             val pending = requirePendingContactOtp()
             val trimmed = requireCode(code)
-            requireLiveSession()
+            val signedIn = requireLiveSession()
             val throwaway = guarded { context.createDeviceKey() }
-            val verificationToken = try {
+            val verification = try {
                 verifyCode(pending, trimmed, throwaway, ::clearPendingContactOtp)
             } finally {
                 // Nothing else removes the throwaway key; the token stays usable without it.
                 withContext(NonCancellable) { deleteDeviceKey(throwaway) }
             }
+            val owner = verification.walletSubOrganizationId
+            if (owner != null && owner != signedIn.organizationId) throw RainError.Unauthorized(CONTACT_OWNED_MESSAGE)
+            val verificationToken = verification.verificationToken
             // The coordinator is its own mapping boundary: it rethrows cancellation and maps the rest.
             coordinator.executeWrite { live, _ ->
                 when (pending.challenge.channel) {
@@ -536,9 +537,15 @@ constructor(
      * The verify step: the code encrypted to the challenge's bundle with [deviceKey], then
      * `POST /otp/verify` under the pending token. [clearPending] runs once Rain accepted the code,
      * whether or not the answer decoded, since the code is spent then; a rejected code and any
-     * failure before that keep the challenge.
+     * failure before that keep the challenge. Answers the verification token with the wallet this
+     * tenant saved for the contact, when one exists.
      */
-    private suspend fun verifyCode(pending: PendingOtp, code: String, deviceKey: String, clearPending: () -> Unit): String {
+    private suspend fun verifyCode(
+        pending: PendingOtp,
+        code: String,
+        deviceKey: String,
+        clearPending: () -> Unit,
+    ): RainApiVerification {
         val encrypted = guarded { context.encryptOtpCode(code, pending.challenge.encryptionTargetBundle, deviceKey) }
         val verification = try {
             rainLeg(pending.token) { rainApi.verifyOtp(it, pending.challenge.otpId, encrypted) }
@@ -548,7 +555,7 @@ constructor(
             throw e
         }
         clearPending()
-        return verification.verificationToken
+        return verification
     }
 
     /**
@@ -1143,6 +1150,9 @@ constructor(
 
         const val SESSION_MIN_REMAINING_SECONDS = 30.0
         const val SESSION_KEY_PREFIX = "rain-turnkey-"
+
+        /** The refusal for a contact another wallet signs in with; names no contact. */
+        const val CONTACT_OWNED_MESSAGE = "This contact already signs in to another account"
 
         /** `HttpURLConnection` names no 429. */
         private const val HTTP_TOO_MANY_REQUESTS = 429

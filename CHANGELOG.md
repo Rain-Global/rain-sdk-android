@@ -130,6 +130,14 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   cancels the HTTP call; before, the call ran to its answer or its 10-second timeout first. An RPC
   that answers with an `error` that is not an object fails as `RainError.InternalError` instead of
   a JSON exception.
+- `confirmContactVerification` on the Rain wallet refuses a contact that already signs in to
+  another wallet of the tenant. Rain's verify now names the wallet it saved for the contact; when
+  that is another wallet, the call throws `RAIN_202` (`Unauthorized`) with the code spent and
+  nothing changed. A contact no wallet signs in with, or this wallet's own, attaches as before, and
+  a contact two saved wallets already share fails the verify with a 5xx (`RAIN_501`). In
+  `5.0.0-beta.1` such an attach went through and the contact kept opening the other account. The
+  attach still replaces an existing contact of the same kind instead of adding a second one; see
+  Known issues under `5.0.0-beta.1`.
 
 ### Changed
 
@@ -192,15 +200,6 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   Solana, since nothing was broadcast. 5.0.0-beta.1 listed them as rows with the activity id as the
   hash.
 
-### Known issues
-
-- Attaching a contact another wallet in the tenant signs in with is not refused:
-  `confirmContactVerification` sets the contact on the signed-in account, and rain-api then fails
-  every code login for a contact two saved wallets share, so both wallets lose code login (a passkey
-  or the recovery phrase still opens each) until Rain ships a lookup that issues no session. The one
-  lookup Rain has today is its login, which would mint a session on the other wallet. Attach only a
-  contact of the user's own. The `5.0.0-beta.1` attach had the same gap, see Known issues there.
-
 ## [5.0.0-beta.1] - 2026-09-30
 
 First public beta, published to Maven Central under `xyz.rain`. Pin the exact version during the
@@ -255,8 +254,9 @@ Rain plans to fix each of these in a later beta.
   adding a second one. The old contact then no longer logs in to the account. The attach also
   succeeds for an email address that already logs in to another account. That address keeps
   opening the other account, which leaves the signed-in account with no working email login.
-  Neither part is fixed in the next release; its Known issues entry above has the lockout that
-  follows. Tell users that an attach replaces their current contact.
+  The replacement is not fixed in the next release; the attach of a contact another account
+  signs in with is refused there, see Fixed under Unreleased. Tell users that an attach replaces
+  their current contact.
 - A session revoked by a login on another device keeps reading as active on the first device:
   `hasActiveSession()`, `currentAuthState()` and `currentSessionState()` report the stored
   session's local expiry until it passes, up to the session's whole lifetime, while every wallet

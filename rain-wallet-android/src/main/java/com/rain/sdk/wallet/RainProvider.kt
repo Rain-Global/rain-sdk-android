@@ -386,8 +386,8 @@ class RainProvider internal constructor(
      * that contact becomes a login method for this account; distinct from [sendLoginCode], which
      * starts a login. Requires a live session. Asks [RainWalletConfig.authTokenProvider] for a token
      * bound to the canonical contact (see [RainWalletContact]), then has Rain deliver the code; that
-     * canonical string is what the account stores. Accounts are never merged, and nothing checks
-     * whether another account signs in with the contact; see [confirmContactVerification]. Calling
+     * canonical string is what the account stores. Accounts are never merged; a contact another
+     * account signs in with is refused on confirm, see [confirmContactVerification]. Calling
      * it again for the same contact replaces the pending code; a call for another contact or channel retires it
      * before anything is sent, so a failed switch leaves nothing confirmable; a login or a [logout]
      * drops it. The SDK adds no user-presence check before the attach beyond the live session,
@@ -413,9 +413,9 @@ class RainProvider internal constructor(
      * Confirms the code from [sendContactVerificationCode] and attaches the verified contact to the
      * signed-in account. Requires a live session, checked before the code is spent. Once the code
      * is accepted, the update sets the account's email or phone to the contact, replacing the one
-     * of the same kind it had, if any. Nothing checks whether another account in this tenant signs
-     * in with the contact: an attach of such a contact succeeds and both accounts then lose code
-     * login, a known issue; see the CHANGELOG. A rejected code keeps the challenge, so the user can
+     * of the same kind it had, if any. A contact another account in this tenant signs in with is
+     * refused with [RainError.Unauthorized] once the code is accepted, nothing changed and the code
+     * spent. A rejected code keeps the challenge, so the user can
      * retype it; a failure after the code was accepted drops it, so request a new code. Fails with
      * the classes below; the `confirmContactVerification` row under *Rain wallet provider* in
      * `docs/METHODS.md` says which condition maps to which.
@@ -424,8 +424,8 @@ class RainProvider internal constructor(
      *   code, a failed token provider, a configuration conflict, a closed provider.
      * @throws RainError.TokenExpired (`RAIN_201`) without a live session.
      * @throws RainError.InvalidLoginCode (`RAIN_203`) when the code is rejected.
-     * @throws RainError.Unauthorized (`RAIN_202`) when Rain refuses the token or the tenant, or the
-     *   backend refuses the update.
+     * @throws RainError.Unauthorized (`RAIN_202`) when Rain refuses the token or the tenant, when the
+     *   contact signs in to another account, or when the backend refuses the update.
      * @throws RainError.NetworkError (`RAIN_301`) when Rain cannot be reached.
      * @throws RainError.ProviderError (`RAIN_501`) when Rain or the backend failed.
      * @throws RainError.InternalError (`RAIN_502`) when the backend's initialization failed for

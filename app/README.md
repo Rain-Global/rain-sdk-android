@@ -98,9 +98,9 @@ methods:
   (`passkeys.uptop.xyz`) to vouch for this build's signing key, see *Demo keystore* under Notes.
   Signed in, *Add a passkey to this account* registers a passkey for a code-created account, and
   the *Add a login contact* step sends a verification code to an email or phone and attaches it on
-  *Verify and attach*, after which that contact signs in to this account by code; the SDK does not
-  check whether another account signs in with the contact (a known issue in the CHANGELOG), so
-  attach only a contact of the signed-in user's own. A closed passkey sheet shows `RAIN_401`; after
+  *Verify and attach*, after which that contact signs in to this account by code; a contact another
+  account signs in with is refused (`RAIN_202`) and the card shows the reason. A closed passkey
+  sheet shows `RAIN_401`; after
   *Create wallet with passkey* the status adds that if Rain answered the sign-up, the account exists
   and *Sign in with passkey* reaches it, because the closed sheet may have been the fallback sheet
   that opens after Rain created the account. A sign-up that failed with any code but `RAIN_102`,

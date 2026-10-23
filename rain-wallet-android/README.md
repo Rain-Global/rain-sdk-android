@@ -103,8 +103,8 @@ without opening the sheet, so Rain records that account instead of a second one;
 `signUpWithPasskey` row of [docs/METHODS.md](../docs/METHODS.md#rain-wallet-provider) has the rest.
 A passkey-only account is meant to get an email or phone as a second login through
 `sendContactVerificationCode(contact)` and `confirmContactVerification(code)`, which attach the
-verified contact to this account and never move wallets (what an attach replaces today, and the
-contact it cannot yet refuse, are in the `confirmContactVerification` row of
+verified contact to this account and never move wallets (what an attach refuses and what it replaces
+today are in the `confirmContactVerification` row of
 [docs/METHODS.md](../docs/METHODS.md#rain-wallet-provider) and the CHANGELOG's known issues);
 `exportRecoveryPhrase()` is its backup path either way.
 
