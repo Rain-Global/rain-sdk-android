@@ -139,10 +139,10 @@ Notable changes to the Rain Android SDK, newest first. The format follows
     `suspend (RainWalletContact?) -> String` the SDK calls with the canonical contact of a code
     request or attach, or with null for a passkey sign-up; it returns the `token` your backend minted
     with its Api-Key through `POST /v1/issuing/embedded-wallets/auth-tokens`. `environment` is a
-    `RainWalletEnvironment`: `Production` by default, which the `RainProvider` constructor refuses
-    with `RAIN_102` until the release that turns it on, so pass `Sandbox`; or `Custom(apiBaseUrl)`,
-    any https host that forwards to Rain's sandbox, such as your own proxy. `RainProvider(application)`
-    with no config no longer compiles. In the managed `TurnkeyConfig` (internal API),
+    `RainWalletEnvironment`: `Production` (`api.rain.xyz`, the default) or `Sandbox`
+    (`api-dev.rain.xyz`). Each environment also fixes the wallet organization the accounts live
+    under, and production's is its own, separate from the organization 5.0.0-beta.1 embedded.
+    `RainProvider(application)` with no config no longer compiles. In the managed `TurnkeyConfig` (internal API),
     `authProxyConfigId` becomes `rainApiBaseUrl` plus `authTokenProvider`, and the
     `managedAuthProxyConfigId` accessor becomes `managedRainApiBaseUrl` and `managedAuthTokenProvider`.
   - The token is the bearer of every call to Rain's endpoints: the code request, the confirm, the
@@ -172,8 +172,8 @@ Notable changes to the Rain Android SDK, newest first. The format follows
     become its code login. Before upgrading, have such users sign in on the 5.0.0-beta.1 build and
     export the recovery phrase or move their funds out.
   - Migration: mint the token on your backend with an Api-Key that holds `embeddedWallets:write`,
-    pass `RainWalletConfig(authTokenProvider = ..., environment = RainWalletEnvironment.Sandbox)` to
-    `RainProvider`, and handle `RAIN_202` and `RAIN_301` on your login screen; see
+    pass `RainWalletConfig(authTokenProvider = ...)` to `RainProvider` (add
+    `environment = RainWalletEnvironment.Sandbox` for a sandbox build), and handle `RAIN_202` and `RAIN_301` on your login screen; see
     [rain-wallet-android/README.md](rain-wallet-android/README.md).
 - **Breaking:** `sendLoginCode` and `sendContactVerificationCode` lowercase an email before it
   reaches Turnkey, which matches emails case-sensitively: `Jo@Example.com` and `jo@example.com`

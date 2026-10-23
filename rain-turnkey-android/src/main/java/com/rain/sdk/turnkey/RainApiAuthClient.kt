@@ -436,16 +436,6 @@ private fun HttpUrl.namesHostOnly(): Boolean {
     return bare && username.isEmpty() && password.isEmpty()
 }
 
-/**
- * The host of [rainApiBaseUrl] as [rainApiBaseUrlOrThrow] parses it, lowercased with a trailing dot
- * stripped: the one spelling a deployment check compares, so no second parser can read
- * `https://api%2Erain.xyz` or `https://api.rain.xyz.` differently from the one the configuration
- * is validated with. Throws as [rainApiBaseUrlOrThrow] does.
- */
-@InternalRainTurnkeyApi
-fun rainApiBaseUrlHost(rainApiBaseUrl: String): String =
-    rainApiBaseUrlOrThrow(rainApiBaseUrl).host.removeSuffix(".").lowercase()
-
 private fun notHttpsMessage(url: String): String =
     "rainApiBaseUrl must be https, the wallet auth token travels in a header; got '$url'"
 

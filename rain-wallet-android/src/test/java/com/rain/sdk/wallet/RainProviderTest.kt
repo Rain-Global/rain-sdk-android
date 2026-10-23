@@ -110,7 +110,7 @@ class RainProviderTest {
         // No address override exists on the Rain wallet, so the backing always resolves the
         // provisioned Ethereum account.
         assertThat(mapped.walletAddress).isNull()
-        assertThat(mapped.managedOrganizationId).isEqualTo(RainWalletBackend.ORGANIZATION_ID)
+        assertThat(mapped.managedOrganizationId).isEqualTo(RainWalletBackend.SANDBOX_ORGANIZATION_ID)
         assertThat(mapped.managedRainApiBaseUrl).isEqualTo(RainWalletBackend.SANDBOX_API_BASE_URL)
         assertThat(mapped.onSessionExpired).isSameInstanceAs(hook)
         assertThat(mapped.sponsorGas).isFalse()
@@ -338,7 +338,6 @@ class RainProviderTest {
     fun `the public constructor yields the Rain id and the backing capabilities`() {
         useRealBacking()
 
-        // The default environment, Production, is refused this release, so the sandbox is named.
         val sandbox = RainWalletEnvironment.Sandbox
         val application = mockk<Application>()
         val sponsored = RainProvider(application, RainWalletConfig(authTokenProvider = { "wat" }, environment = sandbox, sponsorGas = true))
