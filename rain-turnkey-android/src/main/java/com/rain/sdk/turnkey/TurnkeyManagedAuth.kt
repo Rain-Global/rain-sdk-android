@@ -330,7 +330,7 @@ constructor(
             val previousKey = context.selectedSessionKey
             val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
             val deviceKey = guarded { context.createDeviceKey() }
-            val login = withDeviceKeyOnFailure(deviceKey) {
+            val login = onFailure({ deleteDeviceKey(deviceKey) }) {
                 val verificationToken = verifyCode(pending, trimmed, deviceKey, ::clearPendingOtp)
                 loginOrSignUp(pending, verificationToken)
             }
@@ -661,19 +661,15 @@ constructor(
         }
     }
 
-    /**
-     * Runs [block] and deletes the device key [publicKey] on every failure exit, the caller's
-     * cancellation included, so a key no session will ever stamp with does not stay in the
-     * keystore. On success the key goes to [storeSession], whose rule governs it from there.
-     */
-    private suspend fun <T> withDeviceKeyOnFailure(publicKey: String, block: suspend () -> T): T {
+    /** Runs [block]; on a [RainError] or the caller's cancellation, runs [cleanup] first, then rethrows. */
+    private suspend fun <T> onFailure(cleanup: suspend () -> Unit, block: suspend () -> T): T {
         try {
             return block()
         } catch (e: CancellationException) {
-            withContext(NonCancellable) { deleteDeviceKey(publicKey) }
+            withContext(NonCancellable) { cleanup() }
             throw e
         } catch (e: RainError) {
-            deleteDeviceKey(publicKey)
+            cleanup()
             throw e
         }
     }
@@ -762,15 +758,7 @@ constructor(
      * cleared, so the failed login leaves neither behind.
      */
     private suspend fun storeSession(jwt: String, sessionKey: String, deviceKey: String) {
-        try {
-            guarded { context.storeSession(jwt, sessionKey) }
-        } catch (e: CancellationException) {
-            withContext(NonCancellable) { abandonStore(sessionKey, deviceKey) }
-            throw e
-        } catch (e: RainError) {
-            abandonStore(sessionKey, deviceKey)
-            throw e
-        }
+        onFailure({ abandonStore(sessionKey, deviceKey) }) { guarded { context.storeSession(jwt, sessionKey) } }
     }
 
     /**
@@ -793,15 +781,7 @@ constructor(
      * login leaves it.
      */
     private suspend fun ceremony(sessionKey: String, block: suspend () -> Unit) {
-        try {
-            guarded(block = block)
-        } catch (e: CancellationException) {
-            withContext(NonCancellable) { clearUnselected(sessionKey) }
-            throw e
-        } catch (e: RainError) {
-            clearUnselected(sessionKey)
-            throw e
-        }
+        onFailure({ clearUnselected(sessionKey) }) { guarded(block = block) }
     }
 
     /** Drops a pending challenge issued for another contact or channel; a same-contact resend keeps it. */
@@ -950,15 +930,7 @@ constructor(
      */
     private suspend fun switchToSession(sessionKey: String, previousKey: String?, previousRevoked: Boolean) {
         if (context.selectedSessionKey != sessionKey) {
-            try {
-                guarded { context.selectSession(sessionKey) }
-            } catch (e: CancellationException) {
-                withContext(NonCancellable) { abandonSwitch(sessionKey, previousKey, previousRevoked) }
-                throw e
-            } catch (e: RainError) {
-                abandonSwitch(sessionKey, previousKey, previousRevoked)
-                throw e
-            }
+            onFailure({ abandonSwitch(sessionKey, previousKey, previousRevoked) }) { guarded { context.selectSession(sessionKey) } }
         }
         // The account changed, and the verification slot named the one left behind. Cleared only
         // now: a switch that failed above kept the previous account, whose pending attach still stands.
