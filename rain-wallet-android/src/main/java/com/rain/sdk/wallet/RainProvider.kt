@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *     RainWalletConfig(
  *         // Your backend mints it with your Api-Key: POST /v1/issuing/embedded-wallets/auth-tokens
  *         authTokenProvider = { contact -> myBackend.mintWalletAuthToken(contact) },
- *         // The default, Production, is refused
+ *         // The default is Production
  *         environment = RainWalletEnvironment.Sandbox,
  *     ),
  * )
@@ -77,14 +77,10 @@ class RainProvider internal constructor(
      * Creates the Rain wallet provider for this app.
      *
      * @param application The host application; the wallet backend needs it for secure storage.
-     * @param config The token supplier, the environment and behaviour the host may tune. Pass
-     *   [RainWalletEnvironment.Sandbox] as the environment, because the default,
-     *   [RainWalletEnvironment.Production], is refused.
+     * @param config The token supplier, the environment and behaviour the host may tune.
      * @throws RainError.InvalidConfig (`RAIN_102`) when [RainWalletConfig.passkeyDomain] is not a
      *   registrable domain of at least two labels made of letters, digits and hyphens (a scheme,
-     *   port, path or a single label such as `localhost` is refused), when a
-     *   [RainWalletEnvironment.Custom] URL is not absolute https naming a host and nothing more, or
-     *   is on production's host, or when the environment is [RainWalletEnvironment.Production].
+     *   port, path or a single label such as `localhost` is refused).
      */
     constructor(application: Application, config: RainWalletConfig) : this(
         TurnkeyProvider(config.toBacking(application))

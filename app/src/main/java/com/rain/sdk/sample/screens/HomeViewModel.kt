@@ -1735,8 +1735,7 @@ data class HomeUiState(
     /**
      * Whether a code login, a passkey sign-up or a contact attach can start: the demo mints the
      * wallet auth token with the sandbox Api-Key and user ID on Home. A passkey sign-in and an added
-     * passkey need no token. A production build is not gated here: the SDK refuses
-     * `RainWalletEnvironment.Production` at construction and the card shows that error.
+     * passkey need no token.
      */
     val rainWalletAuthAvailable: Boolean
         get() = rainApiKey.isNotBlank() && userId.isNotBlank()

@@ -24,10 +24,9 @@ import com.rain.sdk.turnkey.TurnkeyConfig
  *                          `RainError.InvalidConfig` (`RAIN_102`). The `RainWalletConfig` row of
  *                          docs/METHODS.md has the rules: the token's lifetime, the retry on a
  *                          refused token, the threading and the mint endpoint's duties.
- * @param environment The Rain deployment the authentication runs against:
- *                    [RainWalletEnvironment.Production] by default, which the [RainProvider]
- *                    constructor refuses with `RainError.InvalidConfig`, so pass
- *                    [RainWalletEnvironment.Sandbox] or a [RainWalletEnvironment.Custom]. Part of
+ * @param environment The Rain deployment the authentication runs against, which also fixes the
+ *                    wallet backend organization: [RainWalletEnvironment.Production] by default,
+ *                    or [RainWalletEnvironment.Sandbox]. Part of
  *                    the backend's one-shot configuration, so a second provider with another
  *                    deployment in the same launch makes every authentication call throw
  *                    `RainError.InvalidConfig`. The `RainWalletConfig` row of docs/METHODS.md has

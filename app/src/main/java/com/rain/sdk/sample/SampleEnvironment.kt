@@ -22,7 +22,7 @@ object SampleEnvironment {
     val isProduction: Boolean
         get() = rainApi == SampleRainEnvironment.PRODUCTION
 
-    /** The Rain wallet's environment for [rainApi]; the SDK refuses production at construction. */
+    /** The Rain wallet's environment for [rainApi]. */
     val rainWallet: RainWalletEnvironment
         get() = if (isProduction) RainWalletEnvironment.Production else RainWalletEnvironment.Sandbox
 

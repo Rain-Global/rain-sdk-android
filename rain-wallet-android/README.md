@@ -33,7 +33,7 @@ import com.rain.sdk.wallet.RainWalletEnvironment
 
 // authTokenProvider is required: your backend mints the token with its Api-Key,
 // POST /v1/issuing/embedded-wallets/auth-tokens, for the contact the SDK hands you.
-// environment defaults to Production, which this release refuses until Rain turns it on.
+// environment defaults to Production; pass Sandbox for test users and testnets.
 // passkeyDomain is optional; without it the passkey methods throw RainError.InvalidConfig
 val wallet = RainProvider(
     application,
@@ -66,10 +66,8 @@ with null for a passkey sign-up, and it returns the `token` your backend minted 
 with an Api-Key holding `embeddedWallets:write` (`POST /v1/issuing/embedded-wallets/auth-tokens`).
 Keep the Api-Key off the device, and have the mint endpoint authenticate the app user and throttle
 before minting: Rain limits by IP only, and a code is SMS spend. It also carries `environment`
-(`RainWalletEnvironment.Production` by default, which the constructor refuses with `RAIN_102` until
-the SDK release that turns it on, so pass `Sandbox`, the one environment with a wallet backend
-behind it today; or `Custom(apiBaseUrl)`, any https host that forwards to Rain's sandbox, such as
-your own proxy) and tunes behaviour: the session policy (`RainWalletSessionPolicy`), the expiry hook
+(`RainWalletEnvironment.Production` by default, or `Sandbox`; each fixes both the Rain API host and
+the wallet organization the accounts live under) and tunes behaviour: the session policy (`RainWalletSessionPolicy`), the expiry hook
 `onSessionExpired`, whether sends are fee-sponsored (`sponsorGas`, on by default) and the passkey
 domain (`passkeyDomain`, off by default). The rules of each parameter are in the `RainWalletConfig`
 row of [docs/METHODS.md](../docs/METHODS.md#rain-wallet-provider). The session is observable through
