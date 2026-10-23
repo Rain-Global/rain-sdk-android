@@ -68,7 +68,7 @@ internal object TurnkeyManagedConfigurator {
     @Volatile
     private var initAttempted = false
 
-    private val defaultInit: suspend (Application, String, String, String?) -> Unit = { app, organizationId, _, passkeyDomain ->
+    private val defaultInit: suspend (Application, String, String?) -> Unit = { app, organizationId, passkeyDomain ->
         // The vendor's own `init` launches `initSuspend` on Dispatchers.Main.immediate. Running it
         // there ourselves keeps its lifecycle-observer registration on the main thread while
         // surfacing a failure to this coroutine instead of an uncaught crash on the vendor's scope.
@@ -95,7 +95,7 @@ internal object TurnkeyManagedConfigurator {
 
     /** Test seam: replaces the vendor configure call. */
     @Volatile
-    internal var initImpl: suspend (Application, String, String, String?) -> Unit = defaultInit
+    internal var initImpl: suspend (Application, String, String?) -> Unit = defaultInit
 
     /** Test seam: whether the vendor singleton was already initialized, by anyone. */
     @Volatile
@@ -151,7 +151,7 @@ internal object TurnkeyManagedConfigurator {
     private suspend fun initializeVendor(application: Application, requested: Triple<String, String, String?>): RainError? {
         initAttempted = true
         try {
-            initImpl(application, requested.first, requested.second, requested.third)
+            initImpl(application, requested.first, requested.third)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -209,6 +209,12 @@ constructor(
     private val configure: suspend () -> RainError?,
     /** The passkey relying-party domain, already normalized; null means passkeys are off. */
     private val passkeyDomain: String? = null,
+    /**
+     * The registration of a sign-up Rain left in doubt, for the next [signUpWithPasskey] to resend:
+     * only the same credential sent again makes Rain record an account its create finished late.
+     * Written under [flowMutex], cleared by a settled answer only, kept across [close].
+     */
+    private val pendingPasskeySignups: PendingPasskeySignupStore = InMemoryPendingPasskeySignupStore(),
     private val nowEpochSeconds: () -> Double = { System.currentTimeMillis() / MILLIS_PER_SECOND },
 ) {
     /**
@@ -228,18 +234,6 @@ constructor(
      * cannot consume a verification code and a verification cannot consume a login code.
      */
     private var pendingContactOtp: PendingOtp? = null
-
-    /**
-     * The passkey registration of a sign-up whose outcome Rain left in doubt, kept for the next
-     * [signUpWithPasskey] to resend instead of creating a second passkey. Rain's create can finish
-     * after the device gave up on the call, and the passkey then signs into an account Rain never
-     * saved, which nothing built on Rain's wallet list sees; only the same credential sent to
-     * `POST /signup/passkey` again makes Rain adopt it. Set by [signUpOnRain] on a lost answer, a
-     * 5xx, a cancelled request or Rain's "already in progress"; cleared by a settled answer and by
-     * [close]. A logout or a code login in between leaves it, since it concerns an account nobody is
-     * signed into. Lost with the process: a relaunch starts over with a new passkey.
-     */
-    private var pendingPasskeySignup: PasskeyRegistration? = null
     private val closed = AtomicBoolean(false)
     private val closedFlow = MutableStateFlow(false)
 
@@ -336,7 +330,7 @@ constructor(
             val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
             val deviceKey = guarded { context.createDeviceKey() }
             val login = onFailure({ deleteDeviceKey(deviceKey) }) {
-                val verificationToken = verifyCode(pending, trimmed, deviceKey, ::clearPendingOtp)
+                val verificationToken = verifyCode(pending, trimmed, deviceKey, ::clearPendingOtp).verificationToken
                 loginOrSignUp(pending, verificationToken)
             }
             storeSession(login.sessionToken, sessionKey, deviceKey)
@@ -372,26 +366,14 @@ constructor(
     }
 
     /**
-     * Creates a new account whose only login method is a passkey bound to the configured domain:
-     * a contact-less wallet auth token from the host, the passkey ceremony on the device, then
-     * `POST /signup/passkey` with the challenge and attestation, which creates the account with
-     * [MANAGED_WALLET]; then the vendor's passkey login on the sub-organization Rain answered with,
-     * a second passkey prompt, since Rain's sign-up issues no session yet; then the session steps
-     * [loginWithPasskey] runs. Every call mints a fresh account; returning users sign in or add a
-     * passkey instead.
-     *
-     * Refused with [RainError.InvalidConfig] while a live session is selected on this device: one
-     * account is signed in at a time, and the sample offers the sign-up only while signed out. A
-     * selected session that is already dead carries no such risk and is cleared first, the way
-     * [logout] clears one, with the host's re-auth hook silent; a ceremony that then fails leaves
-     * the device signed out, as a logout would. Waiting out a restore in flight first keeps a
-     * session that is still loading from being read as "nothing selected"; one still loading after
-     * the bounded wait is refused like a live one. A failure after `POST /signup/passkey` answered
-     * (the login prompt, the session store) leaves an account the passkey can still sign into. A
-     * sign-up whose answer Rain left in doubt keeps its registration ([pendingPasskeySignup]), and the
-     * next call resends it with a fresh token instead of opening the sheet, so the account that call
-     * created is recorded by Rain rather than joined by a second one; [signUpOnRain] says which
-     * answers keep it and which settle it.
+     * Creates a passkey account and signs it in with one prompt: the host's contact-less token, the
+     * ceremony, `POST /signup/passkey` with the attestation and a device key Rain registers on the
+     * account for a minute, then Turnkey's `stampLogin` with that key, whose session stays on it
+     * like a code login's. An account with no key for the device (adopted from an earlier attempt,
+     * or found saved on a resend) signs in through the sheet instead. Refused over a live session; a
+     * dead one is cleared first. A sign-up Rain left in doubt is resent from [pendingPasskeySignups]
+     * by the next call; [signUpOnRain] has the rule, and the `signUpWithPasskey` row in
+     * `docs/METHODS.md` says what each failure leaves behind.
      */
     suspend fun signUpWithPasskey(activity: Activity) {
         flowMutex.withLock {
@@ -401,20 +383,26 @@ constructor(
             clearDeadSessionOrRefuse()
             val token = AuthToken(contact = null, value = authToken(null))
             val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
-            val kept = pendingLock.withJavaLock { pendingPasskeySignup }
+            val kept = pendingPasskeySignups.load()
+            // Kept before the send: a process that dies with Rain's answer outstanding resends it after the relaunch.
             val registration = kept ?: guarded {
                 context.createPasskeyCredential(activity, rpId, TurnkeyPasskeys.authenticatorName(nowEpochSeconds()))
-            }
-            // Rain requires a device public key with the sign-up and registers it on the account as a
-            // one-minute API key; the login below still runs through the sheet, so the key is deleted
-            // once the leg answered.
+            }.also { pendingPasskeySignups.save(it) }
             val deviceKey = guarded { context.createDeviceKey() }
-            val signup = try {
-                signUpOnRain(token, registration, deviceKey, resend = kept != null)
-            } finally {
-                withContext(NonCancellable) { deleteDeviceKey(deviceKey) }
+            val (signup, jwt) = onFailure({ deleteDeviceKey(deviceKey) }) {
+                val signup = signUpOnRain(token, registration, deviceKey, resend = kept != null)
+                val created = signup as? PasskeySignup.Created
+                signup to created?.let { guarded { context.stampLoginWithDeviceKey(deviceKey, it.subOrganizationId) } }
             }
-            ceremony(sessionKey) { context.completePasskeyLogin(activity, sessionKey, organizationId = signup.subOrganizationId) }
+            if (jwt != null) {
+                storeSession(jwt, sessionKey, deviceKey)
+            } else {
+                // No API key for the device on the account: Rain adopted it from an earlier attempt,
+                // which registers none, or a resend found it saved. The passkey signs in instead.
+                withContext(NonCancellable) { deleteDeviceKey(deviceKey) }
+                val organizationId = (signup as? PasskeySignup.Created)?.subOrganizationId
+                ceremony(sessionKey) { context.completePasskeyLogin(activity, sessionKey, organizationId = organizationId) }
+            }
             switchToSession(sessionKey, previousKey = null, previousRevoked = true)
             ensureAccountsLocked()
         }
@@ -456,8 +444,8 @@ constructor(
      * and that string is what the account stores. The pending code follows the login send's rule:
      * a second call for the same contact replaces it on success and keeps it on failure, and a call
      * for another contact or channel retires it before anything is sent, so a failed switch leaves
-     * nothing confirmable. Accounts are never merged, and nothing checks whether another account in
-     * this tenant signs in with the contact; see [confirmContactVerification].
+     * nothing confirmable. Accounts are never merged; a contact another account in this tenant signs
+     * in with is refused on confirm, see [confirmContactVerification].
      */
     suspend fun sendContactVerificationCode(contact: LoginContact) {
         flowMutex.withLock {
@@ -480,27 +468,28 @@ constructor(
      * the challenge, as [confirmLoginCode] does, and so does any other failure of the verify step.
      * Once the verify answered the code is spent, so the challenge is dropped whether or not what
      * follows succeeds: the account's email or phone is set through the vendor's update-user
-     * activity under the live session with the verification token. Nothing asks Rain whether
-     * another wallet in the tenant signs in with the contact, because the one lookup Rain has is
-     * its login, which issues a session on that wallet; until a lookup that issues no session
-     * exists, an attach of such a contact succeeds and rain-api's `findSavedSubOrg` then fails
-     * every code login for the contact the two saved wallets share (a known issue in the
-     * CHANGELOG). A failed update surfaces as its own error with the code spent, and the user
-     * requests a new code.
+     * activity under the live session with the verification token. Rain's verify names the wallet
+     * this tenant saved for the contact, when one exists: another wallet's contact is refused with
+     * [RainError.Unauthorized] before anything changes, the code spent; a contact two saved wallets
+     * already share fails the verify itself with a 5xx. A failed update surfaces as its own error
+     * with the code spent, and the user requests a new code.
      */
     suspend fun confirmContactVerification(code: String) {
         flowMutex.withLock {
             prepare()
             val pending = requirePendingContactOtp()
             val trimmed = requireCode(code)
-            requireLiveSession()
+            val signedIn = requireLiveSession()
             val throwaway = guarded { context.createDeviceKey() }
-            val verificationToken = try {
+            val verification = try {
                 verifyCode(pending, trimmed, throwaway, ::clearPendingContactOtp)
             } finally {
                 // Nothing else removes the throwaway key; the token stays usable without it.
                 withContext(NonCancellable) { deleteDeviceKey(throwaway) }
             }
+            val owner = verification.walletSubOrganizationId
+            if (owner != null && owner != signedIn.organizationId) throw RainError.Unauthorized(CONTACT_OWNED_MESSAGE)
+            val verificationToken = verification.verificationToken
             // The coordinator is its own mapping boundary: it rethrows cancellation and maps the rest.
             coordinator.executeWrite { live, _ ->
                 when (pending.challenge.channel) {
@@ -548,9 +537,15 @@ constructor(
      * The verify step: the code encrypted to the challenge's bundle with [deviceKey], then
      * `POST /otp/verify` under the pending token. [clearPending] runs once Rain accepted the code,
      * whether or not the answer decoded, since the code is spent then; a rejected code and any
-     * failure before that keep the challenge.
+     * failure before that keep the challenge. Answers the verification token with the wallet this
+     * tenant saved for the contact, when one exists.
      */
-    private suspend fun verifyCode(pending: PendingOtp, code: String, deviceKey: String, clearPending: () -> Unit): String {
+    private suspend fun verifyCode(
+        pending: PendingOtp,
+        code: String,
+        deviceKey: String,
+        clearPending: () -> Unit,
+    ): RainApiVerification {
         val encrypted = guarded { context.encryptOtpCode(code, pending.challenge.encryptionTargetBundle, deviceKey) }
         val verification = try {
             rainLeg(pending.token) { rainApi.verifyOtp(it, pending.challenge.otpId, encrypted) }
@@ -560,7 +555,7 @@ constructor(
             throw e
         }
         clearPending()
-        return verification.verificationToken
+        return verification
     }
 
     /**
@@ -585,8 +580,8 @@ constructor(
 
     /**
      * One leg against Rain under [token], through [guarded], which passes the client's own refusal
-     * through raw so its kind can be read here. A refused token gets one fresh token from the host
-     * and one retry, and the fresh token replaces the old one for the legs that follow; a second
+     * through raw so its kind can be read here. A refused or spent token gets one fresh token from
+     * the host and one retry, and the fresh token replaces the old one for the legs that follow; a second
      * refusal is an error like any other. A refusal [consume] accepts returns null for the caller
      * to act on; every other refusal leaves through [TurnkeyErrorMapping.mapAuthError]. [onRefusal]
      * sees every refusal raw, before the renewal or the mapping.
@@ -606,7 +601,7 @@ constructor(
             }
             onRefusal(refusal)
             when {
-                refusal.kind == RainApiAuthFailure.Kind.TokenRejected && !refetched -> {
+                (refusal.kind == RainApiAuthFailure.Kind.TokenRejected || refusal.kind == RainApiAuthFailure.Kind.TokenUsed) && !refetched -> {
                     refetched = true
                     token.value = authToken(token.contact)
                 }
@@ -621,61 +616,53 @@ constructor(
         checkNotNull(rainLegOrNull(token, consume = { false }, call = call)) { "a leg that consumes no refusal answered null" }
 
     /**
-     * `POST /signup/passkey` for [registration] and [publicKey] under [token], with [rainLeg]'s one token renewal,
-     * and the registration's fate decided from the answer. A 200 settles it: the slot is cleared and
-     * the account is Rain's. An answer that leaves the account in doubt keeps the registration in
-     * [pendingPasskeySignup] for the next call: a transport failure or an unreadable answer (the
-     * client's [RainError.NetworkError] and [RainError.InternalError]; a renewal the host could not
-     * serve lands here too, and keeping a credential Rain never saw costs nothing), a 5xx (rain-api's
-     * create outlives the device's deadline and may still finish), a cancelled request, and Rain's
-     * own "already in progress", which leaves as [RainError.NetworkError] so the host retries it as
-     * it would a dropped connection. Rain's "already has a wallet" settles it on any send: the account
-     * exists and Rain has it, so the registration is dropped and the mapper's [RainError.InvalidConfig]
-     * sends the host to [loginWithPasskey]. On a first send every other refusal drops it too: Rain
-     * refused before creating anything. On a [resend] only Rain's word on the credential settles it:
-     * that 409, or a 400 (Turnkey refused the attestation, so no account holds it); a refused token or
-     * tenant, a 429, a 404 from in front of Rain or a 409 for a token already used say nothing about
-     * the first call, so the registration stays for the call after.
+     * `POST /signup/passkey` for [registration] and the device key [publicKey], with [rainLeg]'s one
+     * token renewal, and the fate of the registration, saved before the send, decided from the
+     * answer: a 200 clears it ([PasskeySignup.Created]), and so does a [resend] answered "already has
+     * a wallet" ([PasskeySignup.Saved]: the first call's account was saved). In doubt, so left for the
+     * next call: a lost or unreadable answer, a 5xx, a 429, a cancellation, and "already in progress",
+     * which leaves as [RainError.NetworkError] for the host to retry. Dropped: every other refusal
+     * on a first send (Rain created nothing; "already has a wallet" leaves as the mapper's
+     * [RainError.InvalidConfig]), and a 400 on a resend (Turnkey refused the attestation). A refused
+     * token or tenant or a 404 on a resend say nothing about the first call, so the registration stays.
      */
     private suspend fun signUpOnRain(
         token: AuthToken,
         registration: PasskeyRegistration,
         publicKey: String,
         resend: Boolean,
-    ): RainApiSignup {
+    ): PasskeySignup {
         // The refusal that ended the leg, raw: the mapped error does not always carry it.
         var refusal: RainApiAuthFailure? = null
         val signup = try {
-            rainLegOrNull(token, consume = { false }, onRefusal = { refusal = it }) {
+            rainLegOrNull(
+                token,
+                consume = { resend && it.kind == RainApiAuthFailure.Kind.PasskeyTaken },
+                onRefusal = { refusal = it },
+            ) {
                 rainApi.signupPasskey(it, registration.challenge, registration.toRainApi(), publicKey)
             }
-        } catch (e: CancellationException) {
-            pendingLock.withJavaLock { pendingPasskeySignup = registration }
-            throw e
         } catch (e: RainError) {
-            throw settlePasskeySignup(e, refusal, registration, resend)
+            throw settlePasskeySignup(e, refusal, resend)
         }
-        pendingLock.withJavaLock { pendingPasskeySignup = null }
-        return checkNotNull(signup) { "a leg that consumes no refusal answered null" }
+        withContext(NonCancellable) { pendingPasskeySignups.clear() }
+        return signup?.let { PasskeySignup.Created(it.subOrganizationId) } ?: PasskeySignup.Saved
     }
 
-    /** [signUpOnRain]'s failure exit: keeps or drops [registration], and names the error that leaves. */
-    private fun settlePasskeySignup(
-        e: RainError,
-        refusal: RainApiAuthFailure?,
-        registration: PasskeyRegistration,
-        resend: Boolean,
-    ): RainError {
+    /** [signUpOnRain]'s failure exit: drops the kept registration or leaves it, and names the error that leaves. */
+    private suspend fun settlePasskeySignup(e: RainError, refusal: RainApiAuthFailure?, resend: Boolean): RainError {
         val inProgress = refusal?.kind == RainApiAuthFailure.Kind.SignupInProgress
-        val lostOrFailed = (refusal == null && (e is RainError.NetworkError || e is RainError.InternalError)) ||
+        // A lost retry after the one token renewal keeps it too: that retry's outcome is the unknown one.
+        val lostOrFailed = e is RainError.NetworkError || e is RainError.InternalError ||
             (refusal != null && refusal.status >= HttpURLConnection.HTTP_INTERNAL_ERROR)
         val keep = when {
-            inProgress || lostOrFailed -> true
+            inProgress || lostOrFailed || refusal?.status == HTTP_TOO_MANY_REQUESTS -> true
             refusal?.kind == RainApiAuthFailure.Kind.PasskeyTaken -> false
             resend -> refusal?.status != HttpURLConnection.HTTP_BAD_REQUEST
             else -> false
         }
-        pendingLock.withJavaLock { pendingPasskeySignup = registration.takeIf { keep } }
+        // A drop lands even when the caller is being cancelled; a kept registration is on disk since before the send.
+        if (!keep) withContext(NonCancellable) { pendingPasskeySignups.clear() }
         return if (inProgress) {
             RainError.NetworkError(
                 "Rain is still creating this account from an earlier sign-up; call signUpWithPasskey again in a " +
@@ -685,6 +672,15 @@ constructor(
         } else {
             e
         }
+    }
+
+    /** What `POST /signup/passkey` settled. */
+    private sealed interface PasskeySignup {
+        /** Rain answered with the account's id: created now, with the device key registered, or adopted with none. */
+        class Created(val subOrganizationId: String) : PasskeySignup
+
+        /** A resend Rain answered "already has a wallet": the account is saved, and only the passkey reaches it. */
+        object Saved : PasskeySignup
     }
 
     /**
@@ -750,7 +746,6 @@ constructor(
         }
     }
 
-    /** The ceremony's attestation in the shape `POST /signup/passkey` validates: the four fields, the vendor's transport names. */
     private fun PasskeyRegistration.toRainApi(): RainApiPasskeyAttestation = RainApiPasskeyAttestation(
         credentialId = attestation.credentialId,
         clientDataJson = attestation.clientDataJson,
@@ -950,8 +945,8 @@ constructor(
 
     /**
      * Makes this controller inert: every auth call throws, the state reads unauthenticated, and
-     * both pending codes are dropped, each with the host's bearer token it holds, and so is a kept
-     * passkey registration.
+     * both pending codes are dropped, each with the host's bearer token it holds. A kept
+     * passkey registration stays in its store for the next controller to resend.
      */
     fun close() {
         closed.set(true)
@@ -959,7 +954,6 @@ constructor(
         pendingLock.withJavaLock {
             pendingOtp = null
             pendingContactOtp = null
-            pendingPasskeySignup = null
         }
     }
 
@@ -1156,6 +1150,12 @@ constructor(
 
         const val SESSION_MIN_REMAINING_SECONDS = 30.0
         const val SESSION_KEY_PREFIX = "rain-turnkey-"
+
+        /** The refusal for a contact another wallet signs in with; names no contact. */
+        const val CONTACT_OWNED_MESSAGE = "This contact already signs in to another account"
+
+        /** `HttpURLConnection` names no 429. */
+        private const val HTTP_TOO_MANY_REQUESTS = 429
         const val MANAGED_WALLET_NAME = "Wallet"
 
         /** Separators people type into a phone number; removed before the E.164 check. */

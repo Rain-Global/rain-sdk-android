@@ -24,7 +24,7 @@ import org.junit.Test
 /**
  * Turnkey-error classification tests for [TurnkeyErrorMapping] — covers each `TurnkeyKotlinError`
  * variant it routes (InvalidSession, InvalidParameter, ClientNotInitialized,
- * FailedToSignRawPayload, FailedToCreateWallet, FailedToVerifyOtp, FailedToInitOtp,
+ * FailedToSignRawPayload, FailedToCreateWallet, FailedToVerifyOtp,
  * FailedToExportWallet, FailedToLoginWithPasskey, FailedToSignUpWithPasskey), the passkey and
  * stamper packages' own errors, the wrapper-recurse paths, and the HTTP statuses the vendor reports
  * as plain exceptions.
@@ -181,46 +181,6 @@ class TurnkeyErrorMappingTest {
     // ---------- managed auth: failed code requests (send path) ----------
 
     @Test
-    fun `a failed code request maps to ProviderError for every status`() {
-        // No session exists while a code is being requested, so an init 401 or 403 is not an
-        // expired session or a permission problem. The reason (channel disabled, undeliverable
-        // number, rate limit) is in the response body the Kotlin SDK drops; the status survives.
-        listOf(400, 401, 403, 429, 500).forEach { status ->
-            val http = RuntimeException("HTTP error from /v1/otp_init_v2: $status")
-            val error = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToInitOtp(http)
-            val mapped = mapping.mapTurnkeyError(error)
-            assertThat(mapped).isInstanceOf(RainError.ProviderError::class.java)
-            assertThat(mapped).hasMessageThat().contains(status.toString())
-        }
-    }
-
-    @Test
-    fun `a failed code request without an HTTP status maps to ProviderError`() {
-        val dropped = java.io.IOException("unreachable")
-        val error = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToInitOtp(dropped)
-        assertThat(mapping.mapTurnkeyError(error)).isInstanceOf(RainError.ProviderError::class.java)
-    }
-
-    @Test
-    fun `a failed code request wrapping a vendor setup error keeps that classification`() {
-        // The vendor rewraps its own errors on the init path; a client that is not initialized is a
-        // setup problem (InternalError), not a request the user can retry.
-        val setup = com.turnkey.core.models.errors.TurnkeyKotlinError.ClientNotInitialized()
-        val error = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToInitOtp(setup)
-        assertThat(mapping.mapTurnkeyError(error)).isInstanceOf(RainError.InternalError::class.java)
-    }
-
-    @Test
-    fun `a code request that wraps a cancellation while the caller is active is a ProviderError`() {
-        // The controller checks the caller's own cancellation before mapping; a vendor wrapper
-        // around someone else's cancellation is a vendor failure, not a user rejection.
-        val error = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToInitOtp(
-            java.util.concurrent.CancellationException("inner job")
-        )
-        assertThat(mapping.mapTurnkeyError(error)).isInstanceOf(RainError.ProviderError::class.java)
-    }
-
-    @Test
     fun `the status parser reads the init path like the verify path`() {
         val init = RuntimeException("HTTP error from /v1/otp_init_v2: 400")
         val verify = RuntimeException("HTTP error from /v1/otp_verify_v2: 401")
@@ -245,7 +205,7 @@ class TurnkeyErrorMappingTest {
         try {
             val http = RuntimeException("HTTP error from /v1/otp_init_v2 for someone@example.com: 401")
             // The wrapped shape the vendor produces, and the bare status-carrying shape.
-            mapping.mapAuthError(com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToInitOtp(http))
+            mapping.mapAuthError(com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToCreateSession(http))
             mapping.mapAuthError(http)
         } finally {
             timber.log.Timber.uproot(tree)
@@ -254,13 +214,6 @@ class TurnkeyErrorMappingTest {
         assertThat(seen.toString()).contains(RainErrorCode.TOKEN_EXPIRED.code) // the bare 401 parsed
         assertThat(seen.toString()).doesNotContain("example.com")
         assertThat(throwables).isEmpty()
-    }
-
-    @Test
-    fun `mapAuthError routes a failed code request to ProviderError`() {
-        val http = RuntimeException("HTTP error from /v1/otp_init_v2: 401")
-        val error = com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToInitOtp(http)
-        assertThat(mapping.mapAuthError(error)).isInstanceOf(RainError.ProviderError::class.java)
     }
 
     @Test
@@ -340,7 +293,7 @@ class TurnkeyErrorMappingTest {
         assertThat(mapped.cause).isInstanceOf(TurnkeyHttpFailure::class.java)
 
         val path = RuntimeException("HTTP error from /v1/otp_init_v2 for someone@example.com: 429")
-        val init = mapping.map(com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToInitOtp(path))
+        val init = mapping.map(com.turnkey.core.models.errors.TurnkeyKotlinError.FailedToCreateSession(path))
         assertThat(init).hasMessageThat().contains("429")
         assertThat(init).hasMessageThat().contains("/v1/otp_init_v2")
         assertThat(init).hasMessageThat().doesNotContain("example.com")

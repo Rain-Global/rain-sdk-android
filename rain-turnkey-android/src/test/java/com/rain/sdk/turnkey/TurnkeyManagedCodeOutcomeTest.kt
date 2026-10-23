@@ -398,37 +398,6 @@ class TurnkeyManagedCodeOutcomeTest {
     // ---------- the wallet auth token ----------
 
     @Test
-    fun `a refused token is refetched once per leg, on the code request and on the verify, and the fresh token carries into the login`() =
-        runTest {
-            val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-            turnkey.onStoreSession = { turnkey.authenticate() }
-            val rainApi = MockRainApiAuth()
-            rainApi.initOtp = MockRainApiAuth.answers(
-                { throw MockRainApiAuth.tokenRejected(MockRainApiAuth.INIT_PATH) },
-                { RainApiOtpChallenge("otp-1", "bundle-1") },
-            )
-            rainApi.verifyOtp = MockRainApiAuth.answers(
-                { throw MockRainApiAuth.tokenRejected(MockRainApiAuth.VERIFY_PATH) },
-                { RainApiVerification("vt") },
-            )
-            var minted = 0
-            val controller = controller(turnkey, rainApi, authTokenProvider = { "wat_${++minted}" })
-
-            controller.sendLoginCode(email)
-
-            assertThat(rainApi.initOtpCalls).containsExactly("wat_1", "wat_2").inOrder()
-
-            controller.confirmLoginCode("123456")
-
-            // The confirm carries the token the send ended with, refetches once more on the verify, and
-            // the login carries the newest; every mint named the canonical contact.
-            assertThat(rainApi.verifyOtpCalls.map { it.token }).containsExactly("wat_2", "wat_3").inOrder()
-            assertThat(rainApi.loginCalls.single().token).isEqualTo("wat_3")
-            assertThat(tokenRequests).containsExactly(email, email, email).inOrder()
-            assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
-        }
-
-    @Test
     fun `a token refused twice is Unauthorized, with the challenge kept on the verify leg and the device key deleted`() = runTest {
         val turnkey = MockTurnkey(session = null)
         val rainApi = MockRainApiAuth()
@@ -451,6 +420,45 @@ class TurnkeyManagedCodeOutcomeTest {
         controller.confirmLoginCode("123456")
         assertThat(rainApi.verifyOtpCalls.last().token).isEqualTo("wat_2")
         assertThat(rainApi.initOtpCalls).hasSize(1)
+    }
+
+    @Test
+    fun `a refused or spent token is renewed once on each code leg, and the newest token carries into the next leg`() = runTest {
+        val refusals = listOf<Pair<String, (String) -> RainApiAuthFailure>>(
+            "a 401" to { path -> MockRainApiAuth.tokenRejected(path) },
+            "a 409 for a spent token" to { path -> MockRainApiAuth.refusal(RainApiAuthFailure.Kind.TokenUsed, 409, path) },
+        )
+        refusals.forEach { (name, refuse) ->
+            tokenRequests.clear()
+            val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
+            turnkey.onStoreSession = { turnkey.authenticate() }
+            val rainApi = MockRainApiAuth()
+            rainApi.initOtp = MockRainApiAuth.answers({ throw refuse(MockRainApiAuth.INIT_PATH) }, { RainApiOtpChallenge("otp-1", "bundle-1") })
+            rainApi.verifyOtp = MockRainApiAuth.answers({ throw refuse(MockRainApiAuth.VERIFY_PATH) }, { RainApiVerification("vt") })
+            rainApi.login = MockRainApiAuth.answers(
+                { throw refuse(MockRainApiAuth.LOGIN_PATH) },
+                { throw MockRainApiAuth.noWallet() },
+                { MockRainApiAuth.defaultLogin() },
+            )
+            rainApi.signup = MockRainApiAuth.answers({ throw refuse(MockRainApiAuth.SIGNUP_PATH) }, { RainApiSignup("sub-9") })
+            var minted = 0
+            val controller = controller(turnkey, rainApi, authTokenProvider = { "wat_${++minted}" })
+
+            controller.sendLoginCode(email)
+            assertWithMessage(name).that(rainApi.initOtpCalls).containsExactly("wat_1", "wat_2").inOrder()
+
+            controller.confirmLoginCode("123456")
+
+            // Each refused leg sends twice, the second time under the token the host minted for it,
+            // and the leg after starts with that token; the login after the sign-up is not refused
+            // and sends once.
+            assertWithMessage(name).that(rainApi.verifyOtpCalls.map { it.token }).containsExactly("wat_2", "wat_3").inOrder()
+            assertWithMessage(name).that(rainApi.loginCalls.map { it.token }).containsExactly("wat_3", "wat_4", "wat_5").inOrder()
+            assertWithMessage(name).that(rainApi.loginCalls.map { it.subOrganizationId }).containsExactly(null, null, "sub-9").inOrder()
+            assertWithMessage(name).that(rainApi.signupCalls.map { it.token }).containsExactly("wat_4", "wat_5").inOrder()
+            assertWithMessage(name).that(tokenRequests).containsExactly(email, email, email, email, email).inOrder()
+            assertWithMessage(name).that(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+        }
     }
 
     @Test

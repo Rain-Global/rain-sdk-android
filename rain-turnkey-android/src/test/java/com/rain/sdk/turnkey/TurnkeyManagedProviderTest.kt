@@ -2,6 +2,7 @@ package com.rain.sdk.turnkey
 
 import android.app.Activity
 import android.app.Application
+import android.content.Context
 import com.google.common.truth.Truth.assertThat
 import com.rain.sdk.error.RainError
 import com.rain.sdk.internal.network.chainreader.EvmChainReader
@@ -10,6 +11,7 @@ import com.rain.sdk.internal.tokenstore.TokenMetadataStore
 import com.rain.sdk.provider.ProviderContext
 import com.turnkey.core.TurnkeyContext
 import com.turnkey.types.V1AddressFormat
+import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -21,11 +23,13 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import java.net.SocketTimeoutException
 
 /**
  * The managed-auth surface of [TurnkeyProvider]: the two [TurnkeyConfig] modes, the BYO guard,
- * forwarding to the controller through the real wiring (only the vendor context and the Rain
- * client are faked), and account provisioning at resolution.
+ * forwarding to the controller through the real wiring (the vendor context and the Rain client
+ * are faked, and the sign-up tests fake the pending sign-up store: an in-memory one, or a
+ * preferences file handed out by a stubbed Application), and account provisioning at resolution.
  *
  * The BYO constructor takes the vendor's `TurnkeyContext` singleton, whose class initializer
  * dispatches onto `Dispatchers.Main`; on the JVM that dispatcher is absent, so a test dispatcher
@@ -43,7 +47,7 @@ class TurnkeyManagedProviderTest {
         Dispatchers.setMain(StandardTestDispatcher())
         mainSet = true
         TurnkeyManagedConfigurator.resetForTest()
-        TurnkeyManagedConfigurator.initImpl = { _, _, _, _ -> }
+        TurnkeyManagedConfigurator.initImpl = { _, _, _ -> }
         TurnkeyManagedConfigurator.vendorInitializedProbe = { false }
     }
 
@@ -55,13 +59,15 @@ class TurnkeyManagedProviderTest {
 
     private val tokenRequests = mutableListOf<LoginContact?>()
 
+    @Suppress("LongParameterList") // one knob per config field, all defaulted
     private fun managedConfig(
         organizationId: String = "org-a",
         rainApiBaseUrl: String = "https://api-dev.rain.xyz",
         passkeyDomain: String? = null,
         authTokenProvider: suspend (LoginContact?) -> String = { "wat_1" },
+        application: Application = mockk<Application>(),
     ) = TurnkeyConfig(
-        application = mockk<Application>(),
+        application = application,
         organizationId = organizationId,
         rainApiBaseUrl = rainApiBaseUrl,
         authTokenProvider = { contact ->
@@ -73,6 +79,12 @@ class TurnkeyManagedProviderTest {
 
     /** The system sheet's anchor; the mock never touches it. */
     private val activity: Activity = mockk(relaxed = true)
+
+    /** The client's transport failure on the sign-up leg, as [RainApiAuthClient] throws it. */
+    private fun lostAnswer() = RainError.NetworkError(
+        "Rain API ${MockRainApiAuth.SIGNUP_PASSKEY_PATH}: SocketTimeoutException",
+        SocketTimeoutException(),
+    )
 
     /** The vendor-free context core hands every descriptor; nothing here hits the network. */
     private fun providerContext(): ProviderContext {
@@ -122,18 +134,15 @@ class TurnkeyManagedProviderTest {
 
     @Test
     fun `managed mode exports after running the one-shot configuration`() = runTest {
-        val configured = mutableListOf<Pair<String, String>>()
-        TurnkeyManagedConfigurator.initImpl = { _, organizationId, rainApiBaseUrl, _ ->
-            configured += organizationId to rainApiBaseUrl
-        }
+        val configured = mutableListOf<String>()
+        TurnkeyManagedConfigurator.initImpl = { _, organizationId, _ -> configured += organizationId }
         val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithVectorAccounts())) // restored live session
         val provider = TurnkeyProvider(managedConfig("org-a", "https://api-dev.rain.xyz/"), contextOverride = turnkey)
 
         val phrase = provider.exportRecoveryPhrase()
 
         assertThat(phrase).isEqualTo(turnkey.stubbedMnemonic)
-        // The base URL is keyed without its trailing slash, however the host wrote it.
-        assertThat(configured).containsExactly("org-a" to "https://api-dev.rain.xyz")
+        assertThat(configured).containsExactly("org-a")
         assertThat(turnkey.awaitReadyCallCount).isEqualTo(1)
         assertThat(turnkey.exportMnemonicCalls).containsExactly("wallet-id")
 
@@ -146,10 +155,8 @@ class TurnkeyManagedProviderTest {
 
     @Test
     fun `managed mode configures the vendor with the config's ids on the first auth call, not at construction`() = runTest {
-        val configured = mutableListOf<Pair<String, String>>()
-        TurnkeyManagedConfigurator.initImpl = { _, organizationId, rainApiBaseUrl, _ ->
-            configured += organizationId to rainApiBaseUrl
-        }
+        val configured = mutableListOf<String>()
+        TurnkeyManagedConfigurator.initImpl = { _, organizationId, _ -> configured += organizationId }
         val turnkey = MockTurnkey(session = null)
         val rainApi = MockRainApiAuth()
         val provider = TurnkeyProvider(managedConfig("org-a"), contextOverride = turnkey, rainApiOverride = rainApi)
@@ -157,7 +164,7 @@ class TurnkeyManagedProviderTest {
 
         provider.sendLoginCode(LoginContact.Email("user@example.com"))
 
-        assertThat(configured).containsExactly("org-a" to "https://api-dev.rain.xyz")
+        assertThat(configured).containsExactly("org-a")
         assertThat(tokenRequests).containsExactly(LoginContact.Email("user@example.com"))
         assertThat(rainApi.initOtpCalls).containsExactly("wat_1")
     }
@@ -361,7 +368,7 @@ class TurnkeyManagedProviderTest {
     fun `managed mode forwards both passkey flows with the domain and configures once`() = runTest {
         var initCalls = 0
         val configuredDomains = mutableListOf<String?>()
-        TurnkeyManagedConfigurator.initImpl = { _, _, _, domain ->
+        TurnkeyManagedConfigurator.initImpl = { _, _, domain ->
             initCalls++
             configuredDomains += domain
         }
@@ -380,13 +387,14 @@ class TurnkeyManagedProviderTest {
         assertThat(loginProvider.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
 
         val signUp = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-        signUp.onPasskeyLogin = { signUp.authenticate() }
+        signUp.onStoreSession = { signUp.authenticate() }
         val rainApi = MockRainApiAuth()
         rainApi.signupPasskey = { RainApiSignup("sub-passkey") }
         val signUpProvider = TurnkeyProvider(
             managedConfig(passkeyDomain = "passkeys.example.com"),
             contextOverride = signUp,
             rainApiOverride = rainApi,
+            pendingPasskeySignupsOverride = InMemoryPendingPasskeySignupStore(),
         )
 
         signUpProvider.signUpWithPasskey(activity)
@@ -395,11 +403,64 @@ class TurnkeyManagedProviderTest {
         assertThat(signUp.createPasskeyCalls.single().rpId).isEqualTo("passkeys.example.com")
         assertThat(rainApi.signupPasskeyCalls.single().token).isEqualTo("wat_1")
         assertThat(tokenRequests).containsExactly(null)
-        assertThat(signUp.passkeyLoginCalls.single().organizationId).isEqualTo("sub-passkey")
+        assertThat(signUp.deviceKeyLoginCalls.single().organizationId).isEqualTo("sub-passkey")
+        assertThat(signUp.passkeyLoginCalls).isEmpty()
         assertThat(signUp.awaitReadyCallCount).isAtLeast(1)
         // Same ids as the first provider: the one-shot configuration is not repeated.
         assertThat(initCalls).isEqualTo(1)
         assertThat(signUpProvider.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+    }
+
+    @Test
+    fun `a managed provider keeps a lost sign-up in its preferences file and the next provider over that file resends it`() = runTest {
+        // The production store over the file the Application hands out, with no override: a provider
+        // that stops opening the file, or opens another, fails here. The second provider over the
+        // same Application stands in for a relaunch.
+        val preferences = FakeSharedPreferences()
+        val application = mockk<Application>()
+        val file = SharedPreferencesPendingPasskeySignupStore.FILE_NAME
+        every { application.getSharedPreferences(file, Context.MODE_PRIVATE) } returns preferences
+        val firstLaunch = MockTurnkey(session = null)
+        val firstRain = MockRainApiAuth()
+        firstRain.signupPasskey = { throw lostAnswer() }
+        val first = TurnkeyProvider(
+            managedConfig(passkeyDomain = "passkeys.example.com", application = application),
+            contextOverride = firstLaunch,
+            rainApiOverride = firstRain,
+        )
+
+        expectThrows<RainError.NetworkError> { first.signUpWithPasskey(activity) }
+
+        assertThat(preferences.all).isNotEmpty()
+        assertThat(firstLaunch.createPasskeyCalls).hasSize(1)
+        assertThat(firstLaunch.liveDeviceKeys).isEmpty()
+        assertThat(first.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
+
+        val relaunch = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
+        relaunch.onStoreSession = { relaunch.authenticate() }
+        // What a fresh ceremony would mint here; the resend sends the first launch's registration instead.
+        relaunch.stubbedPasskeyRegistration = relaunch.stubbedPasskeyRegistration.copy(challenge = "challenge-after-relaunch")
+        val relaunchRain = MockRainApiAuth()
+        relaunchRain.signupPasskey = { RainApiSignup("sub-passkey") }
+        val second = TurnkeyProvider(
+            managedConfig(passkeyDomain = "passkeys.example.com", application = application),
+            contextOverride = relaunch,
+            rainApiOverride = relaunchRain,
+        )
+
+        second.signUpWithPasskey(activity)
+
+        assertThat(relaunch.createPasskeyCalls).isEmpty()
+        val sent = firstRain.signupPasskeyCalls.single()
+        val resent = relaunchRain.signupPasskeyCalls.single()
+        assertThat(resent.challenge).isEqualTo(sent.challenge)
+        assertThat(resent.attestation).isEqualTo(sent.attestation)
+        assertThat(relaunch.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-1", "sub-passkey"))
+        assertThat(relaunch.passkeyLoginCalls).isEmpty()
+        assertThat(tokenRequests).containsExactly(null, null)
+        // Rain's answer settled the registration, so the file holds nothing for a third call.
+        assertThat(preferences.all).isEmpty()
+        assertThat(second.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
     }
 
     @Test
@@ -426,8 +487,7 @@ class TurnkeyManagedProviderTest {
     @Test
     fun `managed mode forwards the contact-attach calls with the canonical contact`() = runTest {
         val turnkey = MockTurnkey()
-        // Rain's login, asked which wallet signs in with the contact, finds none: the update runs.
-        val rainApi = MockRainApiAuth().apply { login = { throw MockRainApiAuth.noWallet() } }
+        val rainApi = MockRainApiAuth()
         val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey, rainApiOverride = rainApi)
 
         provider.sendContactVerificationCode(LoginContact.Phone("+1 999-999-9999"))

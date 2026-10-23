@@ -130,6 +130,14 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   cancels the HTTP call; before, the call ran to its answer or its 10-second timeout first. An RPC
   that answers with an `error` that is not an object fails as `RainError.InternalError` instead of
   a JSON exception.
+- `confirmContactVerification` on the Rain wallet refuses a contact that already signs in to
+  another wallet of the tenant. Rain's verify now names the wallet it saved for the contact; when
+  that is another wallet, the call throws `RAIN_202` (`Unauthorized`) with the code spent and
+  nothing changed. A contact no wallet signs in with, or this wallet's own, attaches as before, and
+  a contact two saved wallets already share fails the verify with a 5xx (`RAIN_501`). In
+  `5.0.0-beta.1` such an attach went through and the contact kept opening the other account. The
+  attach still replaces an existing contact of the same kind instead of adding a second one; see
+  Known issues under `5.0.0-beta.1`.
 
 ### Changed
 
@@ -152,19 +160,18 @@ Notable changes to the Rain Android SDK, newest first. The format follows
     does), so other devices stay signed in until their sessions lapse, and a failed switch to the
     new session after a code login keeps the previous session selected, where 5.0.0-beta.1 signed
     the device out.
-  - `signUpWithPasskey` opens the passkey sheet twice. A dismissal of the second sheet arrives as
-    `RAIN_401` with the account already created, so offer `loginWithPasskey` then. When Rain's
-    answer to the sign-up was lost, could not be read or said the sign-up is still in progress
-    (`RAIN_301`, `RAIN_502`), the passkey is kept and the next call resends it without opening the
-    sheet, so Rain records the account the first call created instead of a second one; a sign-up
-    Rain answers with "already has a wallet" is `RAIN_102` naming `loginWithPasskey`.
-  - New codes on the login and attach methods: a token Rain refuses is fetched once more from
-    `authTokenProvider` and then arrives as `RAIN_202`, which a refused tenant also carries; a 404
-    from any leg but the login, a 409 and a 429 arrive as `RAIN_501`; a code request, confirm,
-    passkey sign-up or attach that cannot reach Rain, or whose `authTokenProvider` could not reach
-    your backend, arrives as `RAIN_301`, where 5.0.0-beta.1 answered `RAIN_501`; any other failure
-    of `authTokenProvider` is `RAIN_102`. The conditions per method are in the Rain wallet rows of
-    [docs/METHODS.md](docs/METHODS.md#rain-wallet-provider).
+  - `signUpWithPasskey` opens the passkey sheet once: Rain registers a device key the sign-up
+    carries on the account for a minute, and the device signs in with a login stamped by that key.
+    When the account holds no key for the device, the sheet opens again and signs in; dismissing it
+    is `RAIN_401` with the account created, so offer `loginWithPasskey`. A sign-up Rain left in
+    doubt keeps the passkey across a relaunch; the next call resends it, no sheet. "Already has a
+    wallet" is `RAIN_102` on a first send and signs in on a resend. The code per condition is in the
+    `signUpWithPasskey` row of [docs/METHODS.md](docs/METHODS.md#rain-wallet-provider).
+  - New codes on the login and attach methods: a token Rain refuses or reports as already used is fetched once
+    more from `authTokenProvider`, then arrives as `RAIN_202`, as a refused tenant does; a call that
+    cannot reach Rain or your backend behind `authTokenProvider` is `RAIN_301` (5.0.0-beta.1
+    answered `RAIN_501`); any other failure of `authTokenProvider` is `RAIN_102`. Conditions per
+    method are in the Rain wallet rows of [docs/METHODS.md](docs/METHODS.md#rain-wallet-provider).
   - Wallets are per tenant: a user known to another tenant signs up afresh in yours.
   - Accounts created under 5.0.0-beta.1 through the auth proxy are not found by Rain's login: a code
     login creates a new, empty wallet for the contact; a passkey added under 5.0.0-beta.1 still
@@ -192,19 +199,6 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   `getTransactions` falls back to leaves out sends the backend failed or rejected, on EVM and
   Solana, since nothing was broadcast. 5.0.0-beta.1 listed them as rows with the activity id as the
   hash.
-
-### Known issues
-
-- Attaching a contact another wallet in the tenant signs in with is not refused:
-  `confirmContactVerification` sets the contact on the signed-in account, and rain-api then fails
-  every code login for a contact two saved wallets share, so both wallets lose code login (a passkey
-  or the recovery phrase still opens each) until Rain ships a lookup that issues no session. The one
-  lookup Rain has today is its login, which would mint a session on the other wallet. Attach only a
-  contact of the user's own. The `5.0.0-beta.1` attach had the same gap, see Known issues there.
-- A passkey sign-up whose answer was lost keeps its passkey only for the life of the process: a
-  relaunch before the retry starts over with a new passkey and a new account, and Rain never records
-  the first one until a backend route can adopt a sub-organization the device stamps for. Retry the
-  sign-up in the same launch.
 
 ## [5.0.0-beta.1] - 2026-09-30
 
@@ -260,8 +254,9 @@ Rain plans to fix each of these in a later beta.
   adding a second one. The old contact then no longer logs in to the account. The attach also
   succeeds for an email address that already logs in to another account. That address keeps
   opening the other account, which leaves the signed-in account with no working email login.
-  Neither part is fixed in the next release; its Known issues entry above has the lockout that
-  follows. Tell users that an attach replaces their current contact.
+  The replacement is not fixed in the next release; the attach of a contact another account
+  signs in with is refused there, see Fixed under Unreleased. Tell users that an attach replaces
+  their current contact.
 - A session revoked by a login on another device keeps reading as active on the first device:
   `hasActiveSession()`, `currentAuthState()` and `currentSessionState()` report the stored
   session's local expiry until it passes, up to the session's whole lifetime, while every wallet

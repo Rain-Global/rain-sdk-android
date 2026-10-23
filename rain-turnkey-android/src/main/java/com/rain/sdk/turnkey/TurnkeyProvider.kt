@@ -227,6 +227,7 @@ class TurnkeyProvider internal constructor(
     private val contextOverride: TurnkeyContextProtocol?,
     /** Test seam for the Rain API client. */
     private val rainApiOverride: RainApiAuthClientProtocol? = null,
+    private val pendingPasskeySignupsOverride: PendingPasskeySignupStore? = null,
 ) : ProviderDescriptor {
 
     constructor(config: TurnkeyConfig) : this(config, contextOverride = null)
@@ -272,6 +273,7 @@ class TurnkeyProvider internal constructor(
                     )
                 },
                 passkeyDomain = ids.passkeyDomain,
+                pendingPasskeySignups = pendingPasskeySignupsOverride ?: SharedPreferencesPendingPasskeySignupStore(ids.application),
             )
         }
     }
@@ -517,9 +519,9 @@ class TurnkeyProvider internal constructor(
      * vendor call when no `passkeyDomain` is configured, or when the association file does not vouch
      * for this build, `RainError.UserRejected` when the sheet
      * was dismissed or the device holds no passkey for the domain, `RainError.ProviderError`
-     * for a ceremony the device or the backend refused for another reason, and
-     * `RainError.InternalError` when the backend answered the ceremony with an unusable response
-     * (no session token, an occupied session key). The session switch and the account backfill run
+     * for a ceremony the device or the backend refused for another reason or answered without a
+     * session, and `RainError.InternalError` when the session store found the session key
+     * occupied. The session switch and the account backfill run
      * after the ceremony, so a login that succeeded can still end in `RainError.TokenExpired` or
      * `RainError.Unauthorized`; a backfill failure keeps the session, which heals at resolution.
      * Managed mode only.
@@ -539,26 +541,17 @@ class TurnkeyProvider internal constructor(
     }
 
     /**
-     * Creates a new account with a passkey as its only login method and one wallet holding an
-     * Ethereum and a Solana account inside the same request, then signs it in as
-     * [loginWithPasskey] does: `authTokenProvider` is called with no contact, the passkey ceremony
-     * runs, Rain's sign-up creates the account, and a second passkey prompt signs it in. Every call
-     * mints a fresh account, so a returning user signs in with [loginWithPasskey] or a login code, or
-     * ends up with a second, empty wallet; accounts are never merged. Refused with
-     * `RainError.InvalidConfig` while a live session is stored as this device's current one, so
-     * call [logout] first when [hasActiveSession] is true: one account is signed in at a time. A
-     * stored session that has already expired is cleared first, with the `onSessionExpired` hook
-     * silent, and the sign-up proceeds. What a failure leaves behind depends on when it happened:
-     * before Rain's sign-up answered, no account exists; once it answered, the account exists and
-     * [loginWithPasskey] reaches it; when its answer was lost, could not be read or said Rain is
-     * still creating it, the passkey is kept and the next call resends it with no sheet, so Rain
-     * records that account instead of a second one, and a sign-up Rain answers with "already has a
-     * wallet" throws `RainError.InvalidConfig` naming [loginWithPasskey]; the kept passkey does not
-     * survive the process. Throws
-     * `RainError.InvalidConfig`, `RainError.UserRejected`, `RainError.Unauthorized`,
+     * Creates a new account with a passkey as its only login method and an Ethereum and a Solana
+     * account in one wallet, and signs it in with one prompt: the sheet creates the passkey, Rain
+     * registers a device key on the new account for a minute, and the SDK logs in with that key, as
+     * a code login does. When the account holds no key for this device, the sheet opens again and
+     * the passkey signs it in. Each new passkey is a new account, so a returning user signs in with
+     * [loginWithPasskey] or a login code; call [logout] first when [hasActiveSession] is true. A
+     * failure can leave an account behind; the `signUpWithPasskey` row in `docs/TURNKEY_SUPPORT.md`
+     * says when, and which code tells you.
+     * Throws `RainError.InvalidConfig`, `RainError.UserRejected`, `RainError.Unauthorized`,
      * `RainError.NetworkError`, `RainError.ProviderError`, `RainError.InternalError` or, after the
-     * ceremony, `RainError.TokenExpired`; the `signUpWithPasskey` row under *Members* in
-     * `docs/TURNKEY_SUPPORT.md` says which condition maps to which. Managed mode only.
+     * login, `RainError.TokenExpired`. Managed mode only.
      *
      * @param activity As for [loginWithPasskey].
      */
@@ -599,8 +592,8 @@ class TurnkeyProvider internal constructor(
      * deliver the code. The contact is canonicalized like a login contact (see [LoginContact]) and
      * that string is what the account stores; calling it again for the same contact replaces the
      * pending code, a call for another contact or channel retires it before anything is sent, and a
-     * login or a [logout] drops it. Accounts are never merged, and nothing checks whether another
-     * account signs in with the contact; see [confirmContactVerification]. Throws
+     * login or a [logout] drops it. Accounts are never merged; a contact another account signs in
+     * with is refused on confirm, see [confirmContactVerification]. Throws
      * `RainError.InvalidConfig` for a blank or malformed contact or a failed token provider,
      * `RainError.Unauthorized` when Rain refuses the token or the tenant, `RainError.NetworkError`
      * when Rain cannot be reached, `RainError.ProviderError` when the code request is refused, and
@@ -614,8 +607,8 @@ class TurnkeyProvider internal constructor(
     /**
      * Confirms the code from [sendContactVerificationCode] and attaches the verified contact. The
      * session is checked before the code is spent. Once the code is accepted, the account's email or
-     * phone is set to the contact under the live session; nothing checks whether another wallet in
-     * the tenant signs in with it (a known issue in the CHANGELOG). A rejected code keeps the
+     * phone is set to the contact under the live session; a contact another wallet in the tenant
+     * signs in with is refused with `RainError.Unauthorized` first, the code spent. A rejected code keeps the
      * challenge, so the user can retype it; a failure after the code was accepted drops it, so the
      * user requests a new code. Fails with `RainError.InvalidConfig`, `RainError.TokenExpired`,
      * `RainError.InvalidLoginCode`, `RainError.Unauthorized`, `RainError.NetworkError`,

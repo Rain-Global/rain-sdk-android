@@ -2,6 +2,7 @@ package com.rain.sdk.turnkey
 
 import android.app.Activity
 import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
 import com.rain.sdk.error.RainError
 import io.mockk.mockk
 import kotlinx.coroutines.CancellationException
@@ -13,10 +14,9 @@ import org.junit.Test
  * Contact attach on [TurnkeyManagedAuthController]: a wallet auth token for the new contact, a
  * code verified against Rain with a throwaway device key and without logging in, then the
  * signed-in user's email or phone set with the verification token, under a pending slot the login
- * code cannot consume and that a login or a logout drops. Nothing asks Rain whether another
- * account signs in with the contact (a known issue in the CHANGELOG), so no test here expects a
- * refusal on that ground. Vendor types stay inside method bodies (see [TurnkeyErrorMappingTest]
- * for why).
+ * code cannot consume and that a login or a logout drops. Rain's verify names the wallet the
+ * contact signs in to, when one exists: another wallet's contact is refused before anything
+ * changes. Vendor types stay inside method bodies (see [TurnkeyErrorMappingTest] for why).
  */
 class TurnkeyManagedContactAttachTest {
 
@@ -96,7 +96,6 @@ class TurnkeyManagedContactAttachTest {
             { RainApiOtpChallenge("otp-login", "b1") },
             { RainApiOtpChallenge("otp-attach", "b2") },
         )
-        rainApi.login = MockRainApiAuth.answers({ throw MockRainApiAuth.noWallet() }, { MockRainApiAuth.defaultLogin() })
         val controller = controller(turnkey, rainApi)
         controller.sendLoginCode(LoginContact.Email("login@example.com"))
         controller.sendContactVerificationCode(LoginContact.Email("attach@example.com"))
@@ -112,6 +111,41 @@ class TurnkeyManagedContactAttachTest {
 
         assertThat(rainApi.verifyOtpCalls.map { it.otpId }).containsExactly("otp-attach", "otp-login").inOrder()
         assertThat(turnkey.storeSessionCalls).hasSize(1)
+    }
+
+    @Test
+    fun `a contact another wallet signs in with is refused once the code is accepted, with nothing changed and the code spent`() =
+        runTest {
+            val turnkey = MockTurnkey()
+            val rainApi = rainApi()
+            rainApi.verifyOtp = { RainApiVerification("vt", walletSubOrganizationId = "sub-other") }
+            val controller = controller(turnkey, rainApi)
+            controller.sendContactVerificationCode(email)
+
+            val refused = expectThrows<RainError.Unauthorized> { controller.confirmContactVerification("111111") }
+
+            assertThat(refused).hasMessageThat().contains(TurnkeyManagedAuthController.CONTACT_OWNED_MESSAGE)
+            assertThat(turnkey.setUserEmailCalls).isEmpty()
+            assertThat(rainApi.verifyOtpCalls).hasSize(1)
+            // The code is spent: a retype asks for a new code instead of a second verify.
+            expectThrows<RainError.InvalidConfig> { controller.confirmContactVerification("111111") }
+            assertThat(rainApi.verifyOtpCalls).hasSize(1)
+            assertThat(hookCalls).isEqualTo(0)
+        }
+
+    @Test
+    fun `a contact this wallet signs in with, or none, attaches`() = runTest {
+        listOf("this wallet" to MockTurnkey.defaultSession().organizationId, "no wallet" to null).forEach { (name, owner) ->
+            val turnkey = MockTurnkey()
+            val rainApi = rainApi()
+            rainApi.verifyOtp = { RainApiVerification("vt-$name", walletSubOrganizationId = owner) }
+            val controller = controller(turnkey, rainApi)
+            controller.sendContactVerificationCode(email)
+
+            controller.confirmContactVerification("111111")
+
+            assertWithMessage(name).that(turnkey.setUserEmailCalls.single().verificationToken).isEqualTo("vt-$name")
+        }
     }
 
     @Test
@@ -249,8 +283,8 @@ class TurnkeyManagedContactAttachTest {
             assertThat(set.contact).isEqualTo("user@example.com")
             assertThat(set.verificationToken).isEqualTo("vt-attach")
             assertThat(turnkey.setUserPhoneNumberCalls).isEmpty()
-            // No login and no signature: the attach asks Rain nothing about the contact's owner, and the
-            // live session is untouched. The slot is spent.
+            // No login and no signature: the owner check reads the verify answer, so nothing else is asked of
+            // Rain, and the live session is untouched. The slot is spent.
             assertThat(rainApi.loginCalls).isEmpty()
             assertThat(turnkey.loginSignatureCalls).isEmpty()
             assertThat(turnkey.storeSessionCalls).isEmpty()

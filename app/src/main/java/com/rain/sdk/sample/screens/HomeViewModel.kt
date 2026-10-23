@@ -936,13 +936,16 @@ class HomeViewModel(
     /**
      * A passkey flow's failure. A closed sheet or a refused request never reached a login, so the
      * previous owner still owns whatever session is live; on a sign-up the closed sheet may have
-     * been the second one, after Rain created the account, which the error cannot tell from the
-     * first, so the status points at *Sign in with passkey*. When the login went through and a
-     * later step failed, the session is live and the sample carries on signed in, as after a code.
-     * Otherwise whose session is live is unknown, so the owner stays unrecorded and the user signs
-     * in again; a sign-up whose answer was lost, unreadable or refused after the account was
-     * created may have left one, so that status points at *Sign in with passkey* too, ahead of a
-     * second sign-up that would mint a second account.
+     * been the sign-in sheet that opens after Rain answered, when the account holds no key for
+     * this device, which the error cannot tell from the ceremony's sheet, so the status points at
+     * *Sign in with passkey*. When the login went through and a later step failed, the session is
+     * live and the sample carries on signed in, as after a code. Otherwise whose session is live
+     * is unknown, so the owner stays unrecorded and the user signs in again; a sign-up whose
+     * answer was lost, unreadable or refused after the account was created may have left one, so
+     * that status points at *Sign in with passkey* too. When Rain's answer to the sign-up was lost
+     * or unreadable, the registration is kept and the next sign-up resends it instead of minting a
+     * second account; a failure after Rain answered with the account leaves it settled, so a
+     * second sign-up then mints another.
      */
     @Suppress("LongParameterList") // one value per thing the status depends on; the flow's kind is the sixth
     private fun onRainWalletPasskeyFailed(
@@ -960,7 +963,7 @@ class HomeViewModel(
                 restoreRainWalletOwner(previousOwner)
                 val status = when {
                     e !is RainError.UserRejected -> "$label refused ($code)"
-                    signUp -> "Passkey sheet closed ($code); if it was the second sheet the account exists: try Sign in with passkey"
+                    signUp -> "Passkey sheet closed ($code); if Rain answered the sign-up, the account exists and Sign in with passkey reaches it"
                     else -> "Passkey sheet closed ($code), no passkey used"
                 }
                 _state.update { it.copy(statusText = status) }
@@ -1097,8 +1100,8 @@ class HomeViewModel(
      * account by code; the contact goes into its owner slot, so a code login for it reuses the live
      * session. A rejected code keeps the challenge; a refused update leaves the slot as it was; any
      * other failure restarts from "Send verification code", which replaces a challenge the SDK
-     * kept. The SDK does not check whether another account signs in with the contact (a known
-     * issue in the CHANGELOG), so attach only a contact of this user's own.
+     * kept. A contact another account signs in with is refused (`RAIN_202`) and the status shows
+     * the reason.
      */
     fun confirmRainWalletAttach() {
         val s = _state.value
@@ -1125,8 +1128,8 @@ class HomeViewModel(
                     it.copy(rainWalletAttachCode = "", statusText = "That code was not accepted; check it and try again")
                 }
             } catch (e: RainError.Unauthorized) {
-                // Rain refused the token or the tenant, or the backend refused the update. The code
-                // is spent either way, and the slot is untouched.
+                // Rain refused the token or the tenant, the contact signs in to another account, or
+                // the backend refused the update. The code is spent either way, and the slot is untouched.
                 SampleLog.w("RainWallet.attach", "attach refused ${e.describe()}")
                 _state.update {
                     it.copy(
