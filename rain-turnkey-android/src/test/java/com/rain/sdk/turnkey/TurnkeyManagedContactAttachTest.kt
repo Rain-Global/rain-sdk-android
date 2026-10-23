@@ -96,7 +96,6 @@ class TurnkeyManagedContactAttachTest {
             { RainApiOtpChallenge("otp-login", "b1") },
             { RainApiOtpChallenge("otp-attach", "b2") },
         )
-        rainApi.login = MockRainApiAuth.answers({ throw MockRainApiAuth.noWallet() }, { MockRainApiAuth.defaultLogin() })
         val controller = controller(turnkey, rainApi)
         controller.sendLoginCode(LoginContact.Email("login@example.com"))
         controller.sendContactVerificationCode(LoginContact.Email("attach@example.com"))

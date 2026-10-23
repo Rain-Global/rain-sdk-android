@@ -492,8 +492,7 @@ class TurnkeyManagedProviderTest {
     @Test
     fun `managed mode forwards the contact-attach calls with the canonical contact`() = runTest {
         val turnkey = MockTurnkey()
-        // Rain's login, asked which wallet signs in with the contact, finds none: the update runs.
-        val rainApi = MockRainApiAuth().apply { login = { throw MockRainApiAuth.noWallet() } }
+        val rainApi = MockRainApiAuth()
         val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey, rainApiOverride = rainApi)
 
         provider.sendContactVerificationCode(LoginContact.Phone("+1 999-999-9999"))

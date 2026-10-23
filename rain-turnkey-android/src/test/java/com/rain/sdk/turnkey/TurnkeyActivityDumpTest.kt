@@ -154,8 +154,7 @@ class TurnkeyActivityDumpTest {
         turnkey.setUserContactError = attachingEmail(email, token)
         val controller = TurnkeyManagedAuthController(
             context = turnkey,
-            // Rain's login, asked which wallet signs in with the contact, finds none: the update runs.
-            rainApi = MockRainApiAuth().apply { login = { throw MockRainApiAuth.noWallet() } },
+            rainApi = MockRainApiAuth(),
             authTokenProvider = { "wat_1" },
             coordinator = TurnkeySessionCoordinator(turnkey = turnkey, onSessionExpired = {}, retryDelay = { }),
             configure = { null },

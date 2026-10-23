@@ -130,9 +130,6 @@ internal object TurnkeyErrorMapping {
      *  - Config/setup-style errors (missing rpId, missing config param, client not initialized,
      *    invalid parameter / message / refresh TTL / response, OAuth state mismatch, key already
      *    exists / not found) → InternalError
-     *  - FailedToInitOtp (a failed code request through the vendor's own auth proxy, which this
-     *    module's managed login no longer uses) → ProviderError whatever the status: no session
-     *    exists yet, so 401/403 cannot mean an expired session or a permission problem
      *  - FailedToLoginWithPasskey / FailedToSignUpWithPasskey → by the innermost cause, see
      *    [mapPasskeyCeremonyFailure]
      *  - Wrapper errors with an underlying cause → recurse / classify the cause's vendor prose
@@ -162,20 +159,6 @@ internal object TurnkeyErrorMapping {
             // Manager exception, the HTTP failure or the nested vendor error it carries does.
             is TurnkeyKotlinError.FailedToLoginWithPasskey,
             is TurnkeyKotlinError.FailedToSignUpWithPasskey -> return mapPasskeyCeremonyFailure(e)
-
-            // A failed code request: the auth proxy refused or never answered /v1/otp_init_v2. No
-            // session exists while a code is being requested, so a 401 or 403 here cannot mean an
-            // expired session or a missing permission; the HTTP-status mapping below would turn them
-            // into TokenExpired or Unauthorized and send the host to re-authenticate a user who is
-            // not signed in. The reason (the channel not enabled on the proxy configuration, an
-            // undeliverable number, a rate limit) is in the response body the Kotlin SDK drops, so
-            // only the status survives in the message. A wrapped vendor error keeps its own
-            // classification (a client that is not initialized is still a setup problem).
-            is TurnkeyKotlinError.FailedToInitOtp -> {
-                val wrapped = e.cause
-                if (wrapped is TurnkeyKotlinError) return mapTurnkeyError(wrapped)
-                return RainError.ProviderError(e)
-            }
 
             else -> Unit // fall through to cause inspection
         }
@@ -210,8 +193,7 @@ internal object TurnkeyErrorMapping {
      *  - no passkey provider on the device → ProviderError, with the dependency named in the log
      *  - a nested vendor error (`FailedToCreateSession(KeyAlreadyExists)`, `InvalidResponse`, ...) → its own rule
      *  - an HTTP failure, whatever the status → ProviderError: no session exists during a passkey
-     *    login or sign-up, so 401 and 403 cannot mean an expired session or a permission problem,
-     *    the `FailedToInitOtp` rule
+     *    login or sign-up, so 401 and 403 cannot mean an expired session or a permission problem
      *  - any other Credential Manager exception (interrupted, unsupported, unknown, no create option,
      *    any other DOM error) → ProviderError
      *  - nothing recognisable → the shared prose rules over the whole message, then ProviderError

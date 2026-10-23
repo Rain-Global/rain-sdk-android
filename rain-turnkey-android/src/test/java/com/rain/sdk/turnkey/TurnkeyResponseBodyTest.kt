@@ -43,7 +43,6 @@ class TurnkeyResponseBodyTest {
         val http = RuntimeException("HTTP error calling ACTIVITY_TYPE_STAMP_LOGIN request\nError: {\"code\":13}\nCode: 500")
         val routes = listOf(
             mapping.map(http),
-            mapping.map(TurnkeyKotlinError.FailedToInitOtp(http)),
             mapping.map(TurnkeyKotlinError.FailedToLoginWithOtp(http)),
             mapping.map(TurnkeyKotlinError.FailedToCreateSession(http)),
         )
