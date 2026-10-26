@@ -1,5 +1,6 @@
 package com.rain.sdk.turnkey
 
+import android.content.SharedPreferences
 import com.rain.sdk.internal.network.chainreader.ChainReader
 import com.rain.sdk.internal.network.chainreader.EvmChainReader
 import com.rain.sdk.internal.network.chainreader.JsonRpcClient
@@ -123,4 +124,81 @@ internal fun turnkeyWalletProvider(
         tokenStore = tokenStore ?: TokenMetadataStore(evmReader),
         registryReadTimeoutMs = registryReadTimeoutMs,
     )
+}
+
+/**
+ * `SharedPreferences` over a map, for what [SharedPreferencesPendingPasskeySignupStore] calls:
+ * `getString`, `edit().putString(...).apply()` and `edit().remove(...).apply()`, plus `all` for the
+ * assertions. An edit lands when applied or committed. Every other member refuses, so a store that
+ * starts reading or writing another type fails here instead of reading a default. One instance
+ * stands in for one preferences file: hand the same one to two stores, or to two providers through
+ * a stubbed `Application.getSharedPreferences`, to model a relaunch.
+ */
+@Suppress("TooManyFunctions") // one override per member of the platform interface
+internal class FakeSharedPreferences : SharedPreferences {
+    private val values = mutableMapOf<String, String>()
+
+    override fun getAll(): Map<String, *> = values.toMap()
+
+    override fun getString(key: String, defValue: String?): String? = values[key] ?: defValue
+
+    override fun edit(): SharedPreferences.Editor = Editor()
+
+    override fun contains(key: String): Boolean = refuse()
+
+    override fun getStringSet(key: String, defValues: Set<String>?): Set<String>? = refuse()
+
+    override fun getInt(key: String, defValue: Int): Int = refuse()
+
+    override fun getLong(key: String, defValue: Long): Long = refuse()
+
+    override fun getFloat(key: String, defValue: Float): Float = refuse()
+
+    override fun getBoolean(key: String, defValue: Boolean): Boolean = refuse()
+
+    override fun registerOnSharedPreferenceChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
+        refuse()
+    }
+
+    override fun unregisterOnSharedPreferenceChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
+        refuse()
+    }
+
+    private fun refuse(): Nothing = throw UnsupportedOperationException("the store reads and writes one string under one key")
+
+    /** Collects puts and removes, and lands them on `apply` or `commit`; a null put is a remove. */
+    private inner class Editor : SharedPreferences.Editor {
+        private val puts = mutableMapOf<String, String?>()
+
+        override fun putString(key: String, value: String?): SharedPreferences.Editor {
+            puts[key] = value
+            return this
+        }
+
+        override fun remove(key: String): SharedPreferences.Editor {
+            puts[key] = null
+            return this
+        }
+
+        override fun commit(): Boolean {
+            apply()
+            return true
+        }
+
+        override fun apply() {
+            puts.forEach { (key, value) -> if (value == null) values.remove(key) else values[key] = value }
+        }
+
+        override fun clear(): SharedPreferences.Editor = refuse()
+
+        override fun putStringSet(key: String, set: Set<String>?): SharedPreferences.Editor = refuse()
+
+        override fun putInt(key: String, value: Int): SharedPreferences.Editor = refuse()
+
+        override fun putLong(key: String, value: Long): SharedPreferences.Editor = refuse()
+
+        override fun putFloat(key: String, value: Float): SharedPreferences.Editor = refuse()
+
+        override fun putBoolean(key: String, value: Boolean): SharedPreferences.Editor = refuse()
+    }
 }

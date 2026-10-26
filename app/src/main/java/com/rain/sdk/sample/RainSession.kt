@@ -14,6 +14,7 @@ import com.rain.sdk.turnkey.TurnkeyProvider
 import com.rain.sdk.wallet.RainProvider
 import com.rain.sdk.wallet.RainWalletAuthState
 import com.rain.sdk.wallet.RainWalletConfig
+import com.rain.sdk.wallet.RainWalletContact
 import com.rain.sdk.wallet.RainWalletSessionPolicy
 import com.turnkey.core.TurnkeyContext
 import io.portalhq.android.Portal
@@ -162,6 +163,16 @@ class RainSession {
     fun requireRainApi(): RainApiClient = rainApi ?: error(RAIN_API_CREDENTIALS_REQUIRED)
 
     /**
+     * The demo's `RainWalletConfig.authTokenProvider`: a wallet auth token minted through
+     * [requireRainApi] for the contact the SDK names. Without the Api-Key and user ID from Home
+     * the mint throws, and the SDK reports it as `RainError.InvalidConfig` naming
+     * `IllegalStateException`.
+     */
+    fun walletAuthTokenProvider(): suspend (RainWalletContact?) -> String = { contact ->
+        requireRainApi().mintWalletAuthToken(contact).token
+    }
+
+    /**
      * The user's collateral contract for [chain], picked by [match] (see [CollateralContractMatch]),
      * with each token's name, symbol and decimals resolved by the SDK from its address. A token the
      * SDK cannot resolve, or a contract on a chain this build has no RPC endpoint for, keeps null
@@ -286,9 +297,9 @@ class RainSession {
 
     /**
      * Creates the Rain wallet provider. The SDK owns the wallet backend's configuration, the
-     * one-time-code flow, email or SMS, and the passkey flows from here on. The previous provider is retired first,
-     * whether or not it was built into an SDK: two providers must never share the process-wide
-     * wallet backend. Session expiry is reported through [expiredProvider].
+     * one-time-code flow, email or SMS, and the passkey flows from here on. The previous provider
+     * is retired first, whether or not it was built into an SDK: two providers must never share
+     * the process-wide wallet backend. Session expiry is reported through [expiredProvider].
      */
     fun prepareRainWallet(application: Application): RainProvider {
         val previous = rainWalletProvider
@@ -304,6 +315,8 @@ class RainSession {
         val provider = RainProvider(
             application,
             RainWalletConfig(
+                authTokenProvider = walletAuthTokenProvider(),
+                environment = SampleEnvironment.rainWallet,
                 sessionPolicy = RainWalletSessionPolicy(),
                 onSessionExpired = { expiredProvider.tryEmit(SessionStore.Provider.RainWallet) },
                 sponsorGas = true,

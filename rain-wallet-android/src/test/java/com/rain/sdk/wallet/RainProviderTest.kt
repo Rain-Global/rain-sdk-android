@@ -99,6 +99,8 @@ class RainProviderTest {
             maxRetryDelayMs = 4_001,
         )
         val mapped = RainWalletConfig(
+            authTokenProvider = { "wat" },
+            environment = RainWalletEnvironment.Sandbox,
             sessionPolicy = policy,
             onSessionExpired = hook,
             sponsorGas = false,
@@ -108,8 +110,8 @@ class RainProviderTest {
         // No address override exists on the Rain wallet, so the backing always resolves the
         // provisioned Ethereum account.
         assertThat(mapped.walletAddress).isNull()
-        assertThat(mapped.managedOrganizationId).isEqualTo(RainWalletBackend.ORGANIZATION_ID)
-        assertThat(mapped.managedAuthProxyConfigId).isEqualTo(RainWalletBackend.AUTH_CONFIG_ID)
+        assertThat(mapped.managedOrganizationId).isEqualTo(RainWalletBackend.SANDBOX_ORGANIZATION_ID)
+        assertThat(mapped.managedRainApiBaseUrl).isEqualTo(RainWalletBackend.SANDBOX_API_BASE_URL)
         assertThat(mapped.onSessionExpired).isSameInstanceAs(hook)
         assertThat(mapped.sponsorGas).isFalse()
         assertThat(mapped.managedPasskeyDomain).isEqualTo("passkeys.example.com")
@@ -336,8 +338,10 @@ class RainProviderTest {
     fun `the public constructor yields the Rain id and the backing capabilities`() {
         useRealBacking()
 
-        val sponsored = RainProvider(mockk<Application>(), RainWalletConfig(sponsorGas = true))
-        val unsponsored = RainProvider(mockk<Application>(), RainWalletConfig(sponsorGas = false))
+        val sandbox = RainWalletEnvironment.Sandbox
+        val application = mockk<Application>()
+        val sponsored = RainProvider(application, RainWalletConfig(authTokenProvider = { "wat" }, environment = sandbox, sponsorGas = true))
+        val unsponsored = RainProvider(application, RainWalletConfig(authTokenProvider = { "wat" }, environment = sandbox, sponsorGas = false))
         try {
             assertThat(sponsored.id).isEqualTo(ProviderId.RAIN)
             assertThat(sponsored.capabilities).containsExactly(

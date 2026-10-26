@@ -1,22 +1,25 @@
 package com.rain.sdk.turnkey
 
 import android.app.Activity
+import com.rain.sdk.error.RainError
 import com.turnkey.core.TurnkeyContext
+import com.turnkey.core.internal.utils.ClientSignature
 import com.turnkey.core.models.AuthState
-import com.turnkey.core.models.CreateSubOrgParams
-import com.turnkey.core.models.CustomWallet
-import com.turnkey.core.models.OtpType
+import com.turnkey.core.models.ClientSignaturePayload
 import com.turnkey.core.models.Session
+import com.turnkey.core.models.SessionStorage
 import com.turnkey.core.models.Wallet
 import com.turnkey.core.models.errors.TurnkeyKotlinError
-import com.turnkey.core.models.otpTypeToFilterTypeMap
 import com.turnkey.crypto.decryptExportBundle
+import com.turnkey.crypto.encryptOtpCodeToBundle
 import com.turnkey.crypto.generateP256KeyPair
 import com.turnkey.crypto.models.KeyFormat
 import com.turnkey.http.TurnkeyClient
+import com.turnkey.http.utils.TurnkeyHttpError
 import com.turnkey.passkey.PasskeyUser
 import com.turnkey.passkey.createPasskey
-import com.turnkey.types.ProxyTGetAccountBody
+import com.turnkey.stamper.Stamper
+import com.turnkey.stamper.utils.SignatureFormat
 import com.turnkey.types.TCreateAuthenticatorsBody
 import com.turnkey.types.TCreateWalletAccountsBody
 import com.turnkey.types.TEthSendTransactionBody
@@ -36,6 +39,8 @@ import com.turnkey.types.TListEthTransactionHistoryResponse
 import com.turnkey.types.TListSolTransactionHistoryBody
 import com.turnkey.types.TListSolTransactionHistoryResponse
 import com.turnkey.types.TSolSendTransactionBody
+import com.turnkey.types.TStampLoginBody
+import com.turnkey.types.TStampLoginResponse
 import com.turnkey.types.TUpdateUserEmailBody
 import com.turnkey.types.TUpdateUserPhoneNumberBody
 import com.turnkey.types.V1Activity
@@ -54,6 +59,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import timber.log.Timber
+import java.io.IOException
 import java.util.UUID
 
 /**
@@ -116,15 +122,16 @@ internal interface TurnkeyClientProtocol {
 }
 
 /**
- * The channel a one-time code travels on. Module-owned so the vendor's enum stays inside the
- * adapter; [toVendorOtpType] is the only mapping.
+ * The channel a one-time code travels on. Module-owned: Rain's endpoints read the channel off the
+ * wallet auth token's contact, and the sign-up names the account's email or phone number by it,
+ * so no vendor enum crosses this module for it.
  */
 internal enum class OtpChannel { EMAIL, SMS }
 
 /**
- * An in-flight one-time code: the id and the TEE-signed encryption bundle from `initOtp`, plus the
- * channel the code was issued on, which the completion repeats because the vendor looks the account
- * up by it. Module-owned so test doubles never construct the vendor's result type.
+ * An in-flight one-time code: the id and the enclave-signed encryption bundle `POST /otp/init`
+ * answered with, plus the channel the code was issued on, which the sign-up names the account's
+ * contact by. Module-owned so test doubles never construct the client's answer type.
  */
 internal data class OtpChallenge(val otpId: String, val encryptionTargetBundle: String, val channel: OtpChannel)
 
@@ -165,29 +172,62 @@ internal interface TurnkeyContextProtocol {
         hashFunction: V1HashFunction
     ): V1SignRawPayloadResult
 
-    // ---- Managed authentication (email or SMS OTP through Turnkey's auth proxy) ----
+    // ---- Managed authentication: the vendor's device primitives around Rain's embedded-wallet endpoints ----
 
     /** Suspends until the vendor singleton has initialized and restored any persisted session. */
     suspend fun awaitReady()
 
-    /** Starts a one-time code for [contact] on [channel]; the returned challenge completes it. */
-    suspend fun sendOtp(contact: String, channel: OtpChannel): OtpChallenge
+    /**
+     * A fresh P-256 key pair in the vendor's keystore, as its compressed public key; the vendor's
+     * `createKeyPair`. The managed login creates one per attempt: the typed code is encrypted to
+     * Rain with it, the verification token Rain answers with is bound to it, and the session
+     * `POST /login` issues stamps with it.
+     */
+    suspend fun createDeviceKey(): String
+
+    /** Removes the key pair [publicKey] from the vendor's keystore; the vendor's `deleteKeyPair`. */
+    suspend fun deleteDeviceKey(publicKey: String)
 
     /**
-     * Completes the [challenge] from [sendOtp] with the user's code (sign-up or login, the vendor
-     * decides) on the channel the challenge was issued on, and stores the new session under
-     * [sessionKey]. [contact] must be the string [sendOtp] was given. On the sign-up path [signupWallet]
-     * is created inside the same request as the organization, so a new account never exists
-     * without its wallet; the login path ignores it. Fixed arity and a distinct name so it cannot
-     * collide with the vendor's defaulted overloads.
+     * The typed [code] encrypted to the enclave bundle a code request answered with, carrying the
+     * device key [publicKey] inside the ciphertext: the body `POST /otp/verify` takes. The vendor's
+     * `encryptOtpCodeToBundle`, which checks the bundle's enclave signature first.
      */
-    suspend fun completeOtp(
-        challenge: OtpChallenge,
-        otpCode: String,
-        contact: String,
-        sessionKey: String,
-        signupWallet: TurnkeyWalletSpec,
-    )
+    suspend fun encryptOtpCode(code: String, encryptionTargetBundle: String, publicKey: String): String
+
+    /**
+     * The client signature `POST /login` takes: the vendor's login message for [verificationToken],
+     * signed raw with the device key the token is bound to. The vendor's `ClientSignature.forLogin`
+     * and `Stamper.fromPublicKey(...).sign(format = raw)`.
+     */
+    suspend fun clientSignatureForLogin(verificationToken: String): RainApiClientSignature
+
+    /**
+     * The client signature `POST /signup` takes: the vendor's sign-up message for
+     * [verificationToken], naming [contact] as the root user's email or phone number by [channel]
+     * with empty API-key, authenticator and OAuth-provider lists, signed raw with the bound device
+     * key. The lists are explicit and empty because the root user Rain creates carries `[]` for each
+     * and the vendor's serializer omits nulls, so the signed message has to say `[]` too.
+     */
+    suspend fun clientSignatureForSignUp(verificationToken: String, contact: String, channel: OtpChannel): RainApiClientSignature
+
+    /**
+     * Stores the session [jwt] `POST /login` answered with under [sessionKey]; the vendor's
+     * `createSession`. The vendor selects it itself only when no session is selected, and that
+     * select refreshes the user and the wallets over the network before this returns, so a failure
+     * there leaves the session stored and selected; over a live session the caller switches.
+     * Rejects only a duplicate key. [selectedSessionKey] tells the caller what a failure left.
+     */
+    suspend fun storeSession(jwt: String, sessionKey: String)
+
+    /**
+     * Turnkey's `stampLogin` on [organizationId], stamped with the device key [publicKey] and binding
+     * the session to [sessionPublicKey], a fresh key of the device's the caller made: the session JWT
+     * for [storeSession], or null when Turnkey refused the stamp (no API key for [publicKey] on the
+     * organization) or answered the login activity without a session. Revokes the user's other
+     * sessions. A transport failure is [RainError.NetworkError]; the rest leaves as thrown.
+     */
+    suspend fun stampLoginWithDeviceKey(publicKey: String, sessionPublicKey: String, organizationId: String): String?
 
     /** The key of the session the vendor currently treats as selected, or null when none is. */
     val selectedSessionKey: String?
@@ -210,30 +250,17 @@ internal interface TurnkeyContextProtocol {
     // ---- Passkeys (managed mode) ----
 
     /**
-     * Signs an existing user in with a passkey bound to the relying-party domain of the one-shot
-     * configuration, through the system passkey sheet
-     * presented from [activity], and stores the session under [sessionKey]. Revokes the user's
-     * other sessions server-side. The vendor selects the new session itself only when none is
-     * selected; over a live session the caller switches. On return, success or failure, the vendor
-     * deletes every stored device key no session references. Suspends for the whole ceremony.
+     * Signs a user in with a passkey bound to the relying-party domain of the one-shot
+     * configuration, through the system passkey sheet presented from [activity], and stores the
+     * session under [sessionKey]. [organizationId] is the organization the login is stamped on:
+     * null for the configured parent organization, or the sub-organization id
+     * `POST /signup/passkey` just answered with, so the login lands on the account the sign-up
+     * created. Revokes the user's other sessions server-side. The vendor selects the new session
+     * itself only when none is selected; over a live session the caller switches. On return,
+     * success or failure, the vendor deletes every stored device key no session references.
+     * Suspends for the whole ceremony.
      */
-    suspend fun completePasskeyLogin(activity: Activity, sessionKey: String)
-
-    /**
-     * Creates a new organization whose root user holds a passkey bound to the relying-party domain
-     * of the one-shot configuration, named
-     * [passkeyName], with [signupWallet] created inside the same request, then logs in and stores
-     * the session under [sessionKey]. The vendor swaps its process-wide client for a temporary-key
-     * client for the whole call and restores it only by selecting the new session, which it does
-     * only when none is selected: never run this while a session is selected. Same key cleanup as
-     * [completePasskeyLogin].
-     */
-    suspend fun completePasskeySignUp(
-        activity: Activity,
-        sessionKey: String,
-        passkeyName: String,
-        signupWallet: TurnkeyWalletSpec,
-    )
+    suspend fun completePasskeyLogin(activity: Activity, sessionKey: String, organizationId: String?)
 
     /**
      * Runs the passkey creation ceremony for [rpId] on [activity], naming the passkey [name] in the
@@ -251,26 +278,12 @@ internal interface TurnkeyContextProtocol {
      */
     suspend fun registerAuthenticator(organizationId: String, userId: String, name: String, registration: PasskeyRegistration)
 
-    // ---- Contact attach (verify a code without logging in, then set the user's contact) ----
+    // ---- Contact attach (a code verified against Rain without logging in, then the user's contact set) ----
 
     /**
-     * Verifies [otpCode] against [challenge] and returns the verification token, without logging
-     * in. Never binds the token to the live session's key: the vendor deletes the bound key on any
-     * failure. The throwaway key it binds instead is deleted before this returns.
+     * Sets the email of user [userId] on [organizationId]; [verificationToken], the token
+     * `POST /otp/verify` answered with for a code sent to that email, marks it verified.
      */
-    suspend fun verifyOtpToken(challenge: OtpChallenge, otpCode: String): String
-
-    /**
-     * The sub-organization whose user signs in with [contact] on [channel], or null when none does:
-     * the auth proxy's Get Account, `POST /v1/account`, filtered by `EMAIL` or `PHONE_NUMBER`. The
-     * proxy requires the [verificationToken] from [verifyOtpToken] to look an email or phone number
-     * up, and the token stays usable afterwards (`TurnkeyContext.loginOrSignUpWithOtp` in sdk-kotlin
-     * 2.1.0 looks the account up with it and then logs in or signs up with the same token). No
-     * session stamps the call.
-     */
-    suspend fun lookupContactOwner(channel: OtpChannel, contact: String, verificationToken: String): String?
-
-    /** Sets the email of user [userId] on [organizationId]; [verificationToken] marks it verified. */
     suspend fun setUserEmail(organizationId: String, userId: String, email: String, verificationToken: String)
 
     /** Sets the phone number, E.164, of user [userId] on [organizationId]; [verificationToken] marks it verified. */
@@ -291,10 +304,39 @@ internal interface TurnkeyContextProtocol {
     suspend fun exportAccountPrivateKeyHex(address: String): String
 }
 
-/** The one place the module's channel meets the vendor's enum. */
-internal fun OtpChannel.toVendorOtpType(): OtpType = when (this) {
-    OtpChannel.EMAIL -> OtpType.OTP_TYPE_EMAIL
-    OtpChannel.SMS -> OtpType.OTP_TYPE_SMS
+/** The statuses Turnkey answers a stamp it does not accept with; a 5xx is Turnkey failing, not refusing. */
+private val TURNKEY_REFUSED_STAMP = 400..499
+
+/**
+ * The stamp-login body binding the session to [sessionPublicKey] on [organizationId], a fresh key of
+ * the device's: the vendor's default lifetime, the user's other sessions revoked.
+ */
+internal fun deviceKeyStampLoginBody(sessionPublicKey: String, organizationId: String): TStampLoginBody = TStampLoginBody(
+    organizationId = organizationId,
+    publicKey = sessionPublicKey,
+    expirationSeconds = SessionStorage.DEFAULT_EXPIRATION_SECONDS,
+    invalidateExisting = true,
+)
+
+/**
+ * Runs [stamp]: the session it answered; null for a refused stamp (a 4xx) or a login activity
+ * without a session; [RainError.NetworkError], named by class only, for a transport failure; the
+ * rest as thrown, for the mapper.
+ */
+// The generated client reports a non-2xx as a RuntimeException; a refusal is an answer here, not an error.
+@Suppress("TooGenericExceptionCaught", "SwallowedException")
+internal suspend fun stampLoginSessionOrNull(stamp: suspend () -> TStampLoginResponse): String? = try {
+    stamp().result.session
+} catch (e: CancellationException) {
+    throw e
+} catch (e: TurnkeyHttpError.ActivityNotCompleted) {
+    null
+} catch (e: IOException) {
+    throw RainError.NetworkError("Turnkey stamp login: ${e.javaClass.simpleName}", e)
+} catch (e: RuntimeException) {
+    val status = TurnkeyErrorMapping.turnkeyHttpStatus(e)
+    if (status == null || status !in TURNKEY_REFUSED_STAMP) throw e
+    null
 }
 
 /**
@@ -366,37 +408,57 @@ internal class TurnkeyContextAdapter(
 
     override suspend fun awaitReady() = context.awaitReady()
 
-    override suspend fun sendOtp(contact: String, channel: OtpChannel): OtpChallenge {
-        val result = context.initOtp(otpType = channel.toVendorOtpType(), contact = contact)
-        return OtpChallenge(
-            otpId = result.otpId,
-            encryptionTargetBundle = result.otpEncryptionTargetBundle,
-            channel = channel,
-        )
+    // The key pair, the code's encryption, the signatures and the session store all run the
+    // vendor's keystore and crypto on the calling thread, and hosts call from the main thread.
+    override suspend fun createDeviceKey(): String = withContext(ioDispatcher) { context.createKeyPair() }
+
+    override suspend fun deleteDeviceKey(publicKey: String) {
+        withContext(ioDispatcher) { context.deleteKeyPair(publicKey = publicKey) }
     }
 
-    override suspend fun completeOtp(
-        challenge: OtpChallenge,
-        otpCode: String,
+    override suspend fun encryptOtpCode(code: String, encryptionTargetBundle: String, publicKey: String): String =
+        withContext(ioDispatcher) {
+            encryptOtpCodeToBundle(otpCode = code, otpEncryptionTargetBundle = encryptionTargetBundle, publicKey = publicKey)
+        }
+
+    override suspend fun clientSignatureForLogin(verificationToken: String): RainApiClientSignature =
+        withContext(ioDispatcher) { ClientSignature.forLogin(verificationToken).signed() }
+
+    override suspend fun clientSignatureForSignUp(
+        verificationToken: String,
         contact: String,
-        sessionKey: String,
-        signupWallet: TurnkeyWalletSpec,
-    ) {
-        context.loginOrSignUpWithOtp(
-            otpId = challenge.otpId,
-            otpCode = otpCode,
-            otpEncryptionTargetBundle = challenge.encryptionTargetBundle,
-            contact = contact,
-            otpType = challenge.channel.toVendorOtpType(),
-            // Revokes this user's other Turnkey sessions server-side on a successful login; a
-            // rejected code never reaches this point.
-            invalidateExisting = true,
-            sessionKey = sessionKey,
-            // Sign-up only (the vendor ignores it on login); the vendor fills in the contact and
-            // the verification token.
-            createSubOrgParams = signupWallet.toSignupParams(),
-        )
+        channel: OtpChannel,
+    ): RainApiClientSignature = withContext(ioDispatcher) {
+        ClientSignature.forSignUp(
+            verificationToken = verificationToken,
+            email = contact.takeIf { channel == OtpChannel.EMAIL },
+            phoneNumber = contact.takeIf { channel == OtpChannel.SMS },
+            apiKeys = emptyList(),
+            authenticators = emptyList(),
+            oauthProviders = emptyList(),
+        ).signed()
     }
+
+    /**
+     * The vendor's own signing steps (sdk-kotlin 2.1.0 `TurnkeyContext.loginWithOtp`): the message's
+     * public key is the device key the verification token is bound to, and the signature is that
+     * key's raw P-256 signature over the message. The scheme is pinned in [RainApiClientSignature].
+     */
+    private fun ClientSignaturePayload.signed(): RainApiClientSignature {
+        val signature = Stamper.fromPublicKey(clientSignaturePublicKey).sign(payload = message, format = SignatureFormat.raw)
+        return RainApiClientSignature(publicKey = clientSignaturePublicKey, message = message, signature = signature)
+    }
+
+    override suspend fun storeSession(jwt: String, sessionKey: String) {
+        withContext(ioDispatcher) { context.createSession(jwt = jwt, sessionKey = sessionKey) }
+    }
+
+    // The vendor's passkey-login client with the device key as the stamper; the API host is the vendor's default.
+    override suspend fun stampLoginWithDeviceKey(publicKey: String, sessionPublicKey: String, organizationId: String): String? =
+        withContext(ioDispatcher) {
+            val client = TurnkeyClient(stamper = Stamper.fromPublicKey(publicKey), organizationId = organizationId)
+            stampLoginSessionOrNull { client.stampLogin(deviceKeyStampLoginBody(sessionPublicKey, organizationId)) }
+        }
 
     override val selectedSessionKey: String?
         get() = context.selectedSessionKey.value
@@ -440,34 +502,18 @@ internal class TurnkeyContextAdapter(
     // and rewrite its stores on the calling thread, as refreshSession's vendor call does, and hosts
     // call from the main thread. The credential sheet is launched through the Activity and needs no
     // main-thread caller.
-    override suspend fun completePasskeyLogin(activity: Activity, sessionKey: String) {
+    override suspend fun completePasskeyLogin(activity: Activity, sessionKey: String, organizationId: String?) {
         withContext(ioDispatcher) {
             context.loginWithPasskey(
                 activity = activity,
                 sessionKey = sessionKey,
-                // Revokes this user's other Turnkey sessions server-side on a successful login, the
-                // same rule as the code login; a refused passkey never reaches this point. The
-                // relying party comes from the one-shot configuration's authConfig.
-                invalidateExisting = true,
-            )
-        }
-    }
-
-    override suspend fun completePasskeySignUp(
-        activity: Activity,
-        sessionKey: String,
-        passkeyName: String,
-        signupWallet: TurnkeyWalletSpec,
-    ) {
-        withContext(ioDispatcher) {
-            context.signUpWithPasskey(
-                activity = activity,
-                sessionKey = sessionKey,
-                passkeyDisplayName = passkeyName,
-                // The vendor replaces the authenticators and API keys of these params with the
-                // passkey and its temporary key and keeps the wallet. The relying party comes from
-                // the one-shot configuration's authConfig.
-                createSubOrgParams = signupWallet.toSignupParams(),
+                // Null: the vendor stamps the login on the configured parent organization, which
+                // resolves the passkey's sub-organization itself (sdk-kotlin 2.1.0
+                // `TurnkeyContext.loginWithPasskey`); a sub-organization id lands it there directly.
+                organizationId = organizationId,
+                // Revokes this user's other Turnkey sessions server-side on a successful login; a
+                // refused passkey never reaches this point. The relying party comes from the
+                // one-shot configuration's authConfig.
                 invalidateExisting = true,
             )
         }
@@ -507,42 +553,6 @@ internal class TurnkeyContextAdapter(
                 userId = userId,
             )
         )
-    }
-
-    @Suppress("TooGenericExceptionCaught") // best-effort cleanup: a key that will not delete is logged, the token is already in hand
-    override suspend fun verifyOtpToken(challenge: OtpChallenge, otpCode: String): String = withContext(ioDispatcher) {
-        // The throwaway key pair and the code's encryption are generated on the calling thread.
-        val result = context.verifyOtp(
-            otpId = challenge.otpId,
-            otpCode = otpCode,
-            otpEncryptionTargetBundle = challenge.encryptionTargetBundle,
-            // Never the live session's key: the vendor deletes the bound key on any failure, so a
-            // wrong code would destroy the session. The vendor creates a throwaway key instead.
-            publicKey = null,
-        )
-        // Nothing else removes the throwaway key for a user who never runs a passkey ceremony.
-        try {
-            context.deleteKeyPair(publicKey = result.publicKey)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Timber.w("Rain SDK: could not delete the verification key pair (%s)", e.javaClass.simpleName)
-        }
-        result.verificationToken
-    }
-
-    override suspend fun lookupContactOwner(channel: OtpChannel, contact: String, verificationToken: String): String? {
-        // The vendor's own filter-type map, the one its loginOrSignUpWithOtp hands the same lookup
-        // (docs.turnkey.com/api-reference/auth-proxy/account). The proxy answers an unknown contact
-        // with an empty organizationId, so that reads as "nobody".
-        val response = context.client.proxyGetAccount(
-            ProxyTGetAccountBody(
-                filterType = otpTypeToFilterTypeMap.getValue(channel.toVendorOtpType()).name,
-                filterValue = contact,
-                verificationToken = verificationToken,
-            )
-        )
-        return response.organizationId?.takeIf { it.isNotEmpty() }
     }
 
     override suspend fun setUserEmail(organizationId: String, userId: String, email: String, verificationToken: String) {
@@ -619,15 +629,6 @@ internal class TurnkeyContextAdapter(
     } catch (e: Exception) {
         throw TurnkeyExportFailures.rethrowable(e)
     }
-
-    /**
-     * The sign-up request's wallet, created inside the signup request itself so a new organization
-     * never exists without it. `CustomWallet` carries no mnemonic length, so the seed gets the
-     * vendor's default of 12 words, the length the createWallet fallback pins.
-     */
-    private fun TurnkeyWalletSpec.toSignupParams(): CreateSubOrgParams = CreateSubOrgParams(
-        customWallet = CustomWallet(walletName = name, walletAccounts = accounts.toVendorParams()),
-    )
 
     private fun List<TurnkeyAccountSpec>.toVendorParams(): List<V1WalletAccountParams> = map {
         V1WalletAccountParams(

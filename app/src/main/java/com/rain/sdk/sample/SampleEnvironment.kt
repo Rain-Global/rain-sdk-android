@@ -2,13 +2,14 @@ package com.rain.sdk.sample
 
 import com.rain.sdk.RainAuthPullChains
 import com.rain.sdk.RainAuthPullConfig
+import com.rain.sdk.wallet.RainWalletEnvironment
 
 /**
  * Which Rain environment this build of the sample talks to.
  *
- * One constant drives three things that have to agree: the host the demo's own [RainApiClient]
- * calls, the chains the picker offers, and the operator address the Auth Pull screen prefills. The
- * SDK is not told which Rain environment the demo uses; it only checks that an Auth Pull config's
+ * One constant drives four things that have to agree: the host the demo's own [RainApiClient]
+ * calls, the environment the Rain wallet is built with, the chains the picker offers, and the
+ * operator address the Auth Pull screen prefills. The SDK checks that an Auth Pull config's
  * chains belong to the environment its kind names.
  *
  * Left on [SampleRainEnvironment.SANDBOX] deliberately. Production means mainnet: real USDC, real
@@ -20,6 +21,10 @@ object SampleEnvironment {
 
     val isProduction: Boolean
         get() = rainApi == SampleRainEnvironment.PRODUCTION
+
+    /** The Rain wallet's environment for [rainApi]. */
+    val rainWallet: RainWalletEnvironment
+        get() = if (isProduction) RainWalletEnvironment.Production else RainWalletEnvironment.Sandbox
 
     /**
      * Rain's Auth Pull operator for [rainApi]: the spender an approval names, one address per

@@ -62,13 +62,18 @@ authenticated provider handle, and the Turnkey and Privy drivers are reference c
 yourself. The Rain wallet owns its authentication, so the sample calls the provider's own auth
 methods:
 
-- **Rain Wallet** (`RainSession.prepareRainWallet`) — a contact: an email address, or a phone number
-  when the *Send code by* switch is on Phone. The wallet backend's identity is embedded in the SDK,
-  so there is nothing else to enter. A phone number needs its country code (`+15551234567`); a number typed without one is
-  converted with the device's region before it reaches the SDK, which requires E.164 and removes
-  spaces, dots, hyphens and parentheses. The SDK sends and confirms the one-time code, signs up
-  (creating one wallet with the Ethereum and Solana accounts) or logs in, and backfills a missing
-  account, then initializes Rain on its own, as it does for a resumed session. A session restored
+- **Rain Wallet** (`RainSession.prepareRainWallet`) — the sandbox Rain Api-Key and user ID on the
+  Home card first: the demo mints the wallet auth token with that key
+  (`POST /v1/issuing/embedded-wallets/auth-tokens`), where a host mints it on its backend; *Send
+  code*, *Create wallet with passkey* and *Send verification code* stay off until both are entered.
+  The Rain wallet is built with the environment this build points at (`SampleEnvironment`); the SDK
+  refuses the production one at construction until Rain turns it on, and the card shows that error.
+  Then a contact: an email address, or a phone number when the *Send code by* switch is on Phone. A
+  phone number needs its country code (`+15551234567`); a number typed without one is converted with
+  the device's region before it reaches the SDK, which requires E.164 and removes spaces, dots,
+  hyphens and parentheses. The SDK asks the demo for the token, has Rain send the code, confirms it,
+  logs in or signs up (creating one wallet with the Ethereum and Solana accounts) and backfills a
+  missing account, then initializes Rain on its own, as it does for a resumed session. A session restored
   from an earlier run is reused only after the backend confirms it is still live. One revoked by a
   login on another device falls back to the code. A rejected code keeps
   the challenge for a retry, and *Resend code* requests a new one (the
@@ -76,19 +81,32 @@ methods:
   because the backend's code format is one shared setting and may be alphanumeric. If the login
   itself succeeded but a later step failed, the sample carries on signed in (Rain's initialization
   finishes the wallet setup); any other failure restarts from *Send code*. An email login and a phone
-  login by the same person are two different accounts. SMS needs SMS one-time codes enabled on the
-  backend configuration; in the sandbox the test number `+1 999-999-9999` with the code `000000`
-  works once the code format is numeric and 6 characters. Two more buttons sit under the code step
-  while signed out: *Sign in with passkey* opens the system passkey sheet for an existing account,
-  and *Create wallet with passkey* makes a new account whose only login is the passkey, with the
-  same wallet setup as a code sign-up; a returning user who taps it ends up with a second, empty
-  wallet, and accounts are never merged. Both need the domain in `RainSession.prepareRainWallet`
+  login by the same person are two different accounts. The sandbox test number `+1 999-999-9999`
+  with the code `000000` worked under the auth proxy; whether Rain's endpoints honour it is
+  unconfirmed, so check it on a dev run before relying on it. On *Send code* and *Send verification
+  code*, a refused wallet auth token or tenant shows `RAIN_202`, Rain or the demo's mint unreachable
+  `RAIN_301`, a missing Api-Key `RAIN_102`, each with a hint. Two more buttons sit under the code
+  step while signed out: *Sign in with passkey* opens the system passkey sheet for an existing
+  account, and *Create wallet with passkey* makes a new account whose only login is the passkey, with
+  the same wallet setup as a code sign-up, through one passkey prompt: the sheet creates the passkey,
+  and the device signs the new account in with a key Rain registers on it for a minute. The sheet
+  opens a second time only when that key cannot sign the account in: Turnkey refused its login or
+  answered it without a session, or a resend found the account already saved, so nothing was
+  stamped. That sheet signs the account in. A returning user who taps the button ends up with a
+  second, empty wallet, and accounts are never merged. Both need the domain in
+  `RainSession.prepareRainWallet`
   (`passkeys.uptop.xyz`) to vouch for this build's signing key, see *Demo keystore* under Notes.
   Signed in, *Add a passkey to this account* registers a passkey for a code-created account, and
   the *Add a login contact* step sends a verification code to an email or phone and attaches it on
   *Verify and attach*, after which that contact signs in to this account by code; a contact another
-  account signs in with is refused (`RAIN_202`) and the card shows the reason. A closed
-  passkey sheet shows `RAIN_401`; every other failure shows its error code only.
+  account signs in with is refused (`RAIN_202`) and the card shows the reason. A closed passkey
+  sheet shows `RAIN_401`; after
+  *Create wallet with passkey* the status adds that if Rain answered the sign-up, the account exists
+  and *Sign in with passkey* reaches it, because the closed sheet may have been the fallback sheet
+  that opens after Rain created the account. A sign-up that failed with any code but `RAIN_102`,
+  `RAIN_202` or the `RAIN_401` above says the account may exist, so try *Sign in with passkey*
+  before creating another; when the sign-in went through and a later step failed, the card carries
+  on signed in, as after a code.
 - **Export keys** — once the Rain Wallet session is active, an *Export keys* card under the Rain Wallet card reveals the recovery phrase,
   the Ethereum private key or the Solana private key, one at a time, through `exportRecoveryPhrase`
   and `exportPrivateKey`, on a restored or reused session before *Initialize Rain*, and after it. While a value shows, the window

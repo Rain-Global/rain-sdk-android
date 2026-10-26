@@ -4,7 +4,6 @@ import android.app.Activity
 import com.google.common.truth.Truth.assertThat
 import com.rain.sdk.error.RainError
 import com.turnkey.core.models.AuthState
-import com.turnkey.core.models.OtpType
 import com.turnkey.core.models.errors.TurnkeyKotlinError
 import com.turnkey.types.V1AddressFormat
 import com.turnkey.types.V1Curve
@@ -12,7 +11,6 @@ import io.mockk.mockk
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -23,15 +21,20 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Managed-auth tests for [TurnkeyManagedAuthController], run against [MockTurnkey] — no vendor
- * singleton is ever touched. Gated on JDK 24 like every Turnkey suite. The configurator is
- * process-global state, so it is reset around every test; its own rules live in
- * [TurnkeyManagedConfiguratorTest].
+ * Managed-auth tests for [TurnkeyManagedAuthController] over the email channel, run against
+ * [MockTurnkey] for the vendor's device primitives and [MockRainApiAuth] for Rain's endpoints — no
+ * vendor singleton and no network is ever touched. Gated on JDK 24 like every Turnkey suite. The
+ * configurator is process-global state, so it is reset around every test; its own rules live in
+ * [TurnkeyManagedConfiguratorTest]. The confirm's failure outcomes and the token refetch are in
+ * [TurnkeyManagedCodeOutcomeTest].
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class TurnkeyManagedAuthTest {
 
     private var hookCalls = 0
+
+    /** Every contact the host's token provider was asked for, in order: null is a passkey sign-up. */
+    private val tokenRequests = mutableListOf<LoginContact?>()
 
     @Before
     fun setUp() {
@@ -48,128 +51,177 @@ class TurnkeyManagedAuthTest {
         retryDelay = { },
     )
 
+    @Suppress("LongParameterList") // one knob per controller dependency, all but the vendor defaulted
     private fun controller(
         turnkey: MockTurnkey,
+        rainApi: MockRainApiAuth = MockRainApiAuth(),
+        authTokenProvider: suspend (LoginContact?) -> String = { "wat_1" },
         configurationError: RainError? = null,
         coordinator: TurnkeySessionCoordinator = coordinator(turnkey),
         passkeyDomain: String? = null,
     ) = TurnkeyManagedAuthController(
         context = turnkey,
+        rainApi = rainApi,
+        authTokenProvider = { contact ->
+            tokenRequests += contact
+            authTokenProvider(contact)
+        },
         coordinator = coordinator,
         configure = { configurationError },
         passkeyDomain = passkeyDomain,
     )
 
-    private fun rejectedCode(): Exception = TurnkeyKotlinError.FailedToLoginOrSignUpWithOtp(
-        TurnkeyKotlinError.FailedToVerifyOtp(RuntimeException("HTTP error from /v1/otp_verify_v2: 401"))
-    )
-
     /** Turnkey's documented sandbox number, never a real person's. SMS-specific tests live in [TurnkeyManagedAuthSmsTest]. */
     private val smsContact = LoginContact.Phone("+19999999999")
+    private val email = LoginContact.Email("user@example.com")
 
-    // ---------- one-time-code channel ----------
-
-    @Test
-    fun `OtpChannel mirrors the vendor's OtpType`() {
-        assertThat(OtpChannel.EMAIL.toVendorOtpType()).isEqualTo(OtpType.OTP_TYPE_EMAIL)
-        assertThat(OtpChannel.SMS.toVendorOtpType()).isEqualTo(OtpType.OTP_TYPE_SMS)
-        // A vendor enum addition must be mapped or refused here, never left unmapped.
-        assertThat(OtpChannel.entries).hasSize(OtpType.entries.size)
-    }
-
-    // ---------- email OTP ----------
+    // ---------- the code request ----------
 
     @Test
-    fun `sendLoginCode starts an email OTP and touches no session`() = runTest {
-        val turnkey = MockTurnkey(session = null)
-        val controller = controller(turnkey)
+    fun `sendLoginCode asks the host for a token bound to the canonical contact, requests the code under it and touches no session`() =
+        runTest {
+            val turnkey = MockTurnkey(session = null)
+            val rainApi = MockRainApiAuth()
+            val controller = controller(turnkey, rainApi)
 
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
+            controller.sendLoginCode(LoginContact.Email("  User@Example.COM "))
 
-        assertThat(turnkey.sendOtpCalls).containsExactly(MockTurnkey.SendOtpCall("user@example.com", OtpChannel.EMAIL))
-        assertThat(turnkey.awaitReadyCallCount).isEqualTo(1)
-        assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
-        assertThat(turnkey.clearSessionCalls).isEmpty()
-    }
-
-    @Test
-    fun `an email is trimmed and lowercased once and the identical string is sent on confirm`() = runTest {
-        val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-        turnkey.onCompleteOtp = { turnkey.authenticate() }
-        val controller = controller(turnkey)
-
-        controller.sendLoginCode(LoginContact.Email("  User@Example.COM "))
-        controller.confirmLoginCode("123456")
-
-        // The vendor matches an email case-sensitively: the lowercased string is the account's
-        // identity, for the lookup and for the sign-up alike.
-        assertThat(turnkey.sendOtpCalls).containsExactly(MockTurnkey.SendOtpCall("user@example.com", OtpChannel.EMAIL))
-        assertThat(turnkey.completeOtpCalls.single().contact).isEqualTo("user@example.com")
-    }
+            assertThat(tokenRequests).containsExactly(LoginContact.Email("user@example.com"))
+            assertThat(rainApi.initOtpCalls).containsExactly("wat_1")
+            assertThat(turnkey.awaitReadyCallCount).isEqualTo(1)
+            assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
+            assertThat(turnkey.clearSessionCalls).isEmpty()
+            assertThat(turnkey.createdDeviceKeys).isEmpty()
+        }
 
     @Test
     fun `a failed resend for the same email in another spelling keeps the pending challenge`() = runTest {
         val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-        turnkey.onCompleteOtp = { turnkey.authenticate() }
-        val controller = controller(turnkey)
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
+        turnkey.onStoreSession = { turnkey.authenticate() }
+        val rainApi = MockRainApiAuth()
+        rainApi.initOtp = MockRainApiAuth.answers(
+            { RainApiOtpChallenge("otp-1", "bundle-1") },
+            { throw MockRainApiAuth.refusal(RainApiAuthFailure.Kind.Refused, 503, MockRainApiAuth.INIT_PATH) },
+        )
+        val controller = controller(turnkey, rainApi)
+        controller.sendLoginCode(email)
 
-        turnkey.sendOtpError = RuntimeException("HTTP error from /v1/otp_init_v2: 500")
-        expectThrows<RainError> { controller.sendLoginCode(LoginContact.Email("User@Example.com")) }
-        turnkey.sendOtpError = null
+        expectThrows<RainError.ProviderError> { controller.sendLoginCode(LoginContact.Email("User@Example.com")) }
 
         // One address, one account: the spelling is not another contact, so the first code is still typable.
         controller.confirmLoginCode("123456")
-        assertThat(turnkey.completeOtpCalls.single().contact).isEqualTo("user@example.com")
+        assertThat(rainApi.verifyOtpCalls.single().otpId).isEqualTo("otp-1")
     }
 
     @Test
     fun `confirmLoginCode without a prior sendLoginCode throws InvalidConfig`() = runTest {
         val turnkey = MockTurnkey(session = null)
-        val controller = controller(turnkey)
+        val rainApi = MockRainApiAuth()
+        val controller = controller(turnkey, rainApi)
 
         expectThrows<RainError.InvalidConfig> { controller.confirmLoginCode("123456") }
-        assertThat(turnkey.completeOtpCalls).isEmpty()
+        assertThat(rainApi.verifyOtpCalls).isEmpty()
+        assertThat(turnkey.createdDeviceKeys).isEmpty()
     }
 
+    // ---------- the confirm: login first, sign-up on a 404 ----------
+
     @Test
-    fun `first login completes with the stashed challenge under a fresh key and creates nothing when both accounts exist`() = runTest {
+    fun `a returning user logs in with a device key, the encrypted code, verify, login, and the session stored under a fresh key`() = runTest {
         val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
-        turnkey.stubbedOtpChallenge = OtpChallenge(otpId = "otp-1", encryptionTargetBundle = "bundle-1", channel = OtpChannel.EMAIL)
-        turnkey.onCompleteOtp = { turnkey.authenticate() }
-        val controller = controller(turnkey)
+        turnkey.onStoreSession = { turnkey.authenticate() }
+        val rainApi = MockRainApiAuth()
+        rainApi.initOtp = { RainApiOtpChallenge("otp-1", "bundle-1") }
+        val controller = controller(turnkey, rainApi)
 
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
-        controller.confirmLoginCode("123456")
+        controller.sendLoginCode(email)
+        controller.confirmLoginCode(" 123456 ")
 
-        val call = turnkey.completeOtpCalls.single()
-        assertThat(call.otpId).isEqualTo("otp-1")
-        assertThat(call.otpCode).isEqualTo("123456")
-        assertThat(call.otpEncryptionTargetBundle).isEqualTo("bundle-1")
-        assertThat(call.contact).isEqualTo("user@example.com")
-        assertThat(call.sessionKey).startsWith("rain-turnkey-")
-        // A sign-up creates the wallet inside the signup request: one seed holding both accounts.
-        // Name, order, curves and paths are the cross-platform contract shared by Rain's SDKs.
-        assertThat(call.signupWallet.name).isEqualTo("Wallet")
-        assertThat(call.signupWallet.accounts.map { it.addressFormat }).containsExactly(
-            V1AddressFormat.ADDRESS_FORMAT_ETHEREUM,
-            V1AddressFormat.ADDRESS_FORMAT_SOLANA
-        ).inOrder()
-        assertThat(call.signupWallet.accounts.map { it.curve }).containsExactly(
-            V1Curve.CURVE_SECP256K1,
-            V1Curve.CURVE_ED25519
-        ).inOrder()
-        assertThat(call.signupWallet.accounts.map { it.path }).containsExactly(
-            "m/44'/60'/0'/0/0",
-            "m/44'/501'/0'/0'"
-        ).inOrder()
+        // The device key is created once and lives on: it is the session's key pair.
+        assertThat(turnkey.createdDeviceKeys).containsExactly("device-key-1")
+        assertThat(turnkey.liveDeviceKeys).containsExactly("device-key-1")
+        val encrypted = turnkey.encryptOtpCodeCalls.single()
+        assertThat(encrypted).isEqualTo(MockTurnkey.EncryptOtpCodeCall("123456", "bundle-1", "device-key-1"))
+        val verify = rainApi.verifyOtpCalls.single()
+        assertThat(verify).isEqualTo(MockRainApiAuth.VerifyOtpCall("wat_1", "otp-1", "encrypted(123456,bundle-1,device-key-1)"))
+        assertThat(turnkey.loginSignatureCalls).containsExactly(MockRainApiAuth.DEFAULT_VERIFICATION_TOKEN)
+        val login = rainApi.loginCalls.single()
+        assertThat(login.token).isEqualTo("wat_1")
+        assertThat(login.verificationToken).isEqualTo(MockRainApiAuth.DEFAULT_VERIFICATION_TOKEN)
+        assertThat(login.clientSignature).isEqualTo(turnkey.stubbedClientSignature)
+        assertThat(login.subOrganizationId).isNull()
+        // A returning user: no sign-up, no sign-up signature.
+        assertThat(rainApi.signupCalls).isEmpty()
+        assertThat(turnkey.signUpSignatureCalls).isEmpty()
+        val stored = turnkey.storeSessionCalls.single()
+        assertThat(stored.jwt).isEqualTo(MockRainApiAuth.DEFAULT_SESSION_JWT)
+        assertThat(stored.sessionKey).startsWith("rain-turnkey-")
         // The vendor auto-selected the first session, so no redundant re-select.
         assertThat(turnkey.selectSessionCalls).isEmpty()
-        assertThat(turnkey.selectedSessionKey).isEqualTo(call.sessionKey)
+        assertThat(turnkey.selectedSessionKey).isEqualTo(stored.sessionKey)
         assertThat(turnkey.createWalletCalls).isEmpty()
         assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
         assertThat(turnkey.clearSessionCalls).isEmpty()
         assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+        assertThat(hookCalls).isEqualTo(0)
+    }
+
+    @Test
+    fun `a first login signs up after a 404 on login, naming the canonical contact, then logs in on the new sub-organization`() =
+        runTest {
+            val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
+            turnkey.onStoreSession = { turnkey.authenticate() }
+            val rainApi = MockRainApiAuth()
+            rainApi.login = MockRainApiAuth.answers({ throw MockRainApiAuth.noWallet() }, { MockRainApiAuth.defaultLogin("sub-9") })
+            rainApi.signup = { RainApiSignup("sub-9") }
+            val controller = controller(turnkey, rainApi)
+
+            controller.sendLoginCode(LoginContact.Email("  User@Example.COM "))
+            controller.confirmLoginCode("123456")
+
+            // The sign-up signature names the lowercased contact: the account's identity, the
+            // string the vendor matches case-sensitively.
+            assertThat(turnkey.signUpSignatureCalls).containsExactly(
+                MockTurnkey.SignUpSignatureCall(MockRainApiAuth.DEFAULT_VERIFICATION_TOKEN, "user@example.com", OtpChannel.EMAIL)
+            )
+            val signup = rainApi.signupCalls.single()
+            assertThat(signup.token).isEqualTo("wat_1")
+            assertThat(signup.verificationToken).isEqualTo(MockRainApiAuth.DEFAULT_VERIFICATION_TOKEN)
+            assertThat(rainApi.loginCalls.map { it.subOrganizationId }).containsExactly(null, "sub-9").inOrder()
+            // One verification token through all three legs, one login signature reused.
+            assertThat(rainApi.loginCalls.map { it.verificationToken }.toSet()).containsExactly(MockRainApiAuth.DEFAULT_VERIFICATION_TOKEN)
+            assertThat(turnkey.loginSignatureCalls).hasSize(1)
+            assertThat(turnkey.storeSessionCalls).hasSize(1)
+            assertThat(turnkey.liveDeviceKeys).containsExactly("device-key-1")
+            assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+            assertThat(hookCalls).isEqualTo(0)
+        }
+
+    @Test
+    fun `the token is the bearer of every leg and the contact reaches Rain only inside the signed sign-up message`() = runTest {
+        val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
+        turnkey.onStoreSession = { turnkey.authenticate() }
+        val rainApi = MockRainApiAuth()
+        rainApi.login = MockRainApiAuth.answers({ throw MockRainApiAuth.noWallet() }, { MockRainApiAuth.defaultLogin() })
+        val controller = controller(turnkey, rainApi)
+
+        controller.sendLoginCode(email)
+        controller.confirmLoginCode("123456")
+
+        assertThat(rainApi.tokensSent).hasSize(5) // init, verify, login, signup, login
+        assertThat(rainApi.tokensSent.toSet()).containsExactly("wat_1")
+        // The device writes the contact into one thing it sends: the sign-up message it signs, which
+        // names the account's email (ClientSignatureMessageTest pins the real message). No body
+        // carries it as a field of its own, and the login legs never name it. (The verification
+        // token names it too, but Rain minted that; the device forwards it unread.)
+        assertThat(turnkey.signUpSignatureCalls.single().contact).isEqualTo("user@example.com")
+        val signUpMessage = rainApi.signupCalls.single().clientSignature.message
+        (rainApi.everythingSent - signUpMessage).forEach { sent ->
+            assertThat(sent).doesNotContain("example.com")
+            assertThat(sent).doesNotContain("@")
+        }
+        // The host is told the contact once, for the token.
+        assertThat(tokenRequests).containsExactly(email)
     }
 
     @Test
@@ -182,7 +234,7 @@ class TurnkeyManagedAuthTest {
         controller.sendLoginCode(LoginContact.Email("other@example.com"))
         controller.confirmLoginCode("123456")
 
-        val fresh = turnkey.completeOtpCalls.single().sessionKey
+        val fresh = turnkey.storeSessionCalls.single().sessionKey
         assertThat(fresh).isNotEqualTo(MockTurnkey.DEFAULT_SESSION_KEY)
         assertThat(turnkey.selectSessionCalls).containsExactly(fresh)
         assertThat(turnkey.selectedSessionKey).isEqualTo(fresh)
@@ -197,10 +249,10 @@ class TurnkeyManagedAuthTest {
     @Test
     fun `an Ethereum-only account gets a Solana account added to its existing wallet`() = runTest {
         val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.defaultWallet()), session = null)
-        turnkey.onCompleteOtp = { turnkey.authenticate() }
+        turnkey.onStoreSession = { turnkey.authenticate() }
         val controller = controller(turnkey)
 
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
+        controller.sendLoginCode(email)
         controller.confirmLoginCode("123456")
 
         // Added to the wallet Rain resolves, not minted as a second wallet (a second mnemonic).
@@ -217,10 +269,10 @@ class TurnkeyManagedAuthTest {
     fun `an organization with no wallet at all gets one wallet holding both accounts`() = runTest {
         // An account created outside the sign-up flow (or predating the wallet-at-signup request).
         val turnkey = MockTurnkey(wallets = emptyList(), session = null)
-        turnkey.onCompleteOtp = { turnkey.authenticate() }
+        turnkey.onStoreSession = { turnkey.authenticate() }
         val controller = controller(turnkey)
 
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
+        controller.sendLoginCode(email)
         controller.confirmLoginCode("123456")
 
         val created = turnkey.createWalletCalls.single()
@@ -236,120 +288,7 @@ class TurnkeyManagedAuthTest {
         assertThat(turnkey.createWalletAccountsCalls).isEmpty()
     }
 
-    @Test
-    fun `a rejected code surfaces InvalidLoginCode and never touches the live session`() = runTest {
-        val turnkey = MockTurnkey()
-        turnkey.completeOtpError = rejectedCode()
-        val controller = controller(turnkey)
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
-
-        expectThrows<RainError.InvalidLoginCode> { controller.confirmLoginCode("000000") }
-
-        assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
-        assertThat(turnkey.clearSessionCalls).isEmpty()
-        assertThat(turnkey.selectSessionCalls).isEmpty()
-        assertThat(turnkey.selectedSessionKey).isEqualTo(MockTurnkey.DEFAULT_SESSION_KEY)
-        assertThat(turnkey.session).isNotNull()
-
-        // The challenge survives a rejected code so the user can simply retype it.
-        turnkey.completeOtpError = null
-        controller.confirmLoginCode("123456")
-        assertThat(turnkey.completeOtpCalls).hasSize(2)
-        assertThat(turnkey.completeOtpCalls.map { it.otpId }.toSet()).hasSize(1)
-    }
-
-    @Test
-    fun `a provisioning failure throws, keeps the new session, and drops the spent code`() = runTest {
-        val turnkey = MockTurnkey(wallets = emptyList(), session = null)
-        turnkey.onCompleteOtp = { turnkey.authenticate() }
-        turnkey.createWalletError = TurnkeyKotlinError.FailedToCreateWallet(RuntimeException("server 500"))
-        val controller = controller(turnkey)
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
-
-        val thrown = expectThrows<RainError> { controller.confirmLoginCode("123456") }
-
-        assertThat(thrown).isNotInstanceOf(RainError.InvalidLoginCode::class.java)
-        assertThat(turnkey.session).isNotNull()
-        assertThat(turnkey.selectedSessionKey).isEqualTo(turnkey.completeOtpCalls.single().sessionKey)
-        assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
-        assertThat(turnkey.clearSessionCalls).isEmpty()
-        // The code was consumed by the verify step; a retry cannot re-run it.
-        expectThrows<RainError.InvalidConfig> { controller.confirmLoginCode("123456") }
-        assertThat(turnkey.completeOtpCalls).hasSize(1)
-    }
-
-    @Test
-    fun `a failure after the code was consumed drops the challenge even though it is not a rejection`() = runTest {
-        val turnkey = MockTurnkey(session = null)
-        // The vendor verified the code, then failed creating the session: the code is spent.
-        turnkey.completeOtpError = TurnkeyKotlinError.FailedToLoginOrSignUpWithOtp(
-            TurnkeyKotlinError.FailedToCreateSession(RuntimeException("io"))
-        )
-        val controller = controller(turnkey)
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
-
-        val thrown = expectThrows<RainError> { controller.confirmLoginCode("123456") }
-
-        assertThat(thrown).isNotInstanceOf(RainError.InvalidLoginCode::class.java)
-        expectThrows<RainError.InvalidConfig> { controller.confirmLoginCode("123456") }
-        assertThat(turnkey.completeOtpCalls).hasSize(1)
-    }
-
-    @Test
-    fun `a verify failure the mapper cannot classify keeps the challenge for a retry`() = runTest {
-        // The auth proxy has been seen wrapping a rejected code in an HTTP 500 whose body the
-        // Kotlin SDK discards: the mapper sees a plain 500 (ProviderError), but the code itself
-        // was still being checked, so the same challenge must stay usable.
-        val turnkey = MockTurnkey(session = null)
-        turnkey.completeOtpError = TurnkeyKotlinError.FailedToLoginOrSignUpWithOtp(
-            TurnkeyKotlinError.FailedToVerifyOtp(RuntimeException("HTTP error from /v1/otp_verify_v2: 500"))
-        )
-        val controller = controller(turnkey)
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
-
-        val thrown = expectThrows<RainError> { controller.confirmLoginCode("123456") }
-        assertThat(thrown).isInstanceOf(RainError.ProviderError::class.java)
-
-        turnkey.completeOtpError = null
-        turnkey.onCompleteOtp = { turnkey.authenticate() }
-        controller.confirmLoginCode("123456")
-
-        assertThat(turnkey.sendOtpCalls).hasSize(1)
-        assertThat(turnkey.completeOtpCalls.map { it.otpId }.toSet()).containsExactly("otp-id")
-        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
-    }
-
-    @Test
-    fun `a verify call that never completes keeps the challenge for a retry`() = runTest {
-        val turnkey = MockTurnkey(session = null)
-        turnkey.completeOtpError = TurnkeyKotlinError.FailedToLoginOrSignUpWithOtp(
-            TurnkeyKotlinError.FailedToVerifyOtp(java.io.IOException("unreachable"))
-        )
-        val controller = controller(turnkey)
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
-
-        expectThrows<RainError> { controller.confirmLoginCode("123456") }
-
-        turnkey.completeOtpError = null
-        turnkey.onCompleteOtp = { turnkey.authenticate() }
-        controller.confirmLoginCode("123456")
-
-        assertThat(turnkey.sendOtpCalls).hasSize(1)
-        assertThat(turnkey.completeOtpCalls).hasSize(2)
-    }
-
-    @Test
-    fun `a blank code is a caller error, not a rejected code`() = runTest {
-        val turnkey = MockTurnkey(session = null)
-        val controller = controller(turnkey)
-        controller.sendLoginCode(LoginContact.Email("  user@example.com "))
-
-        expectThrows<RainError.InvalidConfig> { controller.confirmLoginCode("   ") }
-
-        // The challenge survives, and the contact was normalized once for both steps.
-        assertThat(turnkey.sendOtpCalls).containsExactly(MockTurnkey.SendOtpCall("user@example.com", OtpChannel.EMAIL))
-        assertThat(turnkey.completeOtpCalls).isEmpty()
-    }
+    // ---------- the session switch ----------
 
     @Test
     fun `ensureAccounts is idempotent and can be re-run to heal a half-provisioned session`() = runTest {
@@ -365,7 +304,7 @@ class TurnkeyManagedAuthTest {
     }
 
     @Test
-    fun `a select failure clears the fresh key and signs the device out without firing the re-auth hook`() = runTest {
+    fun `a select failure clears the fresh session and keeps the previous one selected, the hook silent`() = runTest {
         val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()))
         turnkey.selectSessionError = TurnkeyKotlinError.FailedToSetSelectedSession(RuntimeException("io"))
         val coordinator = coordinator(turnkey)
@@ -377,45 +316,19 @@ class TurnkeyManagedAuthTest {
         expectThrows<RainError> { controller.confirmLoginCode("123456") }
         runCurrent()
 
-        // The fresh key never took effect and is dropped; the previous session was revoked by the
-        // login that just succeeded, so it is cleared too rather than left to fail at the next call.
-        val fresh = turnkey.completeOtpCalls.single().sessionKey
+        // The fresh session never took effect and is dropped, its key pair with it. Rain's login
+        // revoked nothing, so the previous session is as live as before and stays the device's.
+        val fresh = turnkey.storeSessionCalls.single().sessionKey
         assertThat(turnkey.clearSessionCalls).containsExactly(fresh)
-        assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(1)
-        assertThat(turnkey.selectedSessionKey).isNull()
-        assertThat(turnkey.session).isNull()
-        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
-        assertThat(controller.hasActiveSession()).isFalse()
+        assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
+        assertThat(turnkey.selectedSessionKey).isEqualTo(MockTurnkey.DEFAULT_SESSION_KEY)
+        assertThat(turnkey.session).isNotNull()
+        assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+        assertThat(controller.hasActiveSession()).isTrue()
         assertThat(turnkey.createWalletCalls).isEmpty()
-        // The thrown error is the signal; the re-auth hook stays silent for this death.
         assertThat(hookCalls).isEqualTo(0)
 
-        // A genuine death after a re-login still notifies the host.
-        turnkey.authenticate()
-        runCurrent()
-        turnkey.session = null
-        turnkey.authStateFlow.value = AuthState.unauthenticated
-        runCurrent()
-        assertThat(hookCalls).isEqualTo(1)
-    }
-
-    @Test
-    fun `a select failure whose sign-out also fails surfaces the select error and re-arms the re-auth hook`() = runTest {
-        val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()))
-        turnkey.selectSessionError = TurnkeyKotlinError.FailedToSetSelectedSession(RuntimeException("io"))
-        turnkey.clearSelectedSessionError = TurnkeyKotlinError.FailedToClearSession(RuntimeException("boom"))
-        val coordinator = coordinator(turnkey)
-        val controller = controller(turnkey, coordinator = coordinator)
-        coordinator.startMonitoring(backgroundScope)
-        runCurrent()
-        controller.sendLoginCode(LoginContact.Email("other@example.com"))
-
-        expectThrows<RainError> { controller.confirmLoginCode("123456") }
-
-        // The clear failure is logged; what surfaces is the select failure the caller rethrows.
-        assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(1)
-        assertThat(turnkey.selectedSessionKey).isEqualTo(MockTurnkey.DEFAULT_SESSION_KEY)
-        // The suppression armed for a sign-out that never happened must not swallow a real death.
+        // A genuine death later still notifies the host.
         turnkey.session = null
         turnkey.authStateFlow.value = AuthState.unauthenticated
         runCurrent()
@@ -432,37 +345,40 @@ class TurnkeyManagedAuthTest {
 
         expectThrows<RainError> { controller.confirmLoginCode("123456") }
 
-        val fresh = turnkey.completeOtpCalls.single().sessionKey
+        val fresh = turnkey.storeSessionCalls.single().sessionKey
         assertThat(turnkey.selectedSessionKey).isEqualTo(fresh)
         assertThat(turnkey.clearSessionCalls).isEmpty()
         assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
     }
 
     @Test
-    fun `a configuration error makes every auth call throw InvalidConfig before touching the vendor`() = runTest {
+    fun `a configuration error makes every auth call throw InvalidConfig before touching the vendor, the host or Rain`() = runTest {
         val turnkey = MockTurnkey(session = null)
+        val rainApi = MockRainApiAuth()
         val controller = controller(
             turnkey,
+            rainApi,
             configurationError = RainError.InvalidConfig("mismatch"),
             passkeyDomain = "passkeys.example.com",
         )
         val activity = mockk<Activity>(relaxed = true)
 
-        expectThrows<RainError.InvalidConfig> { controller.sendLoginCode(LoginContact.Email("user@example.com")) }
+        expectThrows<RainError.InvalidConfig> { controller.sendLoginCode(email) }
         expectThrows<RainError.InvalidConfig> { controller.sendLoginCode(smsContact) }
         expectThrows<RainError.InvalidConfig> { controller.confirmLoginCode("123456") }
         expectThrows<RainError.InvalidConfig> { controller.loginWithPasskey(activity) }
         expectThrows<RainError.InvalidConfig> { controller.signUpWithPasskey(activity) }
         expectThrows<RainError.InvalidConfig> { controller.addPasskey(activity) }
-        expectThrows<RainError.InvalidConfig> { controller.sendContactVerificationCode(LoginContact.Email("user@example.com")) }
+        expectThrows<RainError.InvalidConfig> { controller.sendContactVerificationCode(email) }
         expectThrows<RainError.InvalidConfig> { controller.confirmContactVerification("123456") }
         expectThrows<RainError.InvalidConfig> { controller.awaitSessionRestore(timeoutMs = 100) }
         expectThrows<RainError.InvalidConfig> { controller.logout() }
 
         assertThat(turnkey.awaitReadyCallCount).isEqualTo(0)
-        assertThat(turnkey.sendOtpCalls).isEmpty()
+        assertThat(tokenRequests).isEmpty()
+        assertThat(rainApi.tokensSent).isEmpty()
         assertThat(turnkey.createPasskeyCalls).isEmpty()
-        assertThat(turnkey.verifyOtpTokenCalls).isEmpty()
+        assertThat(turnkey.createdDeviceKeys).isEmpty()
         assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
     }
 
@@ -538,7 +454,8 @@ class TurnkeyManagedAuthTest {
         val controller = controller(turnkey)
 
         expectThrows<RainError.InternalError> { controller.awaitSessionRestore(timeoutMs = 100) }
-        expectThrows<RainError.InternalError> { controller.sendLoginCode(LoginContact.Email("user@example.com")) }
+        expectThrows<RainError.InternalError> { controller.sendLoginCode(email) }
+        assertThat(tokenRequests).isEmpty()
     }
 
     @Test
@@ -550,17 +467,18 @@ class TurnkeyManagedAuthTest {
         val controller = controller(turnkey)
 
         expectThrows<RainError.InternalError> { controller.awaitSessionRestore(timeoutMs = 100) }
-        expectThrows<RainError.InternalError> { controller.sendLoginCode(LoginContact.Email("user@example.com")) }
+        expectThrows<RainError.InternalError> { controller.sendLoginCode(email) }
     }
 
     @Test
     fun `a vendor that never becomes ready surfaces as InternalError after the bound instead of hanging`() = runTest {
         val turnkey = MockTurnkey(session = null)
         turnkey.awaitReadyGate = CompletableDeferred()
-        val controller = controller(turnkey)
+        val rainApi = MockRainApiAuth()
+        val controller = controller(turnkey, rainApi)
 
-        expectThrows<RainError.InternalError> { controller.sendLoginCode(LoginContact.Email("user@example.com")) }
-        assertThat(turnkey.sendOtpCalls).isEmpty()
+        expectThrows<RainError.InternalError> { controller.sendLoginCode(email) }
+        assertThat(rainApi.initOtpCalls).isEmpty()
     }
 
     // ---------- logout ----------
@@ -569,12 +487,13 @@ class TurnkeyManagedAuthTest {
     fun `logout clears the selected session and drops the pending code without firing the re-auth hook`() = runTest {
         val turnkey = MockTurnkey()
         val coordinator = coordinator(turnkey)
-        val controller = controller(turnkey, coordinator = coordinator)
+        val rainApi = MockRainApiAuth()
+        val controller = controller(turnkey, rainApi, coordinator = coordinator)
         // backgroundScope: the watcher re-arms a real-clock expiry timer, so a foreground scope
         // would keep runTest advancing virtual time forever once the test body finishes.
         coordinator.startMonitoring(backgroundScope)
         runCurrent()
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
+        controller.sendLoginCode(email)
 
         controller.logout()
         // Read before the scheduler runs anything else. The vendor flips its auth state, selected
@@ -589,6 +508,7 @@ class TurnkeyManagedAuthTest {
         assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
         assertThat(hookCalls).isEqualTo(0)
         expectThrows<RainError.InvalidConfig> { controller.confirmLoginCode("123456") }
+        assertThat(rainApi.verifyOtpCalls).isEmpty()
 
         // A genuine death after a re-login still notifies the host.
         turnkey.authenticate()
@@ -604,15 +524,16 @@ class TurnkeyManagedAuthTest {
         val turnkey = MockTurnkey()
         turnkey.clearSelectedSessionError = TurnkeyKotlinError.FailedToClearSession(RuntimeException("boom"))
         val coordinator = coordinator(turnkey)
-        val controller = controller(turnkey, coordinator = coordinator)
+        val rainApi = MockRainApiAuth()
+        val controller = controller(turnkey, rainApi, coordinator = coordinator)
         coordinator.startMonitoring(backgroundScope)
         runCurrent()
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
+        controller.sendLoginCode(email)
 
         expectThrows<RainError> { controller.logout() }
 
         expectThrows<RainError.InvalidConfig> { controller.confirmLoginCode("123456") }
-        assertThat(turnkey.completeOtpCalls).isEmpty()
+        assertThat(rainApi.verifyOtpCalls).isEmpty()
         // The suppression armed for a logout that never happened must not swallow a real death.
         turnkey.session = null
         turnkey.authStateFlow.value = AuthState.unauthenticated
@@ -648,8 +569,8 @@ class TurnkeyManagedAuthTest {
         assertThat(hookCalls).isEqualTo(1)
 
         // A fresh login works as a first login and re-arms the hook for a later death.
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
-        turnkey.onCompleteOtp = { turnkey.authenticate() }
+        controller.sendLoginCode(email)
+        turnkey.onStoreSession = { turnkey.authenticate() }
         controller.confirmLoginCode("123456")
         runCurrent()
         assertThat(controller.hasActiveSession()).isTrue()
@@ -684,21 +605,29 @@ class TurnkeyManagedAuthTest {
     @Test
     fun `an arbitrary vendor exception surfaces as RainError from every public method`() = runTest {
         val turnkey = MockTurnkey(wallets = emptyList(), session = null)
-        val controller = controller(turnkey)
+        val rainApi = MockRainApiAuth()
+        val controller = controller(turnkey, rainApi)
 
-        turnkey.sendOtpError = RuntimeException("boom")
-        expectThrows<RainError> { controller.sendLoginCode(LoginContact.Email("user@example.com")) }
+        turnkey.awaitReadyError = null
+        rainApi.initOtp = { throw IllegalStateException("boom") }
+        expectThrows<RainError> { controller.sendLoginCode(email) }
         expectThrows<RainError> { controller.sendLoginCode(smsContact) }
-        turnkey.sendOtpError = null
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
+        rainApi.initOtp = { RainApiOtpChallenge("otp-id", "bundle") }
+        controller.sendLoginCode(email)
 
-        turnkey.completeOtpError = RuntimeException("boom")
+        turnkey.createDeviceKeyError = RuntimeException("keystore")
         expectThrows<RainError> { controller.confirmLoginCode("123456") }
-        turnkey.completeOtpError = null
+        turnkey.createDeviceKeyError = null
+        turnkey.encryptOtpCodeError = RuntimeException("crypto")
+        expectThrows<RainError> { controller.confirmLoginCode("123456") }
+        turnkey.encryptOtpCodeError = null
+        turnkey.clientSignatureError = RuntimeException("stamper")
+        expectThrows<RainError> { controller.confirmLoginCode("123456") }
+        turnkey.clientSignatureError = null
 
-        // That failure spent the code, so a new challenge is needed before provisioning can run.
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
-        turnkey.onCompleteOtp = { turnkey.authenticate() }
+        // That last failure came after the verify, so the code is spent: a new challenge first.
+        controller.sendLoginCode(email)
+        turnkey.onStoreSession = { turnkey.authenticate() }
         turnkey.createWalletError = RuntimeException("boom")
         expectThrows<RainError> { controller.confirmLoginCode("123456") }
 
@@ -707,35 +636,11 @@ class TurnkeyManagedAuthTest {
     }
 
     @Test
-    fun `a cancelled confirmLoginCode propagates cancellation rather than a mapped error`() = runTest {
-        val turnkey = MockTurnkey(session = null)
-        val gate = CompletableDeferred<Unit>()
-        turnkey.onCompleteOtp = { gate.await() }
-        val controller = controller(turnkey)
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
-
-        var caught: Throwable? = null
-        val job = launch {
-            try {
-                controller.confirmLoginCode("123456")
-            } catch (t: Throwable) {
-                caught = t
-                throw t
-            }
-        }
-        runCurrent()
-        job.cancelAndJoin()
-
-        assertThat(caught).isInstanceOf(CancellationException::class.java)
-        assertThat(caught).isNotInstanceOf(RainError::class.java)
-    }
-
-    @Test
     fun `a vendor error that merely wraps a cancellation while the caller is active is a RainError`() = runTest {
         val turnkey = MockTurnkey(session = null)
-        turnkey.completeOtpError = TurnkeyKotlinError.FailedToLoginOrSignUpWithOtp(CancellationException("inner job"))
+        turnkey.storeSessionError = TurnkeyKotlinError.FailedToCreateSession(CancellationException("inner job"))
         val controller = controller(turnkey)
-        controller.sendLoginCode(LoginContact.Email("user@example.com"))
+        controller.sendLoginCode(email)
 
         val thrown = expectThrows<RainError> { controller.confirmLoginCode("123456") }
 
@@ -752,7 +657,7 @@ class TurnkeyManagedAuthTest {
 
         controller.close()
 
-        expectThrows<RainError.InvalidConfig> { controller.sendLoginCode(LoginContact.Email("user@example.com")) }
+        expectThrows<RainError.InvalidConfig> { controller.sendLoginCode(email) }
         expectThrows<RainError.InvalidConfig> { controller.sendLoginCode(smsContact) }
         expectThrows<RainError.InvalidConfig> { controller.confirmLoginCode("123456") }
         expectThrows<RainError.InvalidConfig> { controller.loginWithPasskey(activity) }
@@ -762,6 +667,7 @@ class TurnkeyManagedAuthTest {
         assertThat(controller.hasActiveSession()).isFalse()
         assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
         assertThat(turnkey.clearSelectedSessionCallCount).isEqualTo(0)
+        assertThat(tokenRequests).isEmpty()
     }
 
     @Test

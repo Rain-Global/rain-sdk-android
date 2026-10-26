@@ -11,6 +11,7 @@ import kotlin.reflect.KClass
 import kotlin.reflect.KType
 import kotlin.reflect.KVisibility
 import kotlin.reflect.full.declaredMembers
+import kotlin.reflect.jvm.javaType
 import kotlin.reflect.jvm.jvmErasure
 
 /**
@@ -32,6 +33,7 @@ class RainWalletNeutralityTest {
     fun `the value types' public surfaces name only neutral types`() {
         listOf(
             RainWalletConfig::class,
+            RainWalletEnvironment::class,
             RainWalletContact::class,
             RainWalletSessionPolicy::class,
             RainWalletKeyAccount::class,
@@ -84,9 +86,16 @@ class RainWalletNeutralityTest {
     private fun KClass<*>.publicClosure(): List<KClass<*>> =
         listOf(this) + nestedClasses.filter { it.visibility == KVisibility.PUBLIC }.flatMap { it.publicClosure() }
 
-    /** The raw class behind a type and behind each of its type arguments, as qualified names. */
-    private fun KType.erasures(): List<String> =
-        listOf(jvmErasure.qualifiedName.orEmpty()) + arguments.mapNotNull { it.type }.flatMap { it.erasures() }
+    /**
+     * The raw class behind a type and behind each of its type arguments, as qualified names. A
+     * `suspend` function type has no Kotlin class for reflection to erase to (its classifier is the
+     * synthetic `kotlin.coroutines.SuspendFunctionN`), so it is named by the raw class of its JVM
+     * signature instead, `kotlin.jvm.functions.FunctionN`; its arguments are walked like any other.
+     */
+    private fun KType.erasures(): List<String> {
+        val own = runCatching { jvmErasure.qualifiedName.orEmpty() }.getOrElse { javaType.typeName.substringBefore('<') }
+        return listOf(own) + arguments.mapNotNull { it.type }.flatMap { it.erasures() }
+    }
 
     private fun String.isAllowed(): Boolean = ALLOWED_PACKAGES.any { this == it || startsWith("$it.") }
 

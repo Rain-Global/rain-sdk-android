@@ -1,13 +1,30 @@
 package com.rain.sdk.wallet
 
 /**
- * Rain's wallet backend identity: the production organization and its authentication configuration,
- * the pair Rain's SDKs share as a cross-platform contract. Public identifiers, not secrets:
- * possession grants nothing, because authentication still runs the one-time-code flow and abuse is
- * bounded by the backend's rate limits. Embedded so a host needs zero configuration to use the Rain
- * wallet; there is no host-facing environment switch.
+ * Rain's wallet backend identity per [RainWalletEnvironment]: the Turnkey organization the wallets
+ * live under and the Rain API host the authentication runs against. Public identifiers, not
+ * secrets: possession grants nothing, because every call to Rain's endpoints needs a wallet auth
+ * token the host's backend mints with its Api-Key and abuse is bounded by Rain's rate limits.
+ * Embedded so a host configures nothing but the environment and the token supplier. The pairs are
+ * a cross-platform contract shared with Rain's other SDKs.
  */
 internal object RainWalletBackend {
-    const val ORGANIZATION_ID: String = "63495e45-8e64-42b5-b602-c68f019ca806"
-    const val AUTH_CONFIG_ID: String = "1d8aac5e-f236-4800-bab7-98a9e27b4b2a"
+    const val SANDBOX_ORGANIZATION_ID: String = "63495e45-8e64-42b5-b602-c68f019ca806"
+    const val SANDBOX_API_BASE_URL: String = "https://api-dev.rain.xyz"
+
+    const val PRODUCTION_ORGANIZATION_ID: String = "306c2e82-5ae2-4be6-8b41-1ab0cc6b0ab5"
+    const val PRODUCTION_API_BASE_URL: String = "https://api.rain.xyz"
+
+    /** One environment's pair. */
+    class Row(val organizationId: String, val apiBaseUrl: String)
+
+    /**
+     * The pair for [environment]. The organization and the host always move together: the passkey
+     * leg never reaches Rain, so a host paired with the other environment's organization would sign
+     * users into the wrong one.
+     */
+    fun rowFor(environment: RainWalletEnvironment): Row = when (environment) {
+        RainWalletEnvironment.Sandbox -> Row(SANDBOX_ORGANIZATION_ID, SANDBOX_API_BASE_URL)
+        RainWalletEnvironment.Production -> Row(PRODUCTION_ORGANIZATION_ID, PRODUCTION_API_BASE_URL)
+    }
 }

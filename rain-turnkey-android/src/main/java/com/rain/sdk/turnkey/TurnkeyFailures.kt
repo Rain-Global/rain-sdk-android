@@ -63,7 +63,8 @@ internal fun RainError.withoutResponseBody(): RainError {
  * True for a vendor failure that carries more than a host may see: an HTTP failure, whose message
  * embeds the response body, or the typed client's `ActivityNotCompleted`, whose `toString()` prints
  * the whole activity. The adapter's own replacements, [TurnkeyHttpFailure] and
- * [TurnkeyActivityFailure], carry nothing more and are not.
+ * [TurnkeyActivityFailure], carry nothing more and are not; nor is [RainApiAuthFailure], which the
+ * Rain client builds from the status and the path alone.
  */
 internal fun Throwable.carriesVendorData(): Boolean =
     this is TurnkeyHttpError.ActivityNotCompleted ||

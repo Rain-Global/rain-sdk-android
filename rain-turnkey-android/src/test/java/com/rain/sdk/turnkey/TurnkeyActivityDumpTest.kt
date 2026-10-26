@@ -154,6 +154,8 @@ class TurnkeyActivityDumpTest {
         turnkey.setUserContactError = attachingEmail(email, token)
         val controller = TurnkeyManagedAuthController(
             context = turnkey,
+            rainApi = MockRainApiAuth(),
+            authTokenProvider = { "wat_1" },
             coordinator = TurnkeySessionCoordinator(turnkey = turnkey, onSessionExpired = {}, retryDelay = { }),
             configure = { null },
             passkeyDomain = "passkeys.example.com",

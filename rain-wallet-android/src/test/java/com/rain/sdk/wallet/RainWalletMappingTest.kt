@@ -8,6 +8,7 @@ import com.rain.sdk.turnkey.TurnkeyAuthState
 import com.rain.sdk.turnkey.TurnkeySessionPolicy
 import com.rain.sdk.turnkey.TurnkeySessionState
 import io.mockk.mockk
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -123,14 +124,16 @@ class RainWalletMappingTest {
     }
 
     @Test
-    fun `the config prints every field and the hook as set or null`() {
-        assertThat(RainWalletConfig().toString()).isEqualTo(
-            "RainWalletConfig(sessionPolicy=${RainWalletSessionPolicy()}, " +
+    fun `the config prints every field, the functions as set or null, and the environment by name`() {
+        assertThat(config().toString()).isEqualTo(
+            "RainWalletConfig(authTokenProvider=set, environment=Sandbox, sessionPolicy=${RainWalletSessionPolicy()}, " +
                 "onSessionExpired=null, sponsorGas=true, passkeyDomain=null)"
         )
-        assertThat(RainWalletConfig(onSessionExpired = {}).toString()).contains("onSessionExpired=set")
-        assertThat(RainWalletConfig(passkeyDomain = "passkeys.example.com").toString())
+        assertThat(config(onSessionExpired = {}).toString()).contains("onSessionExpired=set")
+        assertThat(config(passkeyDomain = "passkeys.example.com").toString())
             .endsWith("passkeyDomain=passkeys.example.com)")
+        assertThat(config(environment = RainWalletEnvironment.Production).toString())
+            .contains("environment=Production")
     }
 
     @Test
@@ -138,9 +141,9 @@ class RainWalletMappingTest {
         useRealBacking()
         val application = mockk<Application>()
 
-        assertThat(RainWalletConfig().toBacking(application).managedPasskeyDomain).isNull()
-        assertThat(RainWalletConfig(passkeyDomain = "   ").toBacking(application).managedPasskeyDomain).isNull()
-        assertThat(RainWalletConfig(passkeyDomain = " passkeys.example.com ").toBacking(application).managedPasskeyDomain)
+        assertThat(config().toBacking(application).managedPasskeyDomain).isNull()
+        assertThat(config(passkeyDomain = "   ").toBacking(application).managedPasskeyDomain).isNull()
+        assertThat(config(passkeyDomain = " passkeys.example.com ").toBacking(application).managedPasskeyDomain)
             .isEqualTo("passkeys.example.com")
     }
 
@@ -151,11 +154,60 @@ class RainWalletMappingTest {
 
         for (malformed in listOf("https://passkeys.example.com", "passkeys.example.com:443", "passkeys.example.com/app")) {
             val thrown = assertThrows(RainError.InvalidConfig::class.java) {
-                RainProvider(application, RainWalletConfig(passkeyDomain = malformed))
+                RainProvider(application, config(passkeyDomain = malformed))
             }
             assertThat(thrown.message).contains("two labels")
         }
     }
+
+    @Test
+    fun `the environment picks the backend row the backing is built with, Production by default`() {
+        useRealBacking()
+        val application = mockk<Application>()
+
+        val sandbox = config().toBacking(application)
+        assertThat(sandbox.managedOrganizationId).isEqualTo("63495e45-8e64-42b5-b602-c68f019ca806")
+        assertThat(sandbox.managedRainApiBaseUrl).isEqualTo("https://api-dev.rain.xyz")
+
+        assertThat(RainWalletConfig(authTokenProvider = { "wat" }).environment).isEqualTo(RainWalletEnvironment.Production)
+        val production = RainWalletConfig(authTokenProvider = { "wat" }).toBacking(application)
+        assertThat(production.managedOrganizationId).isEqualTo("306c2e82-5ae2-4be6-8b41-1ab0cc6b0ab5")
+        assertThat(production.managedRainApiBaseUrl).isEqualTo("https://api.rain.xyz")
+    }
+
+    @Test
+    fun `the backing's token supplier hands the host the contact in the wallet's own terms, null included`() {
+        useRealBacking()
+        val asked = mutableListOf<RainWalletContact?>()
+        val backing = config(authTokenProvider = { contact ->
+            asked += contact
+            "wat_${asked.size}"
+        }).toBacking(mockk<Application>())
+        val supplier = checkNotNull(backing.managedAuthTokenProvider)
+
+        val first = runBlocking { supplier(LoginContact.Email("user@example.com")) }
+        val second = runBlocking { supplier(LoginContact.Phone("+13214567890")) }
+        val third = runBlocking { supplier(null) }
+
+        assertThat(listOf(first, second, third)).containsExactly("wat_1", "wat_2", "wat_3").inOrder()
+        assertThat(asked).containsExactly(
+            RainWalletContact.Email("user@example.com"),
+            RainWalletContact.Phone("+13214567890"),
+            null,
+        ).inOrder()
+    }
+
+    private fun config(
+        authTokenProvider: suspend (RainWalletContact?) -> String = { "wat" },
+        environment: RainWalletEnvironment = RainWalletEnvironment.Sandbox,
+        onSessionExpired: (() -> Unit)? = null,
+        passkeyDomain: String? = null,
+    ) = RainWalletConfig(
+        authTokenProvider = authTokenProvider,
+        environment = environment,
+        onSessionExpired = onSessionExpired,
+        passkeyDomain = passkeyDomain,
+    )
 
     private fun useRealBacking() = realBacking.useRealBacking()
 }

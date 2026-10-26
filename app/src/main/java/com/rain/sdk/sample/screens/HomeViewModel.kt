@@ -559,11 +559,24 @@ class HomeViewModel(
                 _state.update {
                     it.copy(
                         isLoading = false,
-                        statusText = "Rain Wallet login failed: ${e.message}"
+                        statusText = rainWalletAuthFailureText("Rain Wallet login failed", e)
                     )
                 }
             }
         }
+    }
+
+    /**
+     * The status line for a failed Rain wallet authentication call: the three failures the demo
+     * can explain get a hint a tester can act on, every other failure shows the SDK's message. A
+     * mint the demo could not make offline arrives as the same `RAIN_301` as Rain being unreachable.
+     */
+    private fun rainWalletAuthFailureText(label: String, e: Exception): String = when {
+        e is RainError.Unauthorized -> "$label: Rain refused the wallet auth token or this tenant (${e.code}); check the Api-Key's scope"
+        e is RainError.NetworkError -> "$label: Rain or the demo's token mint could not be reached (${e.code}); check the connection and try again"
+        e is RainError.InvalidConfig && e.message.orEmpty().contains("authTokenProvider") ->
+            "$label: the demo could not mint a wallet auth token (${e.code}); enter the sandbox Api-Key and user ID on Home"
+        else -> "$label: ${e.message}"
     }
 
     fun verifyRainWalletOtp() {
@@ -913,7 +926,7 @@ class HomeViewModel(
                 throw e
             } catch (e: RainError) {
                 SampleLog.w(area, "failed ${e.describe()}")
-                onRainWalletPasskeyFailed(provider, label, previousOwner, hadSession, e)
+                onRainWalletPasskeyFailed(provider, action, label, previousOwner, hadSession, e)
             } finally {
                 _state.update { it.copy(rainWalletPasskeyInFlight = null) }
             }
@@ -922,26 +935,36 @@ class HomeViewModel(
 
     /**
      * A passkey flow's failure. A closed sheet or a refused request never reached a login, so the
-     * previous owner still owns whatever session is live. When the login went through and a later
-     * step failed, the session is live and the sample carries on signed in, as after a code.
-     * Otherwise whose session is live is unknown, so the owner stays unrecorded and the user signs
-     * in again.
+     * previous owner still owns whatever session is live; on a sign-up the closed sheet may have
+     * been the sign-in sheet that opens after Rain answered, when the account holds no key for
+     * this device, which the error cannot tell from the ceremony's sheet, so the status points at
+     * *Sign in with passkey*. When the login went through and a later step failed, the session is
+     * live and the sample carries on signed in, as after a code. Otherwise whose session is live
+     * is unknown, so the owner stays unrecorded and the user signs in again; a sign-up whose
+     * answer was lost, unreadable or refused after the account was created may have left one, so
+     * that status points at *Sign in with passkey* too. When Rain's answer to the sign-up was lost
+     * or unreadable, the registration is kept and the next sign-up resends it instead of minting a
+     * second account; a failure after Rain answered with the account leaves it settled, so a
+     * second sign-up then mints another.
      */
+    @Suppress("LongParameterList") // one value per thing the status depends on; the flow's kind is the sixth
     private fun onRainWalletPasskeyFailed(
         provider: RainProvider?,
+        action: RainWalletPasskeyAction,
         label: String,
         previousOwner: RainWalletOwnerSnapshot,
         hadSession: Boolean,
         e: RainError,
     ) {
         val code = e.code
+        val signUp = action == RainWalletPasskeyAction.SignUp
         when {
             e is RainError.UserRejected || e is RainError.InvalidConfig -> {
                 restoreRainWalletOwner(previousOwner)
-                val status = if (e is RainError.UserRejected) {
-                    "Passkey sheet closed ($code), no passkey used"
-                } else {
-                    "$label refused ($code)"
+                val status = when {
+                    e !is RainError.UserRejected -> "$label refused ($code)"
+                    signUp -> "Passkey sheet closed ($code); if Rain answered the sign-up, the account exists and Sign in with passkey reaches it"
+                    else -> "Passkey sheet closed ($code), no passkey used"
                 }
                 _state.update { it.copy(statusText = status) }
             }
@@ -954,6 +977,10 @@ class HomeViewModel(
                         statusText = "$label signed in; wallet setup finishes when Rain initializes ($code)",
                     )
                 }
+            }
+            // A refused token or tenant (RAIN_202) is the one failure that certainly left no account.
+            signUp && e !is RainError.Unauthorized -> _state.update {
+                it.copy(statusText = "$label failed ($code); the account may exist, so try Sign in with passkey before creating another")
             }
             else -> _state.update { it.copy(statusText = "$label failed ($code)") }
         }
@@ -1061,7 +1088,7 @@ class HomeViewModel(
                 throw e
             } catch (e: RainError) {
                 SampleLog.w("RainWallet.attach", "send failed ${e.describe()}")
-                _state.update { it.copy(statusText = "Verification code failed (${e.code})") }
+                _state.update { it.copy(statusText = rainWalletAuthFailureText("Verification code failed", e)) }
             } finally {
                 _state.update { it.copy(rainWalletAttachInFlight = false) }
             }
@@ -1071,9 +1098,10 @@ class HomeViewModel(
     /**
      * Confirms the verification code and attaches the contact, which can then sign in to this
      * account by code; the contact goes into its owner slot, so a code login for it reuses the live
-     * session. A rejected code keeps the challenge; a contact another account signs in with is
-     * refused with `RAIN_202` and the slot stays as it was; any other failure restarts from "Send
-     * verification code", which replaces a challenge the SDK kept.
+     * session. A rejected code keeps the challenge; a refused update leaves the slot as it was; any
+     * other failure restarts from "Send verification code", which replaces a challenge the SDK
+     * kept. A contact another account signs in with is refused (`RAIN_202`) and the status shows
+     * the reason.
      */
     fun confirmRainWalletAttach() {
         val s = _state.value
@@ -1100,8 +1128,8 @@ class HomeViewModel(
                     it.copy(rainWalletAttachCode = "", statusText = "That code was not accepted; check it and try again")
                 }
             } catch (e: RainError.Unauthorized) {
-                // The SDK's message says which: another account signs in with that contact, or the
-                // backend refused the update. The code is spent either way, and the slot is untouched.
+                // Rain refused the token or the tenant, the contact signs in to another account, or
+                // the backend refused the update. The code is spent either way, and the slot is untouched.
                 SampleLog.w("RainWallet.attach", "attach refused ${e.describe()}")
                 _state.update {
                     it.copy(
@@ -1702,6 +1730,22 @@ data class HomeUiState(
             mode == WalletMode.Turnkey && backendOwner == SessionStore.Provider.RainWallet ->
                 "The Rain Wallet tab configured the shared wallet backend this launch — relaunch the app to log in here"
             else -> null
+        }
+
+    /**
+     * Whether a code login, a passkey sign-up or a contact attach can start: the demo mints the
+     * wallet auth token with the sandbox Api-Key and user ID on Home. A passkey sign-in and an added
+     * passkey need no token.
+     */
+    val rainWalletAuthAvailable: Boolean
+        get() = rainApiKey.isNotBlank() && userId.isNotBlank()
+
+    /** Why [rainWalletAuthAvailable] is false, for the Rain Wallet card; null when it is true. */
+    val rainWalletAuthNotice: String?
+        get() = if (rainWalletAuthAvailable) {
+            null
+        } else {
+            "Enter the sandbox Rain Api-Key and user ID on the Home card first: the demo mints the wallet auth token with them"
         }
 
     /** The contact the selected Rain Wallet channel sends to. */

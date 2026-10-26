@@ -1,13 +1,16 @@
 package com.rain.sdk.sample
 
 import com.rain.sdk.models.RainAdminSignature
+import com.rain.sdk.wallet.RainWalletContact
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONException
@@ -23,9 +26,10 @@ import kotlin.coroutines.resumeWithException
 // The Rain issuing API is the host's responsibility, not the SDK's. The SDK builds and sends
 // transactions; the data those transactions need, the user's collateral contract and Rain's admin
 // withdrawal signature, comes from Rain's REST API, authenticated with a program Api-Key that
-// belongs on the partner's backend. This file is the demo's own minimal client and a reference for
-// what a host implements, normally server-side so the key never ships in an app. The demo types the
-// key on the device only because it has no backend of its own.
+// belongs on the partner's backend. The same key mints the wallet auth token the Rain wallet's
+// authentication runs under. This file is the demo's own minimal client and a reference for what a
+// host implements, normally server-side so the key never ships in an app. The demo types the key on
+// the device only because it has no backend of its own.
 
 /** Which Rain deployment the demo talks to. */
 enum class SampleRainEnvironment(val baseUrl: String) {
@@ -71,6 +75,15 @@ data class CollateralToken(
     val balanceAmount: BigDecimal? get() = balance.toBigDecimalOrNull()
 }
 
+/**
+ * A wallet auth token from `POST /v1/issuing/embedded-wallets/auth-tokens`: what a host's backend
+ * hands the app for `RainWalletConfig.authTokenProvider`. Lives ten minutes; bound to the tenant
+ * and, when minted for one, the contact. A bearer credential, so `toString()` redacts it.
+ */
+data class WalletAuthToken(val token: String, val expiresAt: String) {
+    override fun toString(): String = "WalletAuthToken(token=<redacted>, expiresAt=$expiresAt)"
+}
+
 /** The inputs of `GET /v1/issuing/users/{userId}/signatures/withdrawals`. */
 data class WithdrawalSignatureRequest(
     val chainId: Int,
@@ -109,11 +122,12 @@ sealed class RainApiError(message: String, cause: Throwable? = null) : Exception
 }
 
 /**
- * Minimal OkHttp client for the two Rain API calls the wallet flows need. Every request carries the
+ * Minimal OkHttp client for the Rain API calls the wallet flows need. Every request carries the
  * program key in the `Api-Key` header, so the base URL must be https; the loopback host is allowed
  * for tests. Plain Kotlin, no Android types, so it also runs under JVM tests and reads as host
  * reference code; callers do the logging.
  */
+@Suppress("TooManyFunctions") // one function per Rain endpoint, plus the HTTP plumbing
 class RainApiClient(
     baseUrl: String,
     private val apiKey: String,
@@ -158,6 +172,31 @@ class RainApiClient(
         return parseSignature(decode("withdrawal signature") { JSONObject(body) })
     }
 
+    /**
+     * `POST /v1/issuing/embedded-wallets/auth-tokens`: a wallet auth token for [contact], the
+     * canonical contact the SDK names, minted with the Api-Key, which needs the
+     * `embeddedWallets:write` scope.
+     */
+    suspend fun mintWalletAuthToken(contact: RainWalletContact?): WalletAuthToken {
+        val url = baseUrl.newBuilder().addPathSegments("v1/issuing/embedded-wallets/auth-tokens").build()
+        val body = JSONObject()
+        if (contact != null) {
+            val type = when (contact) {
+                is RainWalletContact.Email -> "email"
+                is RainWalletContact.Phone -> "phone"
+            }
+            body.put("contact", JSONObject().put("type", type).put("value", contact.value))
+        }
+        val answer = post(url, body)
+        return decode("wallet auth token") {
+            val json = JSONObject(answer)
+            WalletAuthToken(
+                token = json.requiredString("token", "wallet auth token"),
+                expiresAt = json.requiredString("expiresAt", "wallet auth token"),
+            )
+        }
+    }
+
     // ---------- HTTP ----------
 
     /** `.../v1/issuing/users/{userId}` with the id as one encoded segment. */
@@ -165,13 +204,26 @@ class RainApiClient(
         baseUrl.newBuilder().addPathSegments("v1/issuing/users").addPathSegment(userId)
 
     /** The body on 2xx; 401 and 403 are [RainApiError.Unauthorized], other statuses [RainApiError.Http]. */
-    private suspend fun get(url: HttpUrl): String {
-        val request = Request.Builder()
+    private suspend fun get(url: HttpUrl): String = exchange(
+        Request.Builder()
             .url(url)
             .header("Api-Key", apiKey)
             .header("Accept", "application/json")
             .get()
             .build()
+    )
+
+    /** [get]'s twin for a JSON body. */
+    private suspend fun post(url: HttpUrl, body: JSONObject): String = exchange(
+        Request.Builder()
+            .url(url)
+            .header("Api-Key", apiKey)
+            .header("Accept", "application/json")
+            .post(body.toString().toRequestBody(JSON_MEDIA_TYPE.toMediaType()))
+            .build()
+    )
+
+    private suspend fun exchange(request: Request): String {
         val reply = httpClient.newCall(request).await()
         val error = statusError(reply.code, reply.successful, reply.body)
         if (error != null) throw error
@@ -271,6 +323,7 @@ class RainApiClient(
     }
 
     companion object {
+        private const val JSON_MEDIA_TYPE = "application/json"
         private const val ERROR_BODY_PREVIEW_CHARS = 300
         private const val TIMEOUT_SECONDS = 30L
         private const val CALL_TIMEOUT_SECONDS = 60L

@@ -5,7 +5,7 @@ Android SDK that connects a wallet — the Rain wallet, or an MPC or embedded wa
 messages, compose withdrawal transactions, sign and submit via a registered wallet provider, read
 balances and history, and estimate fees. Works on EVM chains and Solana.
 
-- **Rain wallet** — Register a `RainProvider` (`rain-wallet-android`); the SDK runs login by a one-time code (email or SMS) or by a passkey bound to your domain, provisions one wallet with Ethereum and Solana accounts on first login, manages the session and exports the recovery phrase and private keys, all under Rain's names with no wallet-vendor type on its surface. See [rain-wallet-android/README.md](rain-wallet-android/README.md).
+- **Rain wallet** — Register a `RainProvider` (`rain-wallet-android`) with the wallet auth token your backend mints; the SDK runs login by a one-time code (email or SMS) or by a passkey bound to your domain, provisions one wallet with Ethereum and Solana accounts on first login, manages the session and exports the recovery phrase and private keys, all under Rain's names with no wallet-vendor type on its surface. See [rain-wallet-android/README.md](rain-wallet-android/README.md).
 - **Portal wallet integration** — Register a `PortalProvider` with a Portal session token and resolve a client; use the connected MPC wallet for signing and sending transactions. Session refresh is host-driven via `PortalConfig.onSessionTokenNeeded` / `onSessionExpired`; see the adapter table in [docs/METHODS.md](docs/METHODS.md#provider-adapters).
 - **Turnkey wallet integration** — Register a `TurnkeyProvider` with a `TurnkeyContext` your app authenticated (passkeys / auth proxy / OAuth / OTP). The SDK also carries a managed mode (a one-time code by email or SMS, or a passkey) behind the `@InternalRainTurnkeyApi` opt-in marker: the building block of the Rain wallet provider (`rain-wallet-android`), not a host-facing API. In both modes the provider exports the wallet's recovery phrase and private keys, decrypted on the device, through `exportRecoveryPhrase` and `exportPrivateKey`. See [docs/TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md).
 - **Privy wallet integration** — Register a `PrivyProvider` with an authenticated `Privy` instance; embedded EVM and Solana wallets are used for custody.
@@ -50,6 +50,8 @@ dependencies {
 
     // Portal MPC.
     // implementation("xyz.rain:rain-portal-android:5.0.0-beta.1")
+    // The Rain wallet snippets in this file are for the next release: 5.0.0-beta.1 has no
+    // authTokenProvider or environment on RainWalletConfig.
 
     // Privy embedded wallets.
     // implementation("xyz.rain:rain-privy-android:5.0.0-beta.1")
@@ -152,7 +154,7 @@ val solanaKey = provider.exportPrivateKey(TurnkeyKeyFamily.SOLANA)
 
 See [docs/TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md) for the bring-your-own mode in full, including
 `authState`, `logout()`, and the one-shot configuration rule. The SDK also carries a managed mode behind
-`@InternalRainTurnkeyApi`; hosts reach it as the Rain wallet, `RainProvider(application)` in
+`@InternalRainTurnkeyApi`; hosts reach it as the Rain wallet, `RainProvider(application, RainWalletConfig(authTokenProvider = ..., environment = RainWalletEnvironment.Sandbox))` in
 [rain-wallet-android/README.md](rain-wallet-android/README.md), which exposes the same steps with no
 vendor type or name. Internals: [Managed mode (internal API)](docs/TURNKEY_SUPPORT.md#managed-mode-internal-api).
 
