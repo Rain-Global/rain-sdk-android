@@ -367,12 +367,13 @@ constructor(
     /**
      * Creates a passkey account and signs it in with one prompt: the host's contact-less token, the
      * ceremony, `POST /signup/passkey` with the attestation and a device key Rain registers on the
-     * account for a minute, then Turnkey's `stampLogin` with that key, whose session stays on it
-     * like a code login's. An account with no key for the device (adopted from an earlier attempt,
-     * or found saved on a resend) signs in through the sheet instead. Refused over a live session; a
-     * dead one is cleared first. A sign-up Rain left in doubt is resent from [pendingPasskeySignups]
-     * by the next call; [signUpOnRain] has the rule, and the `signUpWithPasskey` row in
-     * `docs/METHODS.md` says what each failure leaves behind.
+     * account for a minute, then Turnkey's `stampLogin` stamped with that key and bound to a fresh key
+     * of the device's; the device key is deleted once Rain's sign-up and the stamped login have
+     * answered. An account with no key for the device (adopted from an earlier attempt, or found saved
+     * on a resend) signs in through the sheet instead. Refused over a live session; a dead one is
+     * cleared first. A sign-up Rain left in doubt is resent from [pendingPasskeySignups] by the next
+     * call; [signUpOnRain] has the rule, and the `signUpWithPasskey` row in `docs/METHODS.md` says
+     * what each failure leaves behind.
      */
     suspend fun signUpWithPasskey(activity: Activity) {
         flowMutex.withLock {
@@ -388,17 +389,18 @@ constructor(
                 context.createPasskeyCredential(activity, rpId, TurnkeyPasskeys.authenticatorName(nowEpochSeconds()))
             }.also { pendingPasskeySignups.save(it) }
             val deviceKey = guarded { context.createDeviceKey() }
-            val (signup, jwt) = onFailure({ deleteDeviceKey(deviceKey) }) {
+            val (signup, login) = onFailure({ deleteDeviceKey(deviceKey) }) {
                 val signup = signUpOnRain(token, registration, deviceKey, resend = kept != null)
                 val created = signup as? PasskeySignup.Created
-                signup to created?.let { guarded { context.stampLoginWithDeviceKey(deviceKey, it.subOrganizationId) } }
+                signup to created?.let { loginWithDeviceKey(deviceKey, it.subOrganizationId) }
             }
-            if (jwt != null) {
-                storeSession(jwt, sessionKey, deviceKey)
+            // The device key only signs the login; the session has a key of its own, so nothing uses it from here.
+            withContext(NonCancellable) { deleteDeviceKey(deviceKey) }
+            if (login != null) {
+                storeSession(login.jwt, sessionKey, login.sessionPublicKey)
             } else {
                 // No API key for the device on the account: Rain adopted it from an earlier attempt,
                 // which registers none, or a resend found it saved. The passkey signs in instead.
-                withContext(NonCancellable) { deleteDeviceKey(deviceKey) }
                 val organizationId = (signup as? PasskeySignup.Created)?.subOrganizationId
                 ceremony(sessionKey) { context.completePasskeyLogin(activity, sessionKey, organizationId = organizationId) }
             }
@@ -822,15 +824,36 @@ constructor(
     }
 
     /**
+     * Turnkey's login stamped with [deviceKey] on [organizationId], bound to a fresh key of the
+     * device's: the session with that key, or null for a stamp Turnkey refused or answered without
+     * a session, the fresh key deleted again; a failure or the caller's cancellation deletes it too.
+     */
+    private suspend fun loginWithDeviceKey(deviceKey: String, organizationId: String): DeviceKeyLogin? {
+        val sessionPublicKey = guarded { context.createDeviceKey() }
+        val jwt = onFailure({ deleteDeviceKey(sessionPublicKey) }) {
+            guarded { context.stampLoginWithDeviceKey(deviceKey, sessionPublicKey, organizationId) }
+        }
+        if (jwt == null) {
+            withContext(NonCancellable) { deleteDeviceKey(sessionPublicKey) }
+            return null
+        }
+        return DeviceKeyLogin(jwt, sessionPublicKey)
+    }
+
+    /** A session Turnkey issued to a device-key stamp, and the fresh key it is bound to. */
+    private class DeviceKeyLogin(val jwt: String, val sessionPublicKey: String)
+
+    /**
      * Stores the session Rain issued under [sessionKey], the vendor's `createSession`, which, when
      * nothing is selected, also selects it and refreshes the user and the wallets over the network,
      * so a failure or the caller's cancellation can land with the session already stored, selected
-     * or not. A session the vendor selected is left signed in with [deviceKey], since the device
-     * stamps with that key from then on; otherwise [abandonStore] deletes the key and clears the
+     * or not. A session the vendor selected is left signed in with [boundKey], the key the session
+     * is bound to (the code login's device key, a passkey sign-up's fresh session key), since the
+     * device stamps with it from then on; otherwise [abandonStore] deletes the key and clears the
      * stored session, so the failed login leaves neither behind.
      */
-    private suspend fun storeSession(jwt: String, sessionKey: String, deviceKey: String) {
-        onFailure({ abandonStore(sessionKey, deviceKey) }) { guarded { context.storeSession(jwt, sessionKey) } }
+    private suspend fun storeSession(jwt: String, sessionKey: String, boundKey: String) {
+        onFailure({ abandonStore(sessionKey, boundKey) }) { guarded { context.storeSession(jwt, sessionKey) } }
     }
 
     /**
@@ -838,9 +861,9 @@ constructor(
      * the key first, while it is certainly still there; the vendor's purge of a stored session
      * deletes the key it finds and is silent about one already gone.
      */
-    private suspend fun abandonStore(sessionKey: String, deviceKey: String) {
+    private suspend fun abandonStore(sessionKey: String, boundKey: String) {
         if (context.selectedSessionKey == sessionKey) return
-        deleteDeviceKey(deviceKey)
+        deleteDeviceKey(boundKey)
         clearUnselected(sessionKey)
     }
 

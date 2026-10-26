@@ -109,12 +109,12 @@ class TurnkeyManagedPasskeyResendTest {
             assertThat(resent.attestation).isEqualTo(first.attestation)
             assertThat(rainApi.signupPasskeyCalls.map { it.token }).containsExactly("wat_1", "wat_2").inOrder()
             assertThat(rainApi.signupPasskeyCalls.map { it.publicKey }).containsExactly("device-key-1", "device-key-2").inOrder()
-            assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-2", "sub-passkey"))
+            assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-2", "sub-passkey", "device-key-3"))
             val stored = turnkey.storeSessionCalls.single()
-            assertThat(stored.jwt).isEqualTo("jwt-for-device-key-2")
+            assertThat(stored.jwt).isEqualTo("jwt-for-device-key-3")
             assertThat(turnkey.selectedSessionKey).isEqualTo(stored.sessionKey)
             assertThat(turnkey.passkeyLoginCalls).isEmpty()
-            assertThat(turnkey.liveDeviceKeys).containsExactly("device-key-2")
+            assertThat(turnkey.liveDeviceKeys).containsExactly("device-key-3")
             assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
             assertThat(hookCalls).isEqualTo(0)
         }
@@ -328,7 +328,7 @@ class TurnkeyManagedPasskeyResendTest {
         assertThat(tokenRequests).containsExactly(null, null)
         assertThat(rainApi.signupPasskeyCalls.map { it.token }).containsExactly("wat_1", "wat_2").inOrder()
         assertThat(rainApi.signupPasskeyCalls.map { it.publicKey }).containsExactly("device-key-1", "device-key-1")
-        assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-1", "sub-passkey"))
+        assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-1", "sub-passkey", "device-key-2"))
         assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
     }
 
@@ -358,7 +358,7 @@ class TurnkeyManagedPasskeyResendTest {
 
         assertThat(turnkey.createPasskeyCalls).hasSize(1)
         assertThat(rainApi.signupPasskeyCalls).hasSize(2)
-        assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-3", "sub-passkey"))
+        assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-3", "sub-passkey", "device-key-4"))
         assertThat(turnkey.passkeyLoginCalls).isEmpty()
         assertThat(store.load()).isNull()
         assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
@@ -390,7 +390,7 @@ class TurnkeyManagedPasskeyResendTest {
         val resent = relaunchRain.signupPasskeyCalls.single()
         assertThat(resent.challenge).isEqualTo(first.challenge)
         assertThat(resent.attestation).isEqualTo(first.attestation)
-        assertThat(relaunch.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-1", "sub-passkey"))
+        assertThat(relaunch.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-1", "sub-passkey", "device-key-2"))
         assertThat(relaunch.passkeyLoginCalls).isEmpty()
         assertThat(store.load()).isNull()
         assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
