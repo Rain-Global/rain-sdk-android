@@ -221,12 +221,13 @@ internal interface TurnkeyContextProtocol {
     suspend fun storeSession(jwt: String, sessionKey: String)
 
     /**
-     * Turnkey's `stampLogin` on [organizationId], stamped with the device key [publicKey] and bound to
-     * it: the session JWT for [storeSession], or null when Turnkey refused the stamp (no API key for
-     * [publicKey] on the organization) or answered the login activity without a session. Revokes the
-     * user's other sessions. A transport failure is [RainError.NetworkError]; the rest leaves as thrown.
+     * Turnkey's `stampLogin` on [organizationId], stamped with the device key [publicKey] and binding
+     * the session to [sessionPublicKey], a fresh key of the device's the caller made: the session JWT
+     * for [storeSession], or null when Turnkey refused the stamp (no API key for [publicKey] on the
+     * organization) or answered the login activity without a session. Revokes the user's other
+     * sessions. A transport failure is [RainError.NetworkError]; the rest leaves as thrown.
      */
-    suspend fun stampLoginWithDeviceKey(publicKey: String, organizationId: String): String?
+    suspend fun stampLoginWithDeviceKey(publicKey: String, sessionPublicKey: String, organizationId: String): String?
 
     /** The key of the session the vendor currently treats as selected, or null when none is. */
     val selectedSessionKey: String?
@@ -307,12 +308,12 @@ internal interface TurnkeyContextProtocol {
 private val TURNKEY_REFUSED_STAMP = 400..499
 
 /**
- * The stamp-login body for the device key [publicKey] on [organizationId]: a session bound to that
- * same key, the vendor's default lifetime, the user's other sessions revoked.
+ * The stamp-login body binding the session to [sessionPublicKey] on [organizationId], a fresh key of
+ * the device's: the vendor's default lifetime, the user's other sessions revoked.
  */
-internal fun deviceKeyStampLoginBody(publicKey: String, organizationId: String): TStampLoginBody = TStampLoginBody(
+internal fun deviceKeyStampLoginBody(sessionPublicKey: String, organizationId: String): TStampLoginBody = TStampLoginBody(
     organizationId = organizationId,
-    publicKey = publicKey,
+    publicKey = sessionPublicKey,
     expirationSeconds = SessionStorage.DEFAULT_EXPIRATION_SECONDS,
     invalidateExisting = true,
 )
@@ -453,10 +454,10 @@ internal class TurnkeyContextAdapter(
     }
 
     // The vendor's passkey-login client with the device key as the stamper; the API host is the vendor's default.
-    override suspend fun stampLoginWithDeviceKey(publicKey: String, organizationId: String): String? =
+    override suspend fun stampLoginWithDeviceKey(publicKey: String, sessionPublicKey: String, organizationId: String): String? =
         withContext(ioDispatcher) {
             val client = TurnkeyClient(stamper = Stamper.fromPublicKey(publicKey), organizationId = organizationId)
-            stampLoginSessionOrNull { client.stampLogin(deviceKeyStampLoginBody(publicKey, organizationId)) }
+            stampLoginSessionOrNull { client.stampLogin(deviceKeyStampLoginBody(sessionPublicKey, organizationId)) }
         }
 
     override val selectedSessionKey: String?

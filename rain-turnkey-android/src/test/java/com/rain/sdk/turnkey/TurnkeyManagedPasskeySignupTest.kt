@@ -53,7 +53,7 @@ class TurnkeyManagedPasskeySignupTest {
     )
 
     @Test
-    fun `passkey sign-up runs one ceremony, sends the device key to Rain, stamps the login with it and keeps it as the session's key`() =
+    fun `passkey sign-up runs one ceremony, sends the device key to Rain, stamps the login with it and binds the session to a fresh key`() =
         runTest {
             val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
             turnkey.onStoreSession = { turnkey.authenticate() }
@@ -64,15 +64,16 @@ class TurnkeyManagedPasskeySignupTest {
             controller.signUpWithPasskey(activity)
 
             assertThat(turnkey.createPasskeyCalls).hasSize(1)
-            val deviceKey = turnkey.createdDeviceKeys.single()
+            val deviceKey = turnkey.createdDeviceKeys.first()
             assertThat(rainApi.signupPasskeyCalls.single().publicKey).isEqualTo(deviceKey)
-            assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall(deviceKey, "sub-passkey"))
+            assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall(deviceKey, "sub-passkey", "device-key-2"))
             val stored = turnkey.storeSessionCalls.single()
-            assertThat(stored.jwt).isEqualTo("jwt-for-$deviceKey")
+            assertThat(stored.jwt).isEqualTo("jwt-for-device-key-2")
             assertThat(stored.sessionKey).startsWith("rain-turnkey-")
             assertThat(turnkey.selectedSessionKey).isEqualTo(stored.sessionKey)
             assertThat(turnkey.passkeyLoginCalls).isEmpty()
-            assertThat(turnkey.liveDeviceKeys).containsExactly(deviceKey)
+            assertThat(turnkey.liveDeviceKeys).containsExactly("device-key-2")
+            assertThat(turnkey.deletedDeviceKeys).containsExactly(deviceKey)
             assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
         }
 
@@ -89,12 +90,12 @@ class TurnkeyManagedPasskeySignupTest {
             controller.signUpWithPasskey(activity)
 
             assertThat(turnkey.createPasskeyCalls).hasSize(1)
-            assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-1", "sub-passkey"))
+            assertThat(turnkey.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-1", "sub-passkey", "device-key-2"))
             assertThat(turnkey.storeSessionCalls).isEmpty()
             val login = turnkey.passkeyLoginCalls.single()
             assertThat(login.organizationId).isEqualTo("sub-passkey")
             assertThat(turnkey.selectedSessionKey).isEqualTo(login.sessionKey)
-            assertThat(turnkey.deletedDeviceKeys).containsExactly("device-key-1")
+            assertThat(turnkey.deletedDeviceKeys).containsExactly("device-key-1", "device-key-2")
             assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
         }
 
@@ -124,7 +125,7 @@ class TurnkeyManagedPasskeySignupTest {
                 assertWithMessage(name).that(thrown.errorCode).isEqualTo(code)
                 assertWithMessage(name).that(rainApi.signupPasskeyCalls).hasSize(1)
                 assertWithMessage(name).that(turnkey.passkeyLoginCalls).isEmpty()
-                assertWithMessage(name).that(turnkey.deletedDeviceKeys).containsExactly("device-key-1")
+                assertWithMessage(name).that(turnkey.deletedDeviceKeys).containsExactly("device-key-1", "device-key-2")
                 assertWithMessage(name).that(turnkey.selectedSessionKey).isNull()
                 assertWithMessage(name).that(controller.hasActiveSession()).isFalse()
                 assertWithMessage(name).that(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Unauthenticated)
@@ -170,7 +171,7 @@ class TurnkeyManagedPasskeySignupTest {
 
         assertThat(cleared.clearSelectedSessionCallCount).isEqualTo(1)
         assertThat(cleared.selectedSessionKey).isEqualTo(cleared.storeSessionCalls.single().sessionKey)
-        assertThat(cleared.liveDeviceKeys).containsExactly("device-key-1")
+        assertThat(cleared.liveDeviceKeys).containsExactly("device-key-2")
         assertThat(controller.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
         assertThat(hookCalls).isEqualTo(0)
 
@@ -243,7 +244,7 @@ class TurnkeyManagedPasskeySignupTest {
 
         assertThat(caught).isInstanceOf(CancellationException::class.java)
         assertThat(caught).isNotInstanceOf(RainError::class.java)
-        assertThat(turnkey.deletedDeviceKeys).containsExactly("device-key-1")
+        assertThat(turnkey.deletedDeviceKeys).containsExactly("device-key-1", "device-key-2")
         assertThat(turnkey.passkeyLoginCalls).isEmpty()
         assertThat(turnkey.selectedSessionKey).isNull()
         assertThat(controller.hasActiveSession()).isFalse()

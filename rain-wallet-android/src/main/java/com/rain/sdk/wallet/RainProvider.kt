@@ -312,10 +312,11 @@ class RainProvider internal constructor(
      * Creates a new account, with an Ethereum and a Solana account in one wallet, whose only login
      * is a passkey bound to [RainWalletConfig.passkeyDomain], and signs it in with one prompt: the
      * sheet creates the passkey, Rain registers a device key on the new account for a minute, and
-     * the SDK logs in with that key, as a code login does. When the account holds no key for this
+     * the SDK logs in with a login stamped by that key. When the account holds no key for this
      * device, the sheet opens again and the passkey signs it in. Each new passkey is a new account,
      * so a returning user signs in with [loginWithPasskey] or a login code; call [logout] first
-     * when [hasActiveSession] is true. A failure can leave an account behind; the
+     * unless [currentAuthState] reads `Unauthenticated` ([hasActiveSession] reads false in a
+     * session's last 30 seconds, which still refuses). A failure can leave an account behind; the
      * `signUpWithPasskey` row in `docs/METHODS.md` says when, and which code tells you.
      *
      * @param activity The foreground Activity the sheet is presented from; see [loginWithPasskey]
@@ -329,8 +330,10 @@ class RainProvider internal constructor(
      * @throws RainError.Unauthorized (`RAIN_202`) when Rain refuses the token or the tenant, or from
      *   the account backfill.
      * @throws RainError.NetworkError (`RAIN_301`) when Rain, the wallet backend during the key
-     *   login, or your backend behind the token provider cannot be reached, or when Rain is still
-     *   creating the account from an earlier call (the registration is kept; call again in a
+     *   login, or your backend behind the token provider cannot be reached (a lost sign-up answer
+     *   keeps the registration for the next call to resend; a backend unreachable during the key
+     *   login leaves the account created, so sign in with [loginWithPasskey]), or when Rain is
+     *   still creating the account from an earlier call (the registration is kept; call again in a
      *   moment).
      * @throws RainError.ProviderError (`RAIN_501`) for a ceremony or sign-up the device or Rain
      *   refused or failed, a key login or its session store the wallet backend failed (a refused
@@ -338,8 +341,8 @@ class RainProvider internal constructor(
      * @throws RainError.TokenExpired (`RAIN_201`) from the session switch after the login succeeded.
      * @throws RainError.InternalError (`RAIN_502`) when the backend's initialization failed for
      *   this launch, when an answer could not be read (the registration is kept; call again), or
-     *   when the session store refused the fresh key or could not use the session (an occupied
-     *   session key) after the key login; the account exists, so sign in with [loginWithPasskey].
+     *   when the session store found the session key occupied, after the key login or the fallback
+     *   sheet; the account exists, so sign in with [loginWithPasskey].
      * @see loginWithPasskey
      */
     suspend fun signUpWithPasskey(activity: Activity) {

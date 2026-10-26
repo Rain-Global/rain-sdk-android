@@ -33,11 +33,11 @@ class TurnkeyStampLoginTest {
     fun requireJdk24() = assumeJdk24()
 
     @Test
-    fun `the body asks a session bound to the device key on the organization, for 900 seconds, revoking the others`() {
-        val body = deviceKeyStampLoginBody(publicKey = "04-device-key", organizationId = "sub-org-1")
+    fun `the body asks a session bound to the fresh session key on the organization, for 900 seconds, revoking the others`() {
+        val body = deviceKeyStampLoginBody(sessionPublicKey = "04-session-key", organizationId = "sub-org-1")
 
         assertThat(body.organizationId).isEqualTo("sub-org-1")
-        assertThat(body.publicKey).isEqualTo("04-device-key")
+        assertThat(body.publicKey).isEqualTo("04-session-key")
         assertThat(body.expirationSeconds).isEqualTo("900")
         assertThat(body.invalidateExisting).isTrue()
     }

@@ -455,7 +455,7 @@ class TurnkeyManagedProviderTest {
         val resent = relaunchRain.signupPasskeyCalls.single()
         assertThat(resent.challenge).isEqualTo(sent.challenge)
         assertThat(resent.attestation).isEqualTo(sent.attestation)
-        assertThat(relaunch.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-1", "sub-passkey"))
+        assertThat(relaunch.deviceKeyLoginCalls).containsExactly(MockTurnkey.DeviceKeyLoginCall("device-key-1", "sub-passkey", "device-key-2"))
         assertThat(relaunch.passkeyLoginCalls).isEmpty()
         assertThat(tokenRequests).containsExactly(null, null)
         // Rain's answer settled the registration, so the file holds nothing for a third call.

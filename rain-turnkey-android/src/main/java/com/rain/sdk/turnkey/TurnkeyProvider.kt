@@ -543,12 +543,13 @@ class TurnkeyProvider internal constructor(
     /**
      * Creates a new account with a passkey as its only login method and an Ethereum and a Solana
      * account in one wallet, and signs it in with one prompt: the sheet creates the passkey, Rain
-     * registers a device key on the new account for a minute, and the SDK logs in with that key, as
-     * a code login does. When the account holds no key for this device, the sheet opens again and
+     * registers a device key on the new account for a minute, and the SDK logs in with a login
+     * stamped by that key. When the account holds no key for this device, the sheet opens again and
      * the passkey signs it in. Each new passkey is a new account, so a returning user signs in with
-     * [loginWithPasskey] or a login code; call [logout] first when [hasActiveSession] is true. A
-     * failure can leave an account behind; the `signUpWithPasskey` row in `docs/TURNKEY_SUPPORT.md`
-     * says when, and which code tells you.
+     * [loginWithPasskey] or a login code; call [logout] first unless [currentAuthState] reads
+     * `Unauthenticated` ([hasActiveSession] reads false in a session's last 30 seconds, which still
+     * refuses). A failure can leave an account behind; the `signUpWithPasskey` row in
+     * `docs/TURNKEY_SUPPORT.md` says when, and which code tells you.
      * Throws `RainError.InvalidConfig`, `RainError.UserRejected`, `RainError.Unauthorized`,
      * `RainError.NetworkError`, `RainError.ProviderError`, `RainError.InternalError` or, after the
      * login, `RainError.TokenExpired`. Managed mode only.

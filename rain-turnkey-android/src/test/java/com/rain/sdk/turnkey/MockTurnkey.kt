@@ -449,12 +449,12 @@ internal class MockTurnkey(
     /** Runs after a recorded [completePasskeyLogin] with the new session key — install the session here. */
     var onPasskeyLogin: (suspend (sessionKey: String) -> Unit)? = null
 
-    data class DeviceKeyLoginCall(val publicKey: String, val organizationId: String)
+    data class DeviceKeyLoginCall(val publicKey: String, val organizationId: String, val sessionPublicKey: String)
 
     val deviceKeyLoginCalls = mutableListOf<DeviceKeyLoginCall>()
 
     /** Turnkey's answer to the key-stamped login: a session JWT, or null when it refuses the stamp. */
-    var deviceKeyLogin: suspend (DeviceKeyLoginCall) -> String? = { "jwt-for-${it.publicKey}" }
+    var deviceKeyLogin: suspend (DeviceKeyLoginCall) -> String? = { "jwt-for-${it.sessionPublicKey}" }
 
     /**
      * When true, a failing passkey login stores (and, with nothing selected, selects) its session
@@ -557,6 +557,11 @@ internal class MockTurnkey(
 
     override suspend fun storeSession(jwt: String, sessionKey: String) {
         storeSessionCalls += StoreSessionCall(jwt, sessionKey)
+        // The vendor stores a session with the key pair its JWT names; a controller that deleted it first fails on a device.
+        if (jwt.startsWith("jwt-for-")) {
+            val bound = jwt.removePrefix("jwt-for-")
+            check(bound in liveDeviceKeys) { "the session is bound to key $bound, which was deleted" }
+        }
         storeLikeVendor(sessionKey, storeSessionError, storeSessionAppliesBeforeThrowing, onStoreSession)
     }
 
@@ -580,8 +585,8 @@ internal class MockTurnkey(
         if (sessionKey == selectedSessionKey) resetToUnauthenticated()
     }
 
-    override suspend fun stampLoginWithDeviceKey(publicKey: String, organizationId: String): String? {
-        val call = DeviceKeyLoginCall(publicKey, organizationId)
+    override suspend fun stampLoginWithDeviceKey(publicKey: String, sessionPublicKey: String, organizationId: String): String? {
+        val call = DeviceKeyLoginCall(publicKey, organizationId, sessionPublicKey)
         deviceKeyLoginCalls += call
         return deviceKeyLogin(call)
     }
