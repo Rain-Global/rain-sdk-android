@@ -178,3 +178,14 @@ mavenPublishing {
     // in CI); local.properties is not read.
     signAllPublications()
 }
+
+// RainHttpSourceScanTest reads the other library modules' sources, so they are inputs of this
+// module's tests; without this an adapter-only change leaves the task up to date and the scan idle.
+tasks.withType<Test>().configureEach {
+    inputs.files(
+        rootProject.fileTree("rain-turnkey-android/src/main"),
+        rootProject.fileTree("rain-portal-android/src/main"),
+        rootProject.fileTree("rain-privy-android/src/main"),
+        rootProject.fileTree("rain-wallet-android/src/main"),
+    ).withPropertyName("libraryMainSources").withPathSensitivity(PathSensitivity.RELATIVE)
+}

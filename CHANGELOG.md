@@ -206,7 +206,9 @@ Notable changes to the Rain Android SDK, newest first. The format follows
 ### Removed
 
 - `SolanaTransactionBuilder.buildTransferHex` (internal API), which nothing called;
-  `UnsignedSolanaTransfer.transactionHex` is the hex form of the bytes `buildTransferBytes` returns.
+  `UnsignedSolanaTransfer.transactionHex` is the hex form of an unsigned transaction.
+- The `timeoutSeconds` parameter of `JsonRpcClient` (internal API): the client takes an `OkHttpClient`
+  or runs on the shared one.
 
 ## [5.0.0-beta.1] - 2026-09-30
 

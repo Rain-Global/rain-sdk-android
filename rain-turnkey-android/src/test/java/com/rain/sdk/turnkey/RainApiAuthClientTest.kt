@@ -4,6 +4,7 @@ import com.google.common.truth.Truth.assertThat
 import com.google.common.truth.Truth.assertWithMessage
 import com.rain.sdk.error.RainError
 import com.rain.sdk.error.RainErrorCode
+import com.rain.sdk.internal.network.RainHttp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -432,6 +433,11 @@ class RainApiAuthClientTest {
         assertThat(seen).isInstanceOf(CancellationException::class.java)
         assertThat(seen).isNotInstanceOf(RainError::class.java)
         assertThat(callCancelled.get()).isTrue()
+    }
+
+    @Test
+    fun `the default client is the SDK's shared Rain API variant`() {
+        assertThat(RainApiAuthClient.defaultHttpClient()).isSameInstanceAs(RainHttp.rainApi)
     }
 
     @Test

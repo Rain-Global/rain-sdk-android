@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
 @RainAdapterApi
 object RainHttp {
     /** The [rpc] bound on a whole call; OkHttp's 10 s connect, read and write apply beneath it. */
-    const val RPC_CALL_TIMEOUT_SECONDS: Long = 10L
+    internal const val RPC_CALL_TIMEOUT_SECONDS: Long = 10L
 
     /** The [rainApi] bound on each read and on the whole call. */
     internal const val RAIN_API_TIMEOUT_SECONDS: Long = 45L
@@ -28,7 +28,7 @@ object RainHttp {
     /** The [web3j] bound on a whole call, retries included. */
     internal const val WEB3J_CALL_TIMEOUT_SECONDS: Long = 60L
 
-    /** Above core's widest fan-out (three metadata reads per token); OkHttp's default of five would queue the rest. */
+    /** Calls in flight per host before the dispatcher queues the rest; about what the separate clients added up to. */
     internal const val MAX_REQUESTS_PER_HOST: Int = 16
 
     private val base: OkHttpClient by lazy {

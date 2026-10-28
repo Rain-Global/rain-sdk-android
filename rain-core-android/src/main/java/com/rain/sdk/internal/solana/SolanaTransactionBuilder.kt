@@ -29,7 +29,7 @@ object SolanaTransactionBuilder {
      * @param toAddress    recipient, Base58
      * @param lamports     amount in lamports
      * @param recentBlockhash recent blockhash, Base58 (from `getLatestBlockhash`)
-     * @return the serialized unsigned transaction; [hexEncode] gives the hex form
+     * @return the serialized unsigned transaction
      */
     fun buildTransferBytes(
         fromAddress: String,

@@ -8,17 +8,15 @@
 <!---
 - Describe the smallest useful change.
 - Call out anything intentionally left unchanged.
-- Call out if anything, refactoring effort, or performance optimization
+- Call out refactoring or performance work.
 --->
 
 ### Validation and Proof
-<!---
-if validation and proof is not necessary provide the reason why.
-[] Focused tests passes
-[] Existing control behavior is covered
-[] UI proof is attached when relevant, images or videos.
---->
-
+<!--- If validation and proof are not needed, say why. --->
+- [ ] Focused tests pass
+- [ ] Existing behaviour is covered
+- [ ] UI proof is attached when relevant (images or videos)
+- [ ] Steps for a reviewer to test it, when relevant
 
 ### Solution
 <!---
@@ -36,11 +34,6 @@ if validation and proof is not necessary provide the reason why.
 - [ ] 📝 Documentation (non-breaking change that doesn't change code behavior, can skip testing)
 - [ ] ✅ Test (non-breaking change related to testing)
 - [ ] 🔒 Security awareness (changes that effect permission scope, security scenarios)
-
-## Test Plan
-<!---
-- Please input steps on how to test this PR,
---->
 
 ## Related Issues
 <!--- Add a reference section for management tickets, and relevant conversations. --->

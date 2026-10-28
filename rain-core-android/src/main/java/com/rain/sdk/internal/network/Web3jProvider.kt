@@ -18,8 +18,9 @@ internal object Web3jProvider {
     }
 
     /**
-     * Test teardown only. `Web3j.shutdown()` stops web3j's shared scheduler (`Async.defaultExecutorService`),
-     * which every later instance in the process also runs on, so nothing in production calls this.
+     * Test teardown only: empties the process-wide cache and stops each instance's own scheduler; the
+     * shared OkHttp client is untouched. Production keeps the instances, since every `RainSdk` in the
+     * process shares the cache.
      */
     fun resetForTest() {
         cache.values.forEach {
