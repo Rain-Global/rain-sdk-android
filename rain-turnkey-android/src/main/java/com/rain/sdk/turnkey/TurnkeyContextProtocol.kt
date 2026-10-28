@@ -351,8 +351,8 @@ internal suspend fun stampLoginSessionOrNull(stamp: suspend () -> TStampLoginRes
 internal class TurnkeyContextAdapter(
     private val context: TurnkeyContext = TurnkeyContext,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-    /** The stamped login's client, the SDK's Rain API variant; internal for the sharing test. */
-    internal val http: OkHttpClient = RainHttp.rainApi,
+    /** The stamped login's client, the SDK's Rain API variant. */
+    private val http: OkHttpClient = RainHttp.rainApi,
 ) : TurnkeyContextProtocol {
 
     override val wallets: List<Wallet>

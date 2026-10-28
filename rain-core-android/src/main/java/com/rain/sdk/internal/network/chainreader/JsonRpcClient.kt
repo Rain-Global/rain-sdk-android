@@ -33,10 +33,8 @@ import kotlin.coroutines.resumeWithException
 @RainAdapterApi
 class JsonRpcClient(
     httpClient: OkHttpClient? = null,
-    timeoutSeconds: Long = RainHttp.RPC_CALL_TIMEOUT_SECONDS
 ) {
-    /** The client given, else the shared RPC client bounded by [timeoutSeconds]; internal for the sharing test. */
-    internal val client: OkHttpClient = httpClient ?: RainHttp.rpcWithCallTimeout(timeoutSeconds)
+    private val client: OkHttpClient = httpClient ?: RainHttp.rpc
 
     private companion object {
         const val JSON_MEDIA_TYPE = "application/json"

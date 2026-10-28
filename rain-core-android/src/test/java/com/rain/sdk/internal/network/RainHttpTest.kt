@@ -7,13 +7,10 @@ class RainHttpTest {
 
     @Test
     fun `the variants share one dispatcher and one pool`() {
-        val custom = RainHttp.rpcWithCallTimeout(1)
-        for (client in listOf(RainHttp.rainApi, RainHttp.web3j, custom)) {
+        for (client in listOf(RainHttp.rainApi, RainHttp.web3j)) {
             assertThat(client.dispatcher).isSameInstanceAs(RainHttp.rpc.dispatcher)
             assertThat(client.connectionPool).isSameInstanceAs(RainHttp.rpc.connectionPool)
         }
-        assertThat(custom.callTimeoutMillis).isEqualTo(1_000)
-        assertThat(RainHttp.rpcWithCallTimeout(RainHttp.RPC_CALL_TIMEOUT_SECONDS)).isSameInstanceAs(RainHttp.rpc)
     }
 
     @Test

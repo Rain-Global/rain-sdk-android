@@ -36,13 +36,10 @@ internal enum class RpcCallPurpose { READ, SIMULATION }
  */
 internal class PrivyRpcClient(
     httpClient: OkHttpClient? = null,
-    timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS
 ) {
-    /** The client given, else the shared RPC client bounded by [timeoutSeconds]; internal for the sharing test. */
-    internal val client: OkHttpClient = httpClient ?: RainHttp.rpcWithCallTimeout(timeoutSeconds)
+    private val client: OkHttpClient = httpClient ?: RainHttp.rpc
 
     private companion object {
-        const val DEFAULT_TIMEOUT_SECONDS = RainHttp.RPC_CALL_TIMEOUT_SECONDS
         const val JSON_MEDIA_TYPE = "application/json"
     }
 

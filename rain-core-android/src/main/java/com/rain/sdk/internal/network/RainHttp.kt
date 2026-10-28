@@ -42,7 +42,9 @@ object RainHttp {
      * redirects on. Nothing broadcasts through it, which is what makes the retries safe.
      */
     @RainAdapterApi
-    val rpc: OkHttpClient by lazy { rpcVariant(RPC_CALL_TIMEOUT_SECONDS) }
+    val rpc: OkHttpClient by lazy {
+        base.newBuilder().callTimeout(RPC_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS).build()
+    }
 
     /**
      * Rain's embedded-wallet endpoints and the stamped login: [RAIN_API_TIMEOUT_SECONDS] per read and
@@ -74,12 +76,4 @@ object RainHttp {
             .retryOnConnectionFailure(true)
             .build()
     }
-
-    /** [rpc] with another bound on the whole call, same dispatcher and pool; the default bound answers [rpc] itself. */
-    @RainAdapterApi
-    fun rpcWithCallTimeout(callTimeoutSeconds: Long): OkHttpClient =
-        if (callTimeoutSeconds == RPC_CALL_TIMEOUT_SECONDS) rpc else rpcVariant(callTimeoutSeconds)
-
-    private fun rpcVariant(callTimeoutSeconds: Long): OkHttpClient =
-        base.newBuilder().callTimeout(callTimeoutSeconds, TimeUnit.SECONDS).build()
 }

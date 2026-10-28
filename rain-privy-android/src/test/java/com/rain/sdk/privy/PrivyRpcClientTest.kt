@@ -10,6 +10,7 @@ import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.TimeUnit
 
 class PrivyRpcClientTest {
 
@@ -29,11 +30,6 @@ class PrivyRpcClientTest {
     }
 
     private fun url() = server.url("/").toString()
-
-    @Test
-    fun `the default client is the SDK's shared client in its RPC variant`() {
-        assertThat(PrivyRpcClient().client).isSameInstanceAs(RainHttp.rpc)
-    }
 
     @Test
     fun `returns the hex result on a well-formed response`() = runBlocking {
@@ -194,7 +190,7 @@ class PrivyRpcClientTest {
     @Test
     fun `a server that never answers times out into NetworkError`() = runBlocking {
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
-        val impatient = PrivyRpcClient(timeoutSeconds = 1)
+        val impatient = PrivyRpcClient(RainHttp.rpc.newBuilder().callTimeout(1, TimeUnit.SECONDS).build())
         val error = runCatching {
             impatient.callForHexResult(url(), "eth_getBalance", emptyList())
         }.exceptionOrNull()

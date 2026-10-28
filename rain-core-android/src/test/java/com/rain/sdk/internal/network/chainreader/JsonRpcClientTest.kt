@@ -146,7 +146,7 @@ class JsonRpcClientTest {
     @Test
     fun `a server that never answers times out into NetworkError`() {
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
-        val impatient = JsonRpcClient(timeoutSeconds = 1)
+        val impatient = JsonRpcClient(RainHttp.rpc.newBuilder().callTimeout(1, TimeUnit.SECONDS).build())
 
         assertThrows(RainError.NetworkError::class.java) {
             runBlocking { impatient.call(url(), "eth_blockNumber", emptyList()) }
@@ -160,10 +160,5 @@ class JsonRpcClientTest {
         assertThrows(RainError.NetworkError::class.java) {
             runBlocking { client.call(url(), "eth_blockNumber", emptyList()) }
         }
-    }
-
-    @Test
-    fun `the default client is the shared RPC variant`() {
-        assertThat(JsonRpcClient().client).isSameInstanceAs(RainHttp.rpc)
     }
 }

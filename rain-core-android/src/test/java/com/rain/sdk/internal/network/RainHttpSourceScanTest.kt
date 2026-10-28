@@ -6,8 +6,10 @@ import java.io.File
 
 /**
  * No library module builds an HTTP client of its own, so the SDK's calls stay on [RainHttp]'s pool:
- * `OkHttpClient()`, `OkHttpClient.Builder()` and a one-argument web3j `HttpService(url)` in Kotlin or
- * Java main sources, comments and strings blanked first. An import alias for `OkHttpClient` is not seen.
+ * `OkHttpClient()`, `OkHttpClient.Builder()`, a one-argument web3j `HttpService(url)` and a vendor
+ * `TurnkeyClient(...)` built without `http =` on the same line (the vendor then builds its own client),
+ * in Kotlin or Java main sources, comments and strings blanked first. An import alias for
+ * `OkHttpClient` is not seen.
  */
 class RainHttpSourceScanTest {
 
@@ -51,6 +53,7 @@ class RainHttpSourceScanTest {
             Regex("\\bOkHttpClient\\s*\\(\\s*\\)"),
             Regex("\\bOkHttpClient\\s*\\.\\s*Builder\\s*\\(\\s*\\)"),
             Regex("\\bHttpService\\s*\\([^,()]*\\)"),
+            Regex("\\bTurnkeyClient\\s*\\((?![^\\n]*\\bhttp\\s*=)"),
         )
     }
 }
