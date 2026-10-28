@@ -2,6 +2,7 @@ package com.rain.sdk.internal.network.chainreader
 
 import com.google.common.truth.Truth.assertThat
 import com.rain.sdk.error.RainError
+import com.rain.sdk.internal.network.RainHttp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -159,5 +160,10 @@ class JsonRpcClientTest {
         assertThrows(RainError.NetworkError::class.java) {
             runBlocking { client.call(url(), "eth_blockNumber", emptyList()) }
         }
+    }
+
+    @Test
+    fun `the default client is the shared RPC variant`() {
+        assertThat(JsonRpcClient().client).isSameInstanceAs(RainHttp.rpc)
     }
 }

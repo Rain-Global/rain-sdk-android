@@ -141,6 +141,9 @@ Notable changes to the Rain Android SDK, newest first. The format follows
 
 ### Changed
 
+- The SDK's own HTTP calls share one OkHttp client (`RainHttp` in `rain-core-android`, internal API).
+  Two calls that 5.0.0-beta.1 ran with no whole-call bound now have one: the Turnkey wallet's chain
+  reads at 10 s and the withdrawal reads at 60 s.
 - **Breaking:** the Rain wallet authenticates through Rain's embedded-wallet endpoints
   (`/v1/issuing/embedded-wallets`) instead of Turnkey's auth proxy.
   - `RainWalletConfig` gains two parameters. `authTokenProvider`, required and first, is a

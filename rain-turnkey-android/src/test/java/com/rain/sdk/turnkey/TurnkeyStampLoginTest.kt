@@ -4,6 +4,7 @@ import com.google.common.truth.Truth.assertThat
 import com.google.common.truth.Truth.assertWithMessage
 import com.rain.sdk.error.RainError
 import com.rain.sdk.error.RainErrorCode
+import com.rain.sdk.internal.network.RainHttp
 import com.turnkey.types.Externaldatav1Timestamp
 import com.turnkey.types.TStampLoginResponse
 import com.turnkey.types.V1Activity
@@ -13,7 +14,12 @@ import com.turnkey.types.V1Intent
 import com.turnkey.types.V1Result
 import com.turnkey.types.V1StampLoginResult
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.setMain
 import org.junit.Before
 import org.junit.Test
 import java.net.SocketTimeoutException
@@ -87,6 +93,17 @@ class TurnkeyStampLoginTest {
         assertThat(thrown.message).contains("SocketTimeoutException")
         assertThat(thrown.message).doesNotContain(marker)
         assertThat(thrown.cause).isSameInstanceAs(transport)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `the stamped login runs on the SDK's shared client in its Rain API variant`() {
+        Dispatchers.setMain(StandardTestDispatcher())
+        try {
+            assertThat(TurnkeyContextAdapter().http).isSameInstanceAs(RainHttp.rainApi)
+        } finally {
+            Dispatchers.resetMain()
+        }
     }
 }
 

@@ -2,6 +2,7 @@ package com.rain.sdk.internal.network.chainreader
 
 import com.rain.sdk.error.RainError
 import com.rain.sdk.internal.RainAdapterApi
+import com.rain.sdk.internal.network.RainHttp
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
@@ -16,7 +17,6 @@ import org.json.JSONException
 import org.json.JSONObject
 import timber.log.Timber
 import java.io.IOException
-import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -33,14 +33,12 @@ import kotlin.coroutines.resumeWithException
 @RainAdapterApi
 class JsonRpcClient(
     httpClient: OkHttpClient? = null,
-    timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS
+    timeoutSeconds: Long = RainHttp.RPC_CALL_TIMEOUT_SECONDS
 ) {
-    private val client: OkHttpClient = httpClient ?: OkHttpClient.Builder()
-        .callTimeout(timeoutSeconds, TimeUnit.SECONDS)
-        .build()
+    /** The client given, else the shared RPC client bounded by [timeoutSeconds]; internal for the sharing test. */
+    internal val client: OkHttpClient = httpClient ?: RainHttp.rpcWithCallTimeout(timeoutSeconds)
 
     private companion object {
-        const val DEFAULT_TIMEOUT_SECONDS = 10L
         const val JSON_MEDIA_TYPE = "application/json"
     }
 

@@ -4,6 +4,7 @@ import com.google.common.truth.Truth.assertThat
 import com.google.common.truth.Truth.assertWithMessage
 import com.rain.sdk.error.RainError
 import com.rain.sdk.error.RainErrorCode
+import com.rain.sdk.internal.network.RainHttp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -435,14 +436,8 @@ class RainApiAuthClientTest {
     }
 
     @Test
-    fun `the default client gives a whole call 45 seconds, waits as long for each read, follows no redirect and retries no send`() {
-        val http = RainApiAuthClient.defaultHttpClient()
-        assertThat(http.callTimeoutMillis).isEqualTo(45_000)
-        assertThat(http.readTimeoutMillis).isEqualTo(45_000)
-        assertThat(http.followRedirects).isFalse()
-        assertThat(http.followSslRedirects).isFalse()
-        // A re-sent POST would send a second code, hit the sign-up lock or re-use a revoked token.
-        assertThat(http.retryOnConnectionFailure).isFalse()
+    fun `the default client is the SDK's shared client in its Rain API variant`() {
+        assertThat(RainApiAuthClient.defaultHttpClient()).isSameInstanceAs(RainHttp.rainApi)
     }
 
     @Test

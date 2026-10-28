@@ -75,7 +75,7 @@ internal class TurnkeyManager(
     internal val sponsorGas: Boolean,
     sessionCoordinator: TurnkeySessionCoordinator,
     private val walletAddressOverride: String? = null,
-    httpClient: OkHttpClient = OkHttpClient(),
+    httpClient: OkHttpClient? = null,
     private val pollingIntervalMs: Long = POLLING_INTERVAL_MS,
     private val jsonRpcClient: JsonRpcClient = JsonRpcClient(httpClient),
 ) {

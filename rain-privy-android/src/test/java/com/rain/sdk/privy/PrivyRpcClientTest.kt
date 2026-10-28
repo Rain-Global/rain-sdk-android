@@ -2,6 +2,7 @@ package com.rain.sdk.privy
 
 import com.google.common.truth.Truth.assertThat
 import com.rain.sdk.error.RainError
+import com.rain.sdk.internal.network.RainHttp
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -28,6 +29,11 @@ class PrivyRpcClientTest {
     }
 
     private fun url() = server.url("/").toString()
+
+    @Test
+    fun `the default client is the SDK's shared client in its RPC variant`() {
+        assertThat(PrivyRpcClient().client).isSameInstanceAs(RainHttp.rpc)
+    }
 
     @Test
     fun `returns the hex result on a well-formed response`() = runBlocking {
