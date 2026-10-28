@@ -28,7 +28,7 @@ class SolanaTransactionDecoderTest {
     @Test
     fun `decodes the transfer the builder produced`() {
         val lamports = 1_234_500_000L
-        val hex = SolanaTransactionBuilder.buildTransferHex(from, to, lamports, blockhash)
+        val hex = transferHex(from, to, lamports, blockhash)
 
         val decoded = SolanaTransactionDecoder.decode(hex)
 
@@ -41,7 +41,7 @@ class SolanaTransactionDecoderTest {
 
     @Test
     fun `tolerates an optional 0x prefix`() {
-        val hex = SolanaTransactionBuilder.buildTransferHex(from, to, 1L, blockhash)
+        val hex = transferHex(from, to, 1L, blockhash)
         val decoded = SolanaTransactionDecoder.decode("0x$hex")
         assertThat((decoded as SolanaTransactionDecoder.NativeTransfer).lamports)
             .isEqualTo(BigInteger.ONE)
@@ -51,7 +51,7 @@ class SolanaTransactionDecoderTest {
     fun `decodes a base64-encoded transaction`() {
         // Base64 is the canonical Solana transaction encoding; blobs stored by other tooling
         // against the same Turnkey wallet plausibly arrive that way.
-        val hex = SolanaTransactionBuilder.buildTransferHex(from, to, 7L, blockhash)
+        val hex = transferHex(from, to, 7L, blockhash)
         val base64 = JavaBase64.getEncoder().encodeToString(hexToBytes(hex))
 
         val decoded = SolanaTransactionDecoder.decode(base64)
@@ -197,6 +197,9 @@ class SolanaTransactionDecoderTest {
         }
         return unsignedHex(fromBytes, blockhash, instructions)
     }
+
+    private fun transferHex(from: String, to: String, lamports: Long, recentBlockhash: String): String =
+        SolanaTransactionBuilder.hexEncode(SolanaTransactionBuilder.buildTransferBytes(from, to, lamports, recentBlockhash))
 
     private fun unsignedHex(feePayer: ByteArray, recentBlockhash: String, instructions: List<Instruction>): String =
         SolanaTransactionBuilder.hexEncode(

@@ -19,13 +19,13 @@ class Web3jProviderTest {
         mockkStatic(Web3j::class)
         // Clear cache manually if possible, or assume isolation.
         // Since Web3jProvider is an object, state persists.
-        Web3jProvider.shutDownAll()
+        Web3jProvider.resetForTest()
     }
 
     @After
     fun tearDown() {
         unmockkAll()
-        Web3jProvider.shutDownAll()
+        Web3jProvider.resetForTest()
     }
 
     @Test
@@ -71,14 +71,14 @@ class Web3jProviderTest {
     }
 
     @Test
-    fun `shutDownAll shuts down all instances and clears cache`() {
+    fun `resetForTest shuts down all instances and clears the cache`() {
         val mockWeb3j = mockk<Web3j>(relaxed = true)
         val url = "https://rpc.com"
 
         every { Web3j.build(any<HttpService>()) } returns mockWeb3j
 
         Web3jProvider.getOrCreate(url)
-        Web3jProvider.shutDownAll()
+        Web3jProvider.resetForTest()
 
         verify { mockWeb3j.shutdown() }
 

@@ -1388,7 +1388,7 @@ class TurnkeySolanaProviderTest {
 
     @Test
     fun `getTransactions on solana reads sol_send activities and decodes recipient and amount`(): Unit = runBlocking {
-        val unsignedTx = SolanaTransactionBuilder.buildTransferHex(
+        val unsignedTx = transferHex(
             fromAddress = MockTurnkey.DEFAULT_SOLANA_ADDRESS,
             toAddress = MockTurnkey.DEFAULT_SOLANA_RECIPIENT,
             lamports = 1_000_000_000L, // 1 SOL
@@ -1435,7 +1435,7 @@ class TurnkeySolanaProviderTest {
      */
     @Test
     fun `getTransactions on solana lists a send recorded in the V2 shape`(): Unit = runBlocking {
-        val unsignedTx = SolanaTransactionBuilder.buildTransferHex(
+        val unsignedTx = transferHex(
             fromAddress = MockTurnkey.DEFAULT_SOLANA_ADDRESS,
             toAddress = MockTurnkey.DEFAULT_SOLANA_RECIPIENT,
             lamports = 250_000_000L, // 0.25 SOL
@@ -1468,7 +1468,7 @@ class TurnkeySolanaProviderTest {
     /** A page mixing both shapes lists every send once, newest first. */
     @Test
     fun `getTransactions on solana lists V1 and V2 sends together`(): Unit = runBlocking {
-        val unsignedTx = SolanaTransactionBuilder.buildTransferHex(
+        val unsignedTx = transferHex(
             MockTurnkey.DEFAULT_SOLANA_ADDRESS,
             MockTurnkey.DEFAULT_SOLANA_RECIPIENT,
             1L,
@@ -1513,7 +1513,7 @@ class TurnkeySolanaProviderTest {
     @Test
     fun `getTransactions on solana names the transfer's source as the sender, not the first co-signer`(): Unit = runBlocking {
         val coSigner = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
-        val unsignedTx = SolanaTransactionBuilder.buildTransferHex(
+        val unsignedTx = transferHex(
             fromAddress = MockTurnkey.DEFAULT_SOLANA_ADDRESS,
             toAddress = MockTurnkey.DEFAULT_SOLANA_RECIPIENT,
             lamports = 1L,
@@ -1542,7 +1542,7 @@ class TurnkeySolanaProviderTest {
 
     @Test
     fun `getTransactions on solana ignores activities from a different cluster`(): Unit = runBlocking {
-        val unsignedTx = SolanaTransactionBuilder.buildTransferHex(
+        val unsignedTx = transferHex(
             MockTurnkey.DEFAULT_SOLANA_ADDRESS,
             MockTurnkey.DEFAULT_SOLANA_RECIPIENT,
             1L,
@@ -2221,6 +2221,11 @@ class TurnkeySolanaProviderTest {
                 )
             )
         )
+
+    /** Lowercase hex of a native SOL transfer, the form the vendor's unsigned-transaction field carries. */
+    private fun transferHex(fromAddress: String, toAddress: String, lamports: Long, recentBlockhash: String): String =
+        SolanaTransactionBuilder.buildTransferBytes(fromAddress, toAddress, lamports, recentBlockhash)
+            .joinToString("") { byte -> (byte.toInt() and 0xFF).toString(16).padStart(2, '0') }
 
     /** Lowercase hex of an unsigned transaction, the form the vendor's unsigned-transaction field carries. */
     private fun unsignedHex(

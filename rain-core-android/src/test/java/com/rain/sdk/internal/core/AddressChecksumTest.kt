@@ -47,13 +47,13 @@ class AddressChecksumTest {
         every { mockEthCall.sendAsync() } returns CompletableFuture.completedFuture(response)
         builder = RainTransactionBuilderImpl(mapOf(1 to "https://rpc.example/test")) { mockWeb3j }
 
-        Web3jProvider.shutDownAll()
+        Web3jProvider.resetForTest()
     }
 
     @After
     fun tearDown() {
         unmockkAll()
-        Web3jProvider.shutDownAll()
+        Web3jProvider.resetForTest()
     }
 
     private val addresses = RainWithdrawAddresses(

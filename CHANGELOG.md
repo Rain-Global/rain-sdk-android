@@ -203,6 +203,11 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   Solana, since nothing was broadcast. 5.0.0-beta.1 listed them as rows with the activity id as the
   hash.
 
+### Removed
+
+- `SolanaTransactionBuilder.buildTransferHex` (internal API), which nothing called;
+  `UnsignedSolanaTransfer.transactionHex` is the hex form of the bytes `buildTransferBytes` returns.
+
 ## [5.0.0-beta.1] - 2026-09-30
 
 First public beta, published to Maven Central under `xyz.rain`. Pin the exact version during the
