@@ -46,13 +46,13 @@ class RainTransactionBuilderImplTest {
         mockWeb3j = mockk(relaxed = true)
         builder = RainTransactionBuilderImpl(mapOf(CHAIN_ID to RPC_URL)) { mockWeb3j }
 
-        Web3jProvider.shutDownAll()
+        Web3jProvider.resetForTest()
     }
 
     @After
     fun tearDown() {
         unmockkAll()
-        Web3jProvider.shutDownAll()
+        Web3jProvider.resetForTest()
     }
 
     @Test

@@ -93,9 +93,6 @@ dependencies {
     api(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.timber)
-    // Own JSON-RPC read path: core's JsonRpcClient/ChainReader are @RainAdapterApi seams this module
-    // does not opt in to yet, so it keeps its own client. Privy's EIP-1193 provider handles custody
-    // (sign/send) only.
     implementation(libs.okhttp)
     // Privy's Ktor engine declares okhttp-sse 4.12.0, which still references a class OkHttp 5 removed
     // (okhttp3.internal.Util). Nothing here uses server-sent events, but the pair must stay on one

@@ -8,7 +8,6 @@ import org.sol4k.PublicKey
 import org.sol4k.Transaction
 import org.sol4k.instruction.BaseInstruction
 import java.math.BigInteger
-import java.util.Locale
 import org.sol4k.AccountMeta as Sol4kAccountMeta
 
 /**
@@ -89,29 +88,17 @@ class SolanaTransactionBuilderTest {
     }
 
     @Test
-    fun `buildTransferHex emits lowercase hex of the serialized bytes`() {
-        val lamports = 1_000_000_000L
-        val bytes = SolanaTransactionBuilder.buildTransferBytes(from, to, lamports, blockhash)
-        val hex = SolanaTransactionBuilder.buildTransferHex(from, to, lamports, blockhash)
-
-        // Turnkey hex-decodes this field (not base64), so it must be valid lowercase hex.
-        assertThat(hex).matches("[0-9a-f]+")
-        assertThat(hex.length).isEqualTo(bytes.size * 2)
-        assertThat(hex).isEqualTo(bytes.joinToString("") { "%02x".format(Locale.ROOT, it) })
-    }
-
-    @Test
     fun `rejects non-32-byte addresses`() {
         val tooShort = Base58.encode(ByteArray(31))
         assertThrows(IllegalArgumentException::class.java) {
-            SolanaTransactionBuilder.buildTransferHex(tooShort, to, 1L, blockhash)
+            SolanaTransactionBuilder.buildTransferBytes(tooShort, to, 1L, blockhash)
         }
     }
 
     @Test
     fun `rejects negative lamports`() {
         assertThrows(IllegalArgumentException::class.java) {
-            SolanaTransactionBuilder.buildTransferHex(from, to, -1L, blockhash)
+            SolanaTransactionBuilder.buildTransferBytes(from, to, -1L, blockhash)
         }
     }
 

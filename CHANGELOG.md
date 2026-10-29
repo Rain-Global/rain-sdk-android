@@ -141,6 +141,9 @@ Notable changes to the Rain Android SDK, newest first. The format follows
 
 ### Changed
 
+- The SDK's own HTTP calls share one OkHttp client (`RainHttp` in `rain-core-android`, internal API).
+  Two calls that 5.0.0-beta.1 ran with no whole-call bound now have one: the Turnkey wallet's chain
+  reads at 10 s and the withdrawal reads at 60 s.
 - **Breaking:** the Rain wallet authenticates through Rain's embedded-wallet endpoints
   (`/v1/issuing/embedded-wallets`) instead of Turnkey's auth proxy.
   - `RainWalletConfig` gains two parameters. `authTokenProvider`, required and first, is a
@@ -199,6 +202,13 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   `getTransactions` falls back to leaves out sends the backend failed or rejected, on EVM and
   Solana, since nothing was broadcast. 5.0.0-beta.1 listed them as rows with the activity id as the
   hash.
+
+### Removed
+
+- `SolanaTransactionBuilder.buildTransferHex` (internal API), which nothing called;
+  `UnsignedSolanaTransfer.transactionHex` is the hex form of an unsigned transaction.
+- The `timeoutSeconds` parameter of `JsonRpcClient` (internal API): the client takes an `OkHttpClient`
+  or runs on the shared one.
 
 ## [5.0.0-beta.1] - 2026-09-30
 

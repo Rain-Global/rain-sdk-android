@@ -2,6 +2,7 @@ package com.rain.sdk.internal.network.chainreader
 
 import com.google.common.truth.Truth.assertThat
 import com.rain.sdk.error.RainError
+import com.rain.sdk.internal.network.RainHttp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -145,7 +146,7 @@ class JsonRpcClientTest {
     @Test
     fun `a server that never answers times out into NetworkError`() {
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
-        val impatient = JsonRpcClient(timeoutSeconds = 1)
+        val impatient = JsonRpcClient(RainHttp.rpc.newBuilder().callTimeout(1, TimeUnit.SECONDS).build())
 
         assertThrows(RainError.NetworkError::class.java) {
             runBlocking { impatient.call(url(), "eth_blockNumber", emptyList()) }

@@ -2,6 +2,7 @@ package com.rain.sdk.privy
 
 import com.rain.sdk.error.RainError
 import com.rain.sdk.internal.error.VendorErrorClassifier
+import com.rain.sdk.internal.network.RainHttp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -14,7 +15,6 @@ import org.json.JSONException
 import org.json.JSONObject
 import timber.log.Timber
 import java.io.IOException
-import java.util.concurrent.TimeUnit
 
 /**
  * What a JSON-RPC call is for; drives how node error messages are classified.
@@ -29,21 +29,17 @@ internal enum class RpcCallPurpose { READ, SIMULATION }
 /**
  * Minimal JSON-RPC 2.0 client for Privy's read path (balances, gas, fee estimates).
  *
- * Core's `JsonRpcClient` is a `@RainAdapterApi` seam this module does not opt in to yet, so it
- * carries its own client. Privy's
+ * Runs on the SDK's shared client, [RainHttp.rpc]; the node-error classification stays here because
+ * it reads the call's [RpcCallPurpose]. Privy's
  * EIP-1193 provider is reserved for custody (sign/send); everything read-only goes through here
  * against the RPC endpoints Rain was configured with. Wire format / error mapping mirror core.
  */
 internal class PrivyRpcClient(
     httpClient: OkHttpClient? = null,
-    timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS
 ) {
-    private val client: OkHttpClient = httpClient ?: OkHttpClient.Builder()
-        .callTimeout(timeoutSeconds, TimeUnit.SECONDS)
-        .build()
+    private val client: OkHttpClient = httpClient ?: RainHttp.rpc
 
     private companion object {
-        const val DEFAULT_TIMEOUT_SECONDS = 10L
         const val JSON_MEDIA_TYPE = "application/json"
     }
 

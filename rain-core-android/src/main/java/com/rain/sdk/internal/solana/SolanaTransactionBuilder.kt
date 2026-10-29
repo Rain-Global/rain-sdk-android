@@ -13,7 +13,7 @@ import java.io.ByteArrayOutputStream
  *
  * [buildUnsignedTransaction] takes an arbitrary instruction list, which is what an SPL transfer
  * needs — it may carry a create-token-account instruction ahead of the transfer. Native SOL keeps
- * its own [buildTransferHex] entry point.
+ * its own [buildTransferBytes] entry point.
  *
  * Pure and dependency-free so it can be unit-tested byte-for-byte; see SolanaTransactionBuilderTest.
  */
@@ -29,15 +29,8 @@ object SolanaTransactionBuilder {
      * @param toAddress    recipient, Base58
      * @param lamports     amount in lamports
      * @param recentBlockhash recent blockhash, Base58 (from `getLatestBlockhash`)
-     * @return lowercase hex of the serialized unsigned transaction
+     * @return the serialized unsigned transaction
      */
-    fun buildTransferHex(
-        fromAddress: String,
-        toAddress: String,
-        lamports: Long,
-        recentBlockhash: String
-    ): String = hexEncode(buildTransferBytes(fromAddress, toAddress, lamports, recentBlockhash))
-
     fun buildTransferBytes(
         fromAddress: String,
         toAddress: String,

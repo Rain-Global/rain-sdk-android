@@ -34,12 +34,12 @@ class WithdrawCalldataGoldenTest {
     fun setUp() {
         mockkStatic(URLUtil::class)
         every { URLUtil.isValidUrl(any()) } returns true
-        Web3jProvider.shutDownAll()
+        Web3jProvider.resetForTest()
     }
 
     @After
     fun tearDown() {
-        Web3jProvider.shutDownAll()
+        Web3jProvider.resetForTest()
         unmockkAll()
     }
 

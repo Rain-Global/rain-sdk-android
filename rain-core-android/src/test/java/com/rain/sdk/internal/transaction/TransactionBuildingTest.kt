@@ -58,13 +58,13 @@ class TransactionBuildingTest {
             mapOf(1 to "https://rpc.example/test", 137 to "https://rpc.example/polygon")
         ) { mockWeb3j }
 
-        Web3jProvider.shutDownAll()
+        Web3jProvider.resetForTest()
     }
 
     @After
     fun tearDown() {
         unmockkAll()
-        Web3jProvider.shutDownAll()
+        Web3jProvider.resetForTest()
     }
 
     // ---- buildEIP712Message success cases ---------------------------------------

@@ -18,7 +18,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
-import okhttp3.OkHttpClient
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** The message every call on a closed provider carries; one literal so the two guards cannot drift. */
@@ -261,7 +260,7 @@ class TurnkeyProvider internal constructor(
         config.managed?.let { ids ->
             TurnkeyManagedAuthController(
                 context = turnkeyContext,
-                rainApi = rainApiOverride ?: RainApiAuthClient(ids.rainApiBaseUrl, rainApiHttpClient),
+                rainApi = rainApiOverride ?: RainApiAuthClient(ids.rainApiBaseUrl),
                 authTokenProvider = ids.authTokenProvider,
                 coordinator = coordinator,
                 configure = {
@@ -638,13 +637,4 @@ class TurnkeyProvider internal constructor(
                 "with TurnkeyConfig(application, organizationId, rainApiBaseUrl, authTokenProvider); in " +
                 "bring-your-own mode the host owns authentication"
         )
-
-    private companion object {
-        /**
-         * One HTTP client for every managed provider in the process: each client owns a thread pool
-         * and a connection pool, and a host that rebuilds the provider per login, as the sample
-         * does, would leak one per login.
-         */
-        val rainApiHttpClient: OkHttpClient by lazy { RainApiAuthClient.defaultHttpClient() }
-    }
 }

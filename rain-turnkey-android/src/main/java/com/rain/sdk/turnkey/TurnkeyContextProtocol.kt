@@ -2,6 +2,7 @@ package com.rain.sdk.turnkey
 
 import android.app.Activity
 import com.rain.sdk.error.RainError
+import com.rain.sdk.internal.network.RainHttp
 import com.turnkey.core.TurnkeyContext
 import com.turnkey.core.internal.utils.ClientSignature
 import com.turnkey.core.models.AuthState
@@ -58,6 +59,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
 import timber.log.Timber
 import java.io.IOException
 import java.util.UUID
@@ -349,6 +351,8 @@ internal suspend fun stampLoginSessionOrNull(stamp: suspend () -> TStampLoginRes
 internal class TurnkeyContextAdapter(
     private val context: TurnkeyContext = TurnkeyContext,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /** The stamped login's client, the SDK's Rain API variant. */
+    private val http: OkHttpClient = RainHttp.rainApi,
 ) : TurnkeyContextProtocol {
 
     override val wallets: List<Wallet>
@@ -456,7 +460,7 @@ internal class TurnkeyContextAdapter(
     // The vendor's passkey-login client with the device key as the stamper; the API host is the vendor's default.
     override suspend fun stampLoginWithDeviceKey(publicKey: String, sessionPublicKey: String, organizationId: String): String? =
         withContext(ioDispatcher) {
-            val client = TurnkeyClient(stamper = Stamper.fromPublicKey(publicKey), organizationId = organizationId)
+            val client = TurnkeyClient(stamper = Stamper.fromPublicKey(publicKey), organizationId = organizationId, http = http)
             stampLoginSessionOrNull { client.stampLogin(deviceKeyStampLoginBody(sessionPublicKey, organizationId)) }
         }
 

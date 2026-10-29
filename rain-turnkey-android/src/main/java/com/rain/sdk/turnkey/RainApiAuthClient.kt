@@ -1,6 +1,7 @@
 package com.rain.sdk.turnkey
 
 import com.rain.sdk.error.RainError
+import com.rain.sdk.internal.network.RainHttp
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
@@ -17,7 +18,6 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
-import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -396,17 +396,8 @@ internal class RainApiAuthClient(
         }
         private val UUID_PATTERN = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
-        /** Whole call and each read: above rain-api's slowest leg, the sub-organization create, so its own answer reaches the device. */
-        private const val TIMEOUT_SECONDS = 45L
-
-        /** Redirects and connection-failure retries off: either would re-send the bearer, and every leg has a side effect. */
-        fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
-            .readTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .callTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .retryOnConnectionFailure(false)
-            .build()
+        /** The SDK's shared Rain API client; its bounds and no-retry rule are documented on [RainHttp.rainApi]. */
+        fun defaultHttpClient(): OkHttpClient = RainHttp.rainApi
     }
 }
 

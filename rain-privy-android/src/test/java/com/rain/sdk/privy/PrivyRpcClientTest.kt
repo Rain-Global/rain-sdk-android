@@ -2,6 +2,7 @@ package com.rain.sdk.privy
 
 import com.google.common.truth.Truth.assertThat
 import com.rain.sdk.error.RainError
+import com.rain.sdk.internal.network.RainHttp
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -9,6 +10,7 @@ import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.TimeUnit
 
 class PrivyRpcClientTest {
 
@@ -188,7 +190,7 @@ class PrivyRpcClientTest {
     @Test
     fun `a server that never answers times out into NetworkError`() = runBlocking {
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
-        val impatient = PrivyRpcClient(timeoutSeconds = 1)
+        val impatient = PrivyRpcClient(RainHttp.rpc.newBuilder().callTimeout(1, TimeUnit.SECONDS).build())
         val error = runCatching {
             impatient.callForHexResult(url(), "eth_getBalance", emptyList())
         }.exceptionOrNull()

@@ -11,9 +11,10 @@ Contains:
 - All Rain domain logic — EIP-712 message building, collateral withdraw flow (EVM and Solana),
   transaction orchestration, chain readers, token metadata store.
 - The cross-module seams the adapter modules build on, marked `@RainAdapterApi`: the chain
-  readers, the JSON-RPC client, the Solana encoders (whose Base58 also encodes the Turnkey
-  adapter's exported Solana keypair), and the token metadata store. Marked rather than plain
-  public so they stay out of the contract with host apps.
+  readers, the JSON-RPC client, `RainHttp` (the one OkHttp client behind the SDK's own calls), the
+  Solana encoders (whose Base58 also encodes the Turnkey adapter's exported Solana keypair), and the
+  token metadata store. Marked rather than plain public so they stay out of the contract with host
+  apps.
 
 `rain-core-android` has **no wallet-vendor dependency at all**. Every vendor SDK lives in its own
 adapter module, so a Portal-only app never fetches Turnkey and a Turnkey-only app never fetches

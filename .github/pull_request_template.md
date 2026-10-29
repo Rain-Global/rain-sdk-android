@@ -1,17 +1,27 @@
-## Summary
-<!--- Add some bells and whistles for PR template. --->
-
 ### Why
-<!--- Clearly define the issue or problem that your changes address. 
-Describe what is currently not working as expected or what feature is missing. --->
+<!---
+- Clearly define what problem does this solve.
+- Describe what is currently not working as expected or what feature is missing.
+--->
 
-### What
-<!--- Provide a high-level overview of what has been modified, added, or removed in the codebase. 
-This could include new features, bug fixes, refactoring efforts, or performance optimizations. --->
+### What Changed
+<!---
+- Describe the smallest useful change.
+- Call out anything intentionally left unchanged.
+- Call out refactoring or performance work.
+--->
+
+### Validation and Proof
+<!--- If validation and proof are not needed, say why. --->
+- [ ] Focused tests pass
+- [ ] Existing behaviour is covered
+- [ ] UI proof is attached when relevant (images or videos)
+- [ ] Steps for a reviewer to test it, when relevant
 
 ### Solution
-<!--- Describe the architectural or design decisions you made while implementing the changes.
-Explain the thought process behind your approach and how it aligns with best practices or existing patterns in the codebase. --->
+<!---
+- For features describe the architectural or design decisions you made while implementing the changes. Use Mermaid for visualization if the new feature is large enough.
+--->
 
 ## Types of Changes
 <!--- What types of changes does your code introduce? Put an `x` in all the boxes that apply --->
@@ -24,9 +34,6 @@ Explain the thought process behind your approach and how it aligns with best pra
 - [ ] 📝 Documentation (non-breaking change that doesn't change code behavior, can skip testing)
 - [ ] ✅ Test (non-breaking change related to testing)
 - [ ] 🔒 Security awareness (changes that effect permission scope, security scenarios)
-
-## Test Plan
-<!--- Please input steps on how to test this PR, including evidence in the form of captured images or videos. If this is not necessary, provide the reason why. --->
 
 ## Related Issues
 <!--- Add a reference section for management tickets, and relevant conversations. --->
