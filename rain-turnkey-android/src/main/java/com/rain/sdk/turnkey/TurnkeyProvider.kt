@@ -57,23 +57,27 @@ internal const val TURNKEY_PROVIDER_CLOSED_MESSAGE = "This provider was closed; 
  *                   `sendTransaction` calls alike: Turnkey's Gas Station builds and pays the
  *                   fee (gasless for the end user); fee estimates still quote what the wallet
  *                   would pay itself. Sponsorship cost passes through to the partner that turns
- *                   this on. Solana sends are
- *                   sponsored too (network fee only: rent for a first-time recipient's token
- *                   account is a separate Turnkey toggle, off by default, so the sender must
- *                   still hold it). Turnkey does not document its Solana payer model, so run
- *                   the devnet validation before enabling this against Solana in sandbox.
+ *                   this on. Solana sends are sponsored too, the network fee only: the rent of a
+ *                   first-time recipient's token account follows [sponsorRent].
  *                   Defaults to true: sponsorship is the product, and Turnkey enables it at the
  *                   parent-organization level. On an organization where it is not enabled,
  *                   Turnkey rejects sponsored sends, so pass false there (Rain ops enables it
  *                   per Turnkey organization). Sponsored sends have no client-side revert
  *                   preflight; failures surface through Turnkey's decoded FAILED status.
+ * @param sponsorRent Whether the organization's "Sponsor Solana Rent" switch is on, so the SDK
+ *                    stops demanding the rent of a recipient token account a Solana send creates
+ *                    from the sender; read with [sponsorGas], and off by default like the switch.
+ *                    *Rent* under Solana notes in `docs/TURNKEY_SUPPORT.md` has the contract.
  */
-class TurnkeyConfig internal constructor(
+class TurnkeyConfig
+@Suppress("LongParameterList") // one knob per parameter plus the managed ids; the secondary constructors default most of them
+internal constructor(
     val turnkey: TurnkeyContext,
     val walletAddress: String?,
     val sessionPolicy: TurnkeySessionPolicy,
     val onSessionExpired: (() -> Unit)?,
     val sponsorGas: Boolean,
+    val sponsorRent: Boolean,
     /** Managed-mode ids; null in bring-your-own mode, where the host owns authentication. */
     internal val managed: ManagedIds?,
 ) {
@@ -126,7 +130,8 @@ class TurnkeyConfig internal constructor(
         sessionPolicy: TurnkeySessionPolicy = TurnkeySessionPolicy(),
         onSessionExpired: (() -> Unit)? = null,
         sponsorGas: Boolean = true,
-    ) : this(turnkey, walletAddress.checksummedOrNull(), sessionPolicy, onSessionExpired, sponsorGas, managed = null)
+        sponsorRent: Boolean = false,
+    ) : this(turnkey, walletAddress.checksummedOrNull(), sessionPolicy, onSessionExpired, sponsorGas, sponsorRent, managed = null)
 
     /**
      * Managed mode — internal API reserved for the Rain wallet provider (`RainProvider` in `rain-wallet-android`), see [InternalRainTurnkeyApi].
@@ -171,7 +176,7 @@ class TurnkeyConfig internal constructor(
      *   scheme, port, path or a single label such as `localhost` is refused).
      */
     @InternalRainTurnkeyApi
-    @Suppress("LongParameterList") // the BYO constructor's parameters plus the managed ids and the passkey domain; five have defaults
+    @Suppress("LongParameterList") // the BYO constructor's parameters plus the managed ids and the passkey domain; six have defaults
     constructor(
         application: Application,
         organizationId: String,
@@ -181,6 +186,7 @@ class TurnkeyConfig internal constructor(
         sessionPolicy: TurnkeySessionPolicy = TurnkeySessionPolicy(),
         onSessionExpired: (() -> Unit)? = null,
         sponsorGas: Boolean = true,
+        sponsorRent: Boolean = false,
         passkeyDomain: String? = null,
     ) : this(
         // The vendor context is a process-wide object; managed mode configures it lazily, on the
@@ -190,6 +196,7 @@ class TurnkeyConfig internal constructor(
         sessionPolicy,
         onSessionExpired,
         sponsorGas,
+        sponsorRent,
         managed = ManagedIds(
             application,
             organizationId,
@@ -361,6 +368,7 @@ class TurnkeyProvider internal constructor(
             solanaChainReader = context.solanaSupport.chainReader,
             solanaTransferComposer = context.solanaSupport.composer,
             tokenStore = context.tokenStore,
+            sponsorRent = config.sponsorRent,
         )
 
         // Probe — ensures Turnkey has an EVM wallet available before the provider is handed out.

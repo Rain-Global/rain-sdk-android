@@ -2,6 +2,7 @@ package com.rain.sdk.turnkey
 
 import android.webkit.URLUtil
 import com.google.common.truth.Truth.assertThat
+import com.rain.sdk.RainChain
 import com.rain.sdk.RainSdk
 import com.rain.sdk.error.RainError
 import com.rain.sdk.internal.network.chainreader.EvmChainReader
@@ -150,6 +151,21 @@ class TurnkeyProviderTest {
                 }
             }
         }
+
+    @Test
+    fun `hands sponsorRent to the wallet it creates, read with sponsorGas`(): Unit = runBlocking {
+        listOf(true to false, true to true, false to true).forEach { (sponsorGas, sponsorRent) ->
+            val config = TurnkeyConfig(turnkey = TurnkeyContext, sponsorGas = sponsorGas, sponsorRent = sponsorRent)
+            val descriptor = TurnkeyProvider(config, contextOverride = MockTurnkey())
+            try {
+                val wallet = descriptor.create(providerContext())
+
+                assertThat(wallet.sponsorsRent(RainChain.SOLANA_DEVNET)).isEqualTo(sponsorGas && sponsorRent)
+            } finally {
+                descriptor.close()
+            }
+        }
+    }
 
     /** The vendor-free context core hands every descriptor; nothing here is called during create. */
     private fun providerContext(): ProviderContext {

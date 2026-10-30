@@ -99,6 +99,7 @@ internal fun turnkeyWalletProvider(
     tokenStore: TokenMetadataStore? = null,
     sessionCoordinator: TurnkeySessionCoordinator? = null,
     sponsorGas: Boolean = false,
+    sponsorRent: Boolean = false,
     registryReadTimeoutMs: Long = TurnkeyWalletProvider.REGISTRY_READ_TIMEOUT_MS
 ): TurnkeyWalletProvider {
     val jsonRpcClient = JsonRpcClient(httpClient)
@@ -122,6 +123,7 @@ internal fun turnkeyWalletProvider(
             ?: SolanaChainReader(rpcEndpoints = rpcEndpoints, solanaRpcClient = solanaRpcClient),
         solanaTransferComposer = SolanaTransferComposer(solanaRpcClient, rpcEndpoints::get),
         tokenStore = tokenStore ?: TokenMetadataStore(evmReader),
+        sponsorRent = sponsorRent,
         registryReadTimeoutMs = registryReadTimeoutMs,
     )
 }

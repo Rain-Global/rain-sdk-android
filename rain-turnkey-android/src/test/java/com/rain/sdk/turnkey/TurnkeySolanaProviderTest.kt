@@ -8,7 +8,6 @@ import com.rain.sdk.internal.network.chainreader.SolanaChainReader
 import com.rain.sdk.internal.solana.Base58
 import com.rain.sdk.internal.solana.SolanaAddresses
 import com.rain.sdk.internal.solana.SolanaInstructions
-import com.rain.sdk.internal.solana.SolanaLamportPreflight
 import com.rain.sdk.internal.solana.SolanaTransactionBuilder
 import com.rain.sdk.internal.tokenstore.TokenMetadataStore
 import com.rain.sdk.models.Balance
@@ -60,11 +59,13 @@ class TurnkeySolanaProviderTest {
      * @param solanaReader pass `null` to exercise the real [SolanaChainReader] against the mock
      *        RPC server — needed by the balance tests, where SPL holdings are discovered on chain.
      */
+    @Suppress("LongParameterList") // one named double or setting per collaborator of the provider
     private fun makeProvider(
         client: MockTurnkeyClient = MockTurnkeyClient(),
         evmReader: MockChainReader = MockChainReader(),
         solanaReader: MockChainReader? = MockChainReader(),
         sponsorGas: Boolean = false,
+        sponsorRent: Boolean = false,
         turnkey: MockTurnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), turnkeyClient = client)
     ): TurnkeyWalletProvider {
         return turnkeyWalletProvider(
@@ -74,7 +75,8 @@ class TurnkeySolanaProviderTest {
             chainReader = evmReader,
             solanaChainReader = solanaReader,
             pollingIntervalMs = 0L,
-            sponsorGas = sponsorGas
+            sponsorGas = sponsorGas,
+            sponsorRent = sponsorRent
         )
     }
 
@@ -1965,7 +1967,7 @@ class TurnkeySolanaProviderTest {
     fun `sponsored sendToken needs only the rent when the recipient account must be created`(): Unit = runBlocking {
         // Exactly the rent and not a lamport more: the fee is the sponsor's, the rent the sender's.
         // Self-paid, this balance fails the fee check.
-        splFixture(recipientAccountExists = false, lamports = SolanaLamportPreflight.TOKEN_ACCOUNT_RENT_LAMPORTS)
+        splFixture(recipientAccountExists = false, lamports = RENT_LAMPORTS)
         val client = includedStatusClient()
 
         val result = makeProvider(client = client, sponsorGas = true)
@@ -2002,6 +2004,61 @@ class TurnkeySolanaProviderTest {
                 makeProvider(sponsorGas = true).sendToken(devnet, mint, recipient, BigDecimal("1"), decimals = 6)
             }
         }
+    }
+
+    @Test
+    fun `sponsored sendToken with sponsored rent needs no SOL when the recipient account must be created`(): Unit =
+        runBlocking {
+            // Turnkey pre-funds the payer of the create instruction inside the sponsored send, so
+            // the sender stays that payer and the SDK demands nothing of a wallet holding no SOL.
+            splFixture(recipientAccountExists = false, lamports = 0L)
+            val client = includedStatusClient()
+
+            val result = makeProvider(client = client, sponsorGas = true, sponsorRent = true)
+                .sendToken(devnet, mint, recipient, BigDecimal("1"), decimals = 6)
+
+            assertThat(result).isEqualTo(SIGNATURE)
+            val body = client.solSendTransactionCalls.single()
+            assertThat(body.sponsor).isEqualTo(true)
+            assertThat(decodeInstructions(body.unsignedTransaction).map { it.first })
+                .containsExactly(SolanaPrograms.ASSOCIATED_TOKEN_ADDRESS, SolanaPrograms.TOKEN_ADDRESS)
+                .inOrder()
+            assertThat(rpc.recordedMethods).containsNoneOf("getBalance", "getMinimumBalanceForRentExemption", "simulateTransaction")
+
+            // The flag changes what the sender must hold, never the bytes.
+            splFixture(recipientAccountExists = false, lamports = RENT_LAMPORTS)
+            val selfFundedRent = includedStatusClient()
+            makeProvider(client = selfFundedRent, sponsorGas = true, sponsorRent = false)
+                .sendToken(devnet, mint, recipient, BigDecimal("1"), decimals = 6)
+            assertThat(selfFundedRent.solSendTransactionCalls.single().unsignedTransaction).isEqualTo(body.unsignedTransaction)
+        }
+
+    @Test
+    fun `rent sponsorship follows the flag, the chain family and the registry`() {
+        // Core's port hook for Solana composition: rent exists on Solana only, Turnkey pre-funds it
+        // inside a sponsored send, and sponsored sends exist exactly where Turnkey broadcasts.
+        val sponsored = makeProvider(sponsorGas = true, sponsorRent = true)
+        assertThat(sponsored.sponsorsRent(devnet)).isTrue()
+        assertThat(sponsored.sponsorsRent(RainChain.SOLANA_TESTNET)).isFalse()
+        assertThat(sponsored.sponsorsRent(1)).isFalse()
+        assertThat(makeProvider(sponsorGas = true).sponsorsRent(devnet)).isFalse()
+        assertThat(makeProvider(sponsorGas = false, sponsorRent = true).sponsorsRent(devnet)).isFalse()
+    }
+
+    @Test
+    fun `sponsorRent without sponsorGas leaves a self-paid sendToken demanding fee and rent`(): Unit = runBlocking {
+        // The Rain wallet passes sponsorRent as true for every host; a host that turns sponsorGas off
+        // must get the self-paid send of before, rent check included.
+        splFixture(recipientAccountExists = false, lamports = 0L)
+
+        val error = assertThrows(RainError.InsufficientFunds::class.java) {
+            runBlocking {
+                makeProvider(sponsorGas = false, sponsorRent = true)
+                    .sendToken(devnet, mint, recipient, BigDecimal("1"), decimals = 6)
+            }
+        }
+
+        assertThat(error.required?.compareTo(BigDecimal("0.00149344"))).isEqualTo(0)
     }
 
     @Test
@@ -2094,6 +2151,7 @@ class TurnkeySolanaProviderTest {
             "getBalance",
             JSONObject().put("context", JSONObject().put("slot", 1)).put("value", lamports)
         )
+        rpc.stubObject("getMinimumBalanceForRentExemption", RENT_LAMPORTS)
         rpc.stubObject(
             "getLatestBlockhash",
             JSONObject()
@@ -2280,6 +2338,9 @@ class TurnkeySolanaProviderTest {
 
     private companion object {
         const val SIGNATURE = "2id3YC2jK9G5Wo2phDx4gJVAew8DcY5NAB7jTLd5p3KqJ7xQy9bniaP4q1hk2N1nF"
+
+        /** The mock cluster's rent-exempt minimum for a 165-byte token account. */
+        const val RENT_LAMPORTS = 1_488_440L
 
         /** A gap between two submits long enough for a timestamp read per submit to differ. */
         const val CLOCK_GAP_MS = 5L

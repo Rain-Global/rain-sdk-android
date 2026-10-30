@@ -12,6 +12,7 @@ import com.rain.sdk.models.RainPreparedWithdrawal
 import com.rain.sdk.models.RainWithdrawAddresses
 import com.rain.sdk.provider.Capability
 import kotlinx.coroutines.runBlocking
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertThrows
 import org.junit.Before
@@ -59,10 +60,11 @@ class RainSdkManagerSolanaWithdrawTest {
     )
 
     /** A manager over the mock node whose stub provider owns the fixture collateral. */
-    private fun fixtureManager(sponsored: Boolean): Pair<RainSdkManager, StubWalletProvider> {
+    private fun fixtureManager(sponsored: Boolean, rentSponsored: Boolean = false): Pair<RainSdkManager, StubWalletProvider> {
         val stub = StubWalletProvider().apply {
             addressToReturn = SolanaWithdrawFixtures.OWNER
             if (sponsored) capabilitiesToReturn = setOf(Capability.GAS_SPONSORSHIP)
+            if (rentSponsored) sponsorsRentToReturn = true
         }
         return TestManagers.stubProviderManager(
             stub = stub,
@@ -128,6 +130,61 @@ class RainSdkManagerSolanaWithdrawTest {
         assertThat(rpc.recordedMethods).containsAtLeast("getBalance", "simulateTransaction")
         assertThat((prepared as RainPreparedWithdrawal.Solana).transfer.transactionHex)
             .isEqualTo(SolanaWithdrawFixtures.GOLDEN_WITHDRAW_TX_HEX)
+        assertThat(stub.sendSolanaTransactionCalls).isEmpty()
+    }
+
+    /** The fixture node with the recipient's token account missing and the owner holding no SOL. */
+    private fun stubRecipientWithoutAccountAndOwnerWithoutSol() {
+        SolanaWithdrawFixtures.stubHappyPath(rpc)
+        rpc.stubObjectFor(
+            "getAccountInfo",
+            SolanaWithdrawFixtures.destinationAta(),
+            SolanaWithdrawFixtures.contextual(JSONObject.NULL)
+        )
+        rpc.stubObject("getBalance", SolanaWithdrawFixtures.contextual(0L))
+    }
+
+    @Test
+    fun `withdrawCollateral leaves the rent to the sponsor when the provider says it sponsors rent`(): Unit =
+        runBlocking {
+            // The port hook reaches the composer: nothing is required of a zero-SOL owner, so the
+            // balance is not read, and the sponsored send still skips the dry run.
+            stubRecipientWithoutAccountAndOwnerWithoutSol()
+            val (manager, stub) = fixtureManager(sponsored = true, rentSponsored = true)
+
+            manager.withdrawCollateral(
+                chainId = RainChain.SOLANA_DEVNET,
+                addresses = fixtureAddresses,
+                amount = BigDecimal("0.000001"),
+                decimals = 6,
+                adminSignature = SolanaWithdrawFixtures.adminSignature
+            )
+
+            assertThat(rpc.recordedMethods).containsNoneOf("getBalance", "getMinimumBalanceForRentExemption", "simulateTransaction")
+            assertThat(stub.sendSolanaTransactionUnsigned.single().createsRecipientAccount).isTrue()
+        }
+
+    @Test
+    fun `prepareWithdrawal still demands the rent when the provider sponsors it`(): Unit = runBlocking {
+        // The prepared transaction is the host's own submission, which no sponsor pre-funds: the
+        // owner must hold the fee and the rent, as for a self-paid provider.
+        stubRecipientWithoutAccountAndOwnerWithoutSol()
+        val (manager, stub) = fixtureManager(sponsored = true, rentSponsored = true)
+
+        val error = assertThrows(RainError.InsufficientFunds::class.java) {
+            runBlocking {
+                manager.prepareWithdrawal(
+                    chainId = RainChain.SOLANA_DEVNET,
+                    addresses = fixtureAddresses,
+                    amount = BigDecimal("0.000001"),
+                    decimals = 6,
+                    adminSignature = SolanaWithdrawFixtures.adminSignature
+                )
+            }
+        }
+
+        // The fee plus the token-account rent the cluster answered, in SOL.
+        assertThat(error.required?.compareTo(BigDecimal("0.00149344"))).isEqualTo(0)
         assertThat(stub.sendSolanaTransactionCalls).isEmpty()
     }
 

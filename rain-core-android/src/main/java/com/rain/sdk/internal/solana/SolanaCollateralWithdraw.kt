@@ -39,6 +39,8 @@ internal class SolanaCollateralWithdrawComposer(
      *   charges the fee to [ownerAddress], so for a sponsored withdrawal it would false-fail a
      *   wallet holding no SOL even though the sponsor pays the real send; a failure then
      *   surfaces through the provider's send status instead of as a typed preflight error.
+     * @param sponsoredRent true when that provider's organization also funds the rent of a recipient
+     *   token account this withdrawal creates, so the owner need not hold it.
      */
     suspend fun composeWithdraw(
         chainId: Int,
@@ -48,7 +50,8 @@ internal class SolanaCollateralWithdrawComposer(
         recipientAddress: String,
         amountBaseUnits: BigInteger,
         adminSignature: RainAdminSignature,
-        sponsoredFees: Boolean = false
+        sponsoredFees: Boolean = false,
+        sponsoredRent: Boolean = false
     ): UnsignedSolanaTransfer {
         val rpcUrl = rpcUrlResolver(chainId)
             ?: throw RainError.InvalidConfig("No RPC endpoint configured for chainId=$chainId")
@@ -100,15 +103,16 @@ internal class SolanaCollateralWithdrawComposer(
         val destinationAta =
             SolanaAddresses.associatedTokenAddress(recipientKey, mintKey, tokenProgramKey)
         val createDestination = !solanaRpcClient.accountExists(rpcUrl, Base58.encode(destinationAta))
-        // The owner pays rent for a recipient token account this withdrawal creates, and the fee
-        // unless the provider sponsors it. Checked up front so a short wallet gets a typed error
-        // before anything is signed, the same gate the transfer composer applies.
+        // The owner pays rent for a recipient token account this withdrawal creates, and the fee,
+        // each unless the provider sponsors it. Checked up front so a short wallet gets a typed
+        // error before anything is signed, the same gate the transfer composer applies.
         SolanaLamportPreflight.require(
             solanaRpcClient,
             rpcUrl,
             ownerAddress,
             includeAccountRent = createDestination,
-            feesSponsored = sponsoredFees
+            feesSponsored = sponsoredFees,
+            rentSponsored = sponsoredRent
         )
 
         // Reconstruct the exact message the executor signed; the program re-derives it on chain
@@ -206,6 +210,7 @@ internal class SolanaCollateralWithdrawComposer(
             Base64.getEncoder().encodeToString(transaction)
         )
         if (simulation.succeeded) return
+        if (simulation.fundsShortfall) throw RainError.InsufficientFunds()
         Timber.e(
             "Rain SDK: Solana withdrawal simulation failed: %s; logs: %s",
             simulation.error,

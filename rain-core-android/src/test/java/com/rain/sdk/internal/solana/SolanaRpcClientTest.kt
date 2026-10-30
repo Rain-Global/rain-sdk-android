@@ -40,6 +40,16 @@ class SolanaRpcClientTest {
     private fun client() = SolanaRpcClient()
     private fun url() = rpc.urlFor(devnet)
 
+    // ---------- getMinimumBalanceForRentExemption ----------
+
+    @Test
+    fun `reads the cluster's rent-exempt minimum for the account size it is asked about`(): Unit = runBlocking {
+        rpc.stubObject("getMinimumBalanceForRentExemption", 1_488_440L)
+
+        assertThat(client().getMinimumBalanceForRentExemption(url(), 165)).isEqualTo(BigInteger.valueOf(1_488_440L))
+        assertThat(rpc.recordedBodies.single()).contains("[165]")
+    }
+
     // ---------- getAccountInfo ----------
 
     @Test

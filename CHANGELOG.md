@@ -25,9 +25,30 @@ Notable changes to the Rain Android SDK, newest first. The format follows
   (`0x10b5Be494C2962A7B318aFB63f0Ee30b959D000b`), the two collateral tokens Rain's sandbox mints on
   Base Sepolia, in the built-in token registry, with 6 decimals each. A `registerTokens` entry for
   either address is ignored from now on, as for every built-in token.
+- **Breaking:** `sponsorRent` on the bring-your-own `TurnkeyConfig`, off by default, with
+  `WalletProvider.sponsorsRent(chainId)` in core. It says what the organization's "Sponsor Solana
+  Rent" switch does: with it on, a Solana `sendToken` or `withdrawCollateral` that creates the
+  recipient's token account no longer requires the sender to hold its rent before signing, since
+  Turnkey pre-funds the sender for it inside the sponsored send, so a wallet holding only USDC can
+  send USDC to a first-time recipient. The transaction is unchanged (the sender stays the create
+  instruction's payer), `prepareWithdrawal` keeps the self-paid check, and the flag is read with
+  `sponsorGas` only, because the pre-funding is part of a sponsored send. Passed true while the
+  switch is off, a 0-SOL send is signed and fails at the backend after submission, reported as
+  `RAIN_402` when the failure detail carries the runtime's log, instead of being refused before
+  signing. Migration: `TurnkeyConfig` gains a trailing constructor parameter, so recompile against
+  this version; a `WalletProvider` implementation inherits the default `sponsorsRent` and changes
+  nothing. The Rain wallet has no such parameter; see the entry under Changed. See
+  [TURNKEY_SUPPORT.md](docs/TURNKEY_SUPPORT.md#solana-notes).
 
 ### Fixed
 
+- The Solana preflight reads the rent of a token account it has to create from the cluster
+  (`getMinimumBalanceForRentExemption` for the 165-byte account) instead of pinning 2,039,280
+  lamports. On 2026-10-29 both mainnet-beta and devnet answer 1,488,440, so 5.0.0-beta.1's
+  self-paid `sendToken` and `withdrawCollateral`, and `prepareWithdrawal`, over-quoted that rent in
+  the balance they demanded and in `required` on their `RAIN_402`. The read happens only when the
+  send has to create the recipient's account and the rent is not sponsored, so sponsored and
+  no-create sends make no new call, and `required` on the error carries the chain's figure.
 - Sends and collateral withdrawals refuse an EVM address written in mixed case whose EIP-55
   checksum doesn't match, with `RAIN_102`, before anything is signed. A mistyped character almost
   always breaks the checksum, and 5.0.0-beta.1 checked only the address's shape, so `sendNative`,
@@ -141,6 +162,15 @@ Notable changes to the Rain Android SDK, newest first. The format follows
 
 ### Changed
 
+- The Rain wallet leaves the rent of a first-time recipient's Solana token account to Rain's
+  organization: with `sponsorGas` on, `sendToken` and `withdrawCollateral` no longer demand it from
+  the sender before signing, so a wallet holding only USDC can send USDC to a first-time recipient
+  once Rain's rent sponsorship is on. While it is off, such a send from a wallet holding no SOL is
+  signed and fails at the backend after submission, reported as `RAIN_402` `InsufficientFunds` with
+  the lamports the runtime's log names when the failure detail carries that log, where 5.0.0-beta.1
+  refused it before signing with the same code. No parameter: whether the rent is funded is Rain's
+  setting, which a partner cannot see, and a change to it reaches installed apps without a release.
+  With `sponsorGas` off the sender pays the fee and that rent, checked before signing as before.
 - The SDK's own HTTP calls share one OkHttp client (`RainHttp` in `rain-core-android`, internal API).
   Two calls that 5.0.0-beta.1 ran with no whole-call bound now have one: the Turnkey wallet's chain
   reads at 10 s and the withdrawal reads at 60 s.

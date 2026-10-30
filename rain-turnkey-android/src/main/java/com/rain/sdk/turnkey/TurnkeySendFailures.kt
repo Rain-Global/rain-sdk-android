@@ -1,12 +1,14 @@
 package com.rain.sdk.turnkey
 
 import com.rain.sdk.error.RainError
+import com.rain.sdk.internal.solana.SolanaConverter
 import com.turnkey.http.utils.TurnkeyHttpError
 import com.turnkey.types.TGetSendTransactionStatusResponse
 import com.turnkey.types.V1Activity
 import com.turnkey.types.V1ActivityStatus
 import com.turnkey.types.V1SolanaFailureDetails
 import com.turnkey.types.V1TxError
+import java.math.BigInteger
 
 /**
  * Classifies a send status. A status has failed when its `txStatus` says so, when it carries a
@@ -14,8 +16,9 @@ import com.turnkey.types.V1TxError
  * one only when the send failed, with or without a message, so an included transaction whose error
  * holds only Solana details is a failure even though the status also names its signature.
  *
- * A Solana fee or rent shortfall is [RainError.InsufficientFunds], checked first because the runtime
- * may log a failed program for it too. A status carrying decoded revert details is the contract or
+ * A Solana fee or rent shortfall is [RainError.InsufficientFunds], whether the runtime names it or
+ * the System Program's transfer refused it, checked first because the runtime logs a failed program
+ * for it too. A status carrying decoded revert details is the contract or
  * program refusing the transaction, the fact a self-paid dry run would have caught before signing,
  * which a sponsored send skips: an EVM revert chain (top level or under `error.eth`), whether the
  * transaction failed before inclusion or was included and reverted on chain, or a Solana
@@ -51,6 +54,9 @@ internal object TurnkeySendFailures {
     /** The runtime's own failure line, `Program <base58 id> failed: ...`; a program's own log mentioning "failed" does not count. */
     private val PROGRAM_FAILED_LOG = Regex("^Program [1-9A-HJ-NP-Za-km-z]{32,44} failed")
 
+    /** The System Program's own refusal to move lamports the payer does not hold; a program's log line never has this shape. */
+    private val SYSTEM_TRANSFER_SHORTFALL = Regex("^Transfer: insufficient lamports (\\d+), need (\\d+)$")
+
     /** Null when [status] is not a failure; otherwise the error the poll loop throws. */
     fun sendFailure(status: TGetSendTransactionStatusResponse, fallback: String): RainError? {
         val normalized = status.txStatus.uppercase()
@@ -64,8 +70,7 @@ internal object TurnkeySendFailures {
             ?: status.solana?.signature?.takeIf { it.isNotEmpty() }
         val message = (status.txError ?: error?.message ?: fallback).take(MAX_VENDOR_MESSAGE_LENGTH) +
             transactionId?.let { " (transaction $it)" }.orEmpty()
-        return when {
-            isSolanaFundsShortfall(error?.solana) -> RainError.InsufficientFunds()
+        return solanaShortfallOrNull(error?.solana) ?: when {
             carriesOnChainRevert(error) ->
                 RainError.TransactionSimulationFailed(IllegalStateException(message), transactionId)
             else -> RainError.ProviderError(IllegalStateException(message))
@@ -142,9 +147,26 @@ internal object TurnkeySendFailures {
         return instructionError || failedLog
     }
 
-    /** The sender cannot pay the fee or the rent: a shortfall, not a program refusal. */
-    private fun isSolanaFundsShortfall(solana: V1SolanaFailureDetails?): Boolean {
-        val json = solana?.transactionErrorJson ?: return false
-        return json.contains("InsufficientFundsForFee") || json.contains("InsufficientFundsForRent")
+    /**
+     * The sender cannot pay the fee or the rent, a shortfall rather than a program refusal: the
+     * runtime's `InsufficientFundsForFee` or `InsufficientFundsForRent`, or the System Program's
+     * transfer line, which names the lamports held and needed (a payer that could not fund an
+     * account the transaction creates). Null otherwise.
+     */
+    private fun solanaShortfallOrNull(solana: V1SolanaFailureDetails?): RainError.InsufficientFunds? {
+        val json = solana?.transactionErrorJson.orEmpty()
+        val transfer = solana?.logs.orEmpty().firstNotNullOfOrNull { SYSTEM_TRANSFER_SHORTFALL.matchEntire(it) }
+        return when {
+            json.contains("InsufficientFundsForFee") || json.contains("InsufficientFundsForRent") -> RainError.InsufficientFunds()
+            transfer != null -> {
+                val (held, needed) = transfer.destructured
+                RainError.InsufficientFunds(
+                    required = SolanaConverter.lamportsToSol(BigInteger(needed)),
+                    available = SolanaConverter.lamportsToSol(BigInteger(held)),
+                    currency = "SOL"
+                )
+            }
+            else -> null
+        }
     }
 }

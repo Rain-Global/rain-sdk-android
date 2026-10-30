@@ -89,6 +89,9 @@ internal object SolanaWithdrawFixtures {
             )
         )
 
+    /** The mock cluster's rent-exempt minimum for a 165-byte token account. */
+    const val TOKEN_ACCOUNT_RENT_LAMPORTS = 1_488_440L
+
     /** Stubs every RPC the composer makes on the happy path, the dry run included. */
     fun stubHappyPath(rpc: MockRpcServer) {
         rpc.stubObjectFor("getAccountInfo", COLLATERAL, contextual(rawAccount(PROGRAM_ID, COLLATERAL_DATA)))
@@ -103,6 +106,7 @@ internal object SolanaWithdrawFixtures {
         rpc.stubObject("getLatestBlockhash", contextual(JSONObject().put("blockhash", MINT)))
         // The owner holds 1 SOL: enough for the fee and for rent, should a recipient account be needed.
         rpc.stubObject("getBalance", contextual(1_000_000_000L))
+        rpc.stubObject("getMinimumBalanceForRentExemption", TOKEN_ACCOUNT_RENT_LAMPORTS)
         rpc.stubObject(
             "simulateTransaction",
             contextual(JSONObject().put("err", JSONObject.NULL).put("logs", JSONArray()))

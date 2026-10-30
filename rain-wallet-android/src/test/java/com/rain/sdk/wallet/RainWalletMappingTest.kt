@@ -161,6 +161,16 @@ class RainWalletMappingTest {
     }
 
     @Test
+    fun `the backing config always sponsors rent, whatever sponsorGas says`() {
+        // Whether the rent is funded is Rain's dashboard switch, which no partner can see or set.
+        useRealBacking()
+        val application = mockk<Application>()
+
+        assertThat(config().toBacking(application).sponsorRent).isTrue()
+        assertThat(config(sponsorGas = false).toBacking(application).sponsorRent).isTrue()
+    }
+
+    @Test
     fun `the environment picks the backend row the backing is built with, Production by default`() {
         useRealBacking()
         val application = mockk<Application>()
@@ -201,11 +211,13 @@ class RainWalletMappingTest {
         authTokenProvider: suspend (RainWalletContact?) -> String = { "wat" },
         environment: RainWalletEnvironment = RainWalletEnvironment.Sandbox,
         onSessionExpired: (() -> Unit)? = null,
+        sponsorGas: Boolean = true,
         passkeyDomain: String? = null,
     ) = RainWalletConfig(
         authTokenProvider = authTokenProvider,
         environment = environment,
         onSessionExpired = onSessionExpired,
+        sponsorGas = sponsorGas,
         passkeyDomain = passkeyDomain,
     )
 

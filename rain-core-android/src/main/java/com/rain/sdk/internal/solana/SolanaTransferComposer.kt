@@ -15,7 +15,8 @@ import java.util.Base64
  * creation, balance and fee checks, and a simulation dry run for SPL transfers. Providers only
  * sign and broadcast the result, so the checks cannot drift between them. A provider whose fee
  * is sponsored opts out of the two self-paid preflights (fee lamports and the dry run) through
- * `sponsoredFees`; the rent check stays, because rent sponsorship is a separate toggle.
+ * `sponsoredFees`; the rent check stays unless `sponsoredRent` says the sponsor pre-funds it,
+ * because rent sponsorship is a separate toggle.
  */
 @RainAdapterApi
 class SolanaTransferComposer(
@@ -57,7 +58,8 @@ class SolanaTransferComposer(
      *
      * Tokens live in per-mint *token accounts*, not in the wallet itself, so [toAddress] is the
      * recipient's wallet and the account that actually receives the transfer is derived from it.
-     * Creating a missing recipient account costs the sender rent (~0.002 SOL).
+     * Creating a missing recipient account costs the sender its rent unless [sponsoredRent]; the
+     * sender stays the instruction's payer either way.
      *
      * The mint is read from the chain first: its decimals scale [amount], and the token program
      * that owns it both receives the transfer and seeds the token-account derivation. A self-paid
@@ -66,7 +68,7 @@ class SolanaTransferComposer(
      * the dry run is skipped (it would charge the fee to a sender who pays none), so a failure
      * surfaces through the provider's send status instead.
      *
-     * Six parameters: the transfer's five identities plus the sponsorship flag, each load-bearing.
+     * Seven parameters: the transfer's five identities plus the two sponsorship flags, each load-bearing.
      */
     @Suppress("LongParameterList")
     suspend fun composeSplToken(
@@ -75,7 +77,8 @@ class SolanaTransferComposer(
         mintAddress: String,
         toAddress: String,
         amount: BigDecimal,
-        sponsoredFees: Boolean = false
+        sponsoredFees: Boolean = false,
+        sponsoredRent: Boolean = false
     ): UnsignedSolanaTransfer {
         val rpcUrl = resolveRpcUrl(chainId)
 
@@ -117,11 +120,13 @@ class SolanaTransferComposer(
         }
 
         val createDestination = !solanaRpcClient.accountExists(rpcUrl, Base58.encode(destinationAta))
-        requireLamportsForFees(
+        SolanaLamportPreflight.require(
+            solanaRpcClient,
             rpcUrl,
             fromAddress,
             includeAccountRent = createDestination,
-            feesSponsored = sponsoredFees
+            feesSponsored = sponsoredFees,
+            rentSponsored = sponsoredRent
         )
 
         val instructions = buildList {
@@ -206,24 +211,6 @@ class SolanaTransferComposer(
         }
     }
 
-    /**
-     * Fails early when the wallet cannot cover the network fee (plus token-account rent when the
-     * transfer has to create one). Simulation would catch this too, but only as an opaque program
-     * error — SOL for fees is a distinct problem from the token balance itself.
-     */
-    private suspend fun requireLamportsForFees(
-        rpcUrl: String,
-        address: String,
-        includeAccountRent: Boolean,
-        feesSponsored: Boolean
-    ) = SolanaLamportPreflight.require(
-        solanaRpcClient,
-        rpcUrl,
-        address,
-        includeAccountRent = includeAccountRent,
-        feesSponsored = feesSponsored
-    )
-
     /** Dry-runs the unsigned transaction, translating a simulation failure into a typed error. */
     private suspend fun simulate(rpcUrl: String, transaction: ByteArray) {
         val simulation = solanaRpcClient.simulateTransaction(
@@ -231,6 +218,7 @@ class SolanaTransferComposer(
             Base64.getEncoder().encodeToString(transaction)
         )
         if (simulation.succeeded) return
+        if (simulation.fundsShortfall) throw RainError.InsufficientFunds()
 
         Timber.e(
             "Rain SDK: Solana transaction simulation failed: %s; logs: %s",

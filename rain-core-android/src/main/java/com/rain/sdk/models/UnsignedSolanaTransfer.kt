@@ -15,7 +15,11 @@ class UnsignedSolanaTransfer @RainAdapterApi constructor(
      * commitment, so of the 60 to 90 seconds a blockhash lives, about 13 have passed on return.
      */
     val recentBlockhash: String,
-    /** True when the transfer creates the recipient's token account, whose rent the sender pays even when the fee is sponsored. */
+    /**
+     * True when the transfer creates the recipient's token account, whose rent the SDK demands from
+     * the sender before signing unless the signing provider's organization funds it; the Rain wallet
+     * section of `docs/METHODS.md` has the contract.
+     */
     val createsRecipientAccount: Boolean = false
 ) {
     private val transactionBytes = transaction
