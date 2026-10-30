@@ -68,8 +68,10 @@ Keep the Api-Key off the device, and have the mint endpoint authenticate the app
 before minting: Rain limits by IP only, and a code is SMS spend. It also carries `environment`
 (`RainWalletEnvironment.Production` by default, or `Sandbox`; each fixes both the Rain API host and
 the wallet organization the accounts live under) and tunes behaviour: the session policy (`RainWalletSessionPolicy`), the expiry hook
-`onSessionExpired`, whether sends are fee-sponsored (`sponsorGas`, on by default) and the passkey
-domain (`passkeyDomain`, off by default). The rules of each parameter are in the `RainWalletConfig`
+`onSessionExpired`, whether sends are fee-sponsored (`sponsorGas`, on by default; the rent of a first-time
+recipient's Solana token account is not demanded from the sender while it is on, see the Rain wallet
+section of [docs/METHODS.md](../docs/METHODS.md#rain-wallet-provider)) and the passkey domain
+(`passkeyDomain`, off by default). The rules of each parameter are in the `RainWalletConfig`
 row of [docs/METHODS.md](../docs/METHODS.md#rain-wallet-provider). The session is observable through
 `sessionState` and `currentSessionState()` (`RainWalletSessionState`) and through `authState` and
 `currentAuthState()` (`RainWalletAuthState`); `refreshSession()` forces a refresh, `logout()` clears

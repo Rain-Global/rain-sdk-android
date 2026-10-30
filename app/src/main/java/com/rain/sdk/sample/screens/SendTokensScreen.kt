@@ -104,8 +104,8 @@ private fun SendTokensContent(
                     onValueChange = actions.onContractAddressChanged,
                     enabled = !state.isSending,
                     helper = if (selectedChain.isSolana) {
-                        "Decimals come from the mint. If the recipient has no account for this token, " +
-                            "one is created and you pay about 0.002 SOL in rent."
+                        "Decimals come from the mint. If the recipient has no account for this token, one is created " +
+                            "in the send; its rent is the organization's when rent sponsorship is on, the sender's otherwise."
                     } else {
                         "Decimals are resolved automatically by the SDK."
                     },

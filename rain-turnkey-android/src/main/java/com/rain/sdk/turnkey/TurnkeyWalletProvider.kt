@@ -41,12 +41,16 @@ import java.util.concurrent.atomic.AtomicBoolean
  * where deployed), a refused backend read included: on the feature gate for both reads, on any other
  * refused status for the native balance only (see [backendBalancesOrNull]).
  */
-internal class TurnkeyWalletProvider(
+internal class TurnkeyWalletProvider
+@Suppress("LongParameterList") // the manager, two readers, a composer, the token store and two settings, each named at the one call site
+constructor(
     private val manager: TurnkeyManager,
     private val chainReader: ChainReader,
     private val solanaChainReader: ChainReader,
     private val solanaTransferComposer: SolanaTransferComposer,
     private val tokenStore: TokenMetadataStore,
+    /** [TurnkeyConfig.sponsorRent]; read with [sponsorGas], since rent pre-funding is part of a sponsored send. */
+    private val sponsorRent: Boolean = false,
     private val registryReadTimeoutMs: Long = REGISTRY_READ_TIMEOUT_MS,
 ) : WalletProvider {
 
@@ -71,6 +75,10 @@ internal class TurnkeyWalletProvider(
     /** Sponsorship applies exactly where Turnkey can broadcast; elsewhere the wallet pays. */
     override fun sponsorsFees(chainId: Int): Boolean =
         sponsorGas && TurnkeyBroadcastChains.supportsSend(chainId)
+
+    /** Rent pre-funding is part of a sponsored Solana send, so it applies exactly where Turnkey sponsors Solana sends. */
+    override fun sponsorsRent(chainId: Int): Boolean =
+        sponsorRent && sponsorGas && SolanaChains.isSolanaChain(chainId) && TurnkeyBroadcastChains.supportsSend(chainId)
 
     /** Picks the reader for [chainId]'s chain family. */
     private fun chainReaderFor(chainId: Int): ChainReader =
@@ -583,7 +591,8 @@ internal class TurnkeyWalletProvider(
             mintAddress,
             toAddress,
             amount,
-            sponsoredFees = sponsorGas
+            sponsoredFees = sponsorGas,
+            sponsoredRent = sponsorsRent(chainId)
         )
         return manager.submitSolanaTransaction(chainId, from, unsigned)
     }

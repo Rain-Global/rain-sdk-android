@@ -8,6 +8,7 @@ import com.turnkey.types.V1ActivityStatus
 import com.turnkey.types.V1RevertChainEntry
 import com.turnkey.types.V1SolanaFailureDetails
 import org.junit.Test
+import java.math.BigDecimal
 
 /**
  * The status classification both poll loops share. A structured `error` naming anything marks a failure
@@ -230,6 +231,48 @@ class TurnkeySendFailuresTest {
         )
 
         assertThat(classify(fixture)).isInstanceOf(RainError.InsufficientFunds::class.java)
+    }
+
+    @Test
+    fun `the system program's transfer line in the logs is an InsufficientFunds carrying its lamports`() {
+        // A sender holding no SOL creating the recipient's token account: the JSON alone reads as a
+        // program failure, the System Program's own line says what was held and needed.
+        val fixture = solanaFailed(
+            V1SolanaFailureDetails(
+                transactionErrorJson = "{\"InstructionError\":[0,{\"Custom\":1}]}",
+                logs = listOf(
+                    "Program ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL invoke [1]",
+                    "Program log: CreateIdempotent",
+                    "Program 11111111111111111111111111111111 invoke [2]",
+                    "Transfer: insufficient lamports 0, need 1488440",
+                    "Program 11111111111111111111111111111111 failed: custom program error: 0x1",
+                    "Program ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL failed: custom program error: 0x1"
+                )
+            ),
+            message = "preflight failed"
+        )
+
+        val error = classify(fixture) as RainError.InsufficientFunds
+
+        assertThat(error.required?.compareTo(BigDecimal("0.00148844"))).isEqualTo(0)
+        assertThat(error.available?.compareTo(BigDecimal.ZERO)).isEqualTo(0)
+        assertThat(error.currency).isEqualTo("SOL")
+    }
+
+    @Test
+    fun `a program's own log about insufficient lamports stays a program failure`() {
+        val fixture = solanaFailed(
+            V1SolanaFailureDetails(
+                transactionErrorJson = "{\"InstructionError\":[1,{\"Custom\":6000}]}",
+                logs = listOf(
+                    "Program log: vault has insufficient lamports",
+                    "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA failed: custom program error: 0x1770"
+                )
+            ),
+            message = "preflight failed"
+        )
+
+        assertThat(classify(fixture)).isInstanceOf(RainError.TransactionSimulationFailed::class.java)
     }
 
     @Test

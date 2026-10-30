@@ -132,10 +132,75 @@ class SolanaCollateralWithdrawComposerTest {
         }
         assertThat(rpc.recordedMethods).doesNotContain("simulateTransaction")
         // The fee is sponsored, so the shortfall is the token-account rent alone, in SOL; the wallet holds nothing.
-        assertThat(error.required?.compareTo(BigDecimal("0.00203928"))).isEqualTo(0)
+        assertThat(error.required?.compareTo(BigDecimal("0.00148844"))).isEqualTo(0)
         assertThat(error.available?.compareTo(BigDecimal.ZERO)).isEqualTo(0)
-        assertThat(error.message).contains("required 0.00203928")
+        assertThat(error.message).contains("required 0.00148844")
     }
+
+    @Test
+    fun `a dry run the runtime refuses for a rent shortfall is an InsufficientFunds, not a revert`(): Unit = runBlocking {
+        stubHappyPath()
+        rpc.stubObject(
+            "simulateTransaction",
+            contextual(
+                JSONObject()
+                    .put("err", JSONObject().put("InsufficientFundsForRent", JSONObject().put("account_index", 0)))
+                    .put("logs", JSONArray())
+            )
+        )
+
+        assertThrows(RainError.InsufficientFunds::class.java) {
+            runBlocking {
+                composer().composeWithdraw(
+                    chainId = devnet,
+                    ownerAddress = owner,
+                    collateralAddress = collateral,
+                    mintAddress = mint,
+                    recipientAddress = owner,
+                    amountBaseUnits = BigInteger.ONE,
+                    adminSignature = adminSignature
+                )
+            }
+        }
+        Unit
+    }
+
+    @Test
+    fun `a dry run the System Program refuses for the created account's rent carries the lamports it named`(): Unit =
+        runBlocking {
+            stubHappyPath()
+            rpc.stubObject(
+                "simulateTransaction",
+                contextual(
+                    JSONObject()
+                        .put("err", JSONObject().put("InstructionError", JSONArray().put(0).put(JSONObject().put("Custom", 1))))
+                        .put(
+                            "logs",
+                            JSONArray()
+                                .put("Program 11111111111111111111111111111111 invoke [2]")
+                                .put("Transfer: insufficient lamports 0, need 1488440")
+                                .put("Program 11111111111111111111111111111111 failed: custom program error: 0x1")
+                        )
+                )
+            )
+
+            val error = assertThrows(RainError.InsufficientFunds::class.java) {
+                runBlocking {
+                    composer().composeWithdraw(
+                        chainId = devnet,
+                        ownerAddress = owner,
+                        collateralAddress = collateral,
+                        mintAddress = mint,
+                        recipientAddress = owner,
+                        amountBaseUnits = BigInteger.ONE,
+                        adminSignature = adminSignature
+                    )
+                }
+            }
+            assertThat(error.required?.compareTo(BigDecimal("0.00148844"))).isEqualTo(0)
+            assertThat(error.available?.compareTo(BigDecimal.ZERO)).isEqualTo(0)
+            assertThat(error.currency).isEqualTo("SOL")
+        }
 
     @Test
     fun `rejects a wallet that does not own the collateral`(): Unit = runBlocking {

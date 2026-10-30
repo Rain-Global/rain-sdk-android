@@ -159,7 +159,8 @@ internal class RainSdkManager(
                     adminSignature,
                     // A fee-sponsored provider (Turnkey with sponsorGas) pays the network fee, so the composer
                     // must not dry-run as if the owner paid: a zero-SOL wallet would false-fail before the send.
-                    sponsoredFees = walletProvider.sponsorsFees(chainId)
+                    sponsoredFees = walletProvider.sponsorsFees(chainId),
+                    sponsoredRent = walletProvider.sponsorsFees(chainId) && walletProvider.sponsorsRent(chainId)
                 )
                 walletProvider.sendSolanaTransaction(chainId, unsigned)
             }
@@ -181,11 +182,19 @@ internal class RainSdkManager(
         // Not gated on requireSendSupport: preparing signs (EVM) or composes (Solana) and never
         // broadcasts, the provider signs on every chain, and the prepared transaction is the host's
         // own-RPC path on a chain the provider cannot broadcast on. For the same reason a Solana
-        // preparation always runs the fee check and the dry run: the host submits it and pays.
+        // preparation always runs the fee and rent checks and the dry run: the host submits it and pays.
         if (SolanaChains.isSolanaChain(chainId)) {
             return transactionCoordinator.withWithdrawalErrors("Prepare withdrawal") {
                 RainPreparedWithdrawal.Solana(
-                    composeSolanaWithdrawal(chainId, addresses, amount, decimals, adminSignature, sponsoredFees = false)
+                    composeSolanaWithdrawal(
+                        chainId,
+                        addresses,
+                        amount,
+                        decimals,
+                        adminSignature,
+                        sponsoredFees = false,
+                        sponsoredRent = false
+                    )
                 )
             }
         }
@@ -203,15 +212,18 @@ internal class RainSdkManager(
      *
      * @param sponsoredFees true when the provider pays the fee of the send that follows, which skips
      *   the self-paid fee check and dry run; false for a preparation, which the host submits and pays.
+     * @param sponsoredRent true when the provider's sponsor pre-funds the rent of a recipient token
+     *   account the send creates, which skips the rent check; false for a preparation.
      */
-    @Suppress("LongParameterList") // the withdrawal's own fields plus who pays the fee
+    @Suppress("LongParameterList") // the withdrawal's own fields plus who pays the fee and the rent
     private suspend fun composeSolanaWithdrawal(
         chainId: Int,
         addresses: RainWithdrawAddresses,
         amount: BigDecimal,
         decimals: Int,
         adminSignature: RainAdminSignature,
-        sponsoredFees: Boolean
+        sponsoredFees: Boolean,
+        sponsoredRent: Boolean
     ): UnsignedSolanaTransfer {
         // The EVM path validates inside the coordinator; Solana composes here, so it validates here.
         validator.validateWithdrawRequest(chainId, amount, decimals)
@@ -233,7 +245,8 @@ internal class RainSdkManager(
             recipientAddress = addresses.recipientAddress,
             amountBaseUnits = amountBaseUnits,
             adminSignature = adminSignature,
-            sponsoredFees = sponsoredFees
+            sponsoredFees = sponsoredFees,
+            sponsoredRent = sponsoredRent
         )
     }
 

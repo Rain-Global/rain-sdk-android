@@ -1,6 +1,7 @@
 package com.rain.sdk.turnkey
 
 import com.rain.sdk.error.RainError
+import com.rain.sdk.internal.solana.SolanaLamportPreflight
 import com.turnkey.http.utils.TurnkeyHttpError
 import com.turnkey.types.TGetSendTransactionStatusResponse
 import com.turnkey.types.V1Activity
@@ -14,8 +15,9 @@ import com.turnkey.types.V1TxError
  * one only when the send failed, with or without a message, so an included transaction whose error
  * holds only Solana details is a failure even though the status also names its signature.
  *
- * A Solana fee or rent shortfall is [RainError.InsufficientFunds], checked first because the runtime
- * may log a failed program for it too. A status carrying decoded revert details is the contract or
+ * A Solana fee or rent shortfall is [RainError.InsufficientFunds], whether the runtime names it or
+ * the System Program's transfer refused it, checked first because the runtime logs a failed program
+ * for it too. A status carrying decoded revert details is the contract or
  * program refusing the transaction, the fact a self-paid dry run would have caught before signing,
  * which a sponsored send skips: an EVM revert chain (top level or under `error.eth`), whether the
  * transaction failed before inclusion or was included and reverted on chain, or a Solana
@@ -64,8 +66,7 @@ internal object TurnkeySendFailures {
             ?: status.solana?.signature?.takeIf { it.isNotEmpty() }
         val message = (status.txError ?: error?.message ?: fallback).take(MAX_VENDOR_MESSAGE_LENGTH) +
             transactionId?.let { " (transaction $it)" }.orEmpty()
-        return when {
-            isSolanaFundsShortfall(error?.solana) -> RainError.InsufficientFunds()
+        return solanaShortfallOrNull(error?.solana) ?: when {
             carriesOnChainRevert(error) ->
                 RainError.TransactionSimulationFailed(IllegalStateException(message), transactionId)
             else -> RainError.ProviderError(IllegalStateException(message))
@@ -142,9 +143,7 @@ internal object TurnkeySendFailures {
         return instructionError || failedLog
     }
 
-    /** The sender cannot pay the fee or the rent: a shortfall, not a program refusal. */
-    private fun isSolanaFundsShortfall(solana: V1SolanaFailureDetails?): Boolean {
-        val json = solana?.transactionErrorJson ?: return false
-        return json.contains("InsufficientFundsForFee") || json.contains("InsufficientFundsForRent")
-    }
+    /** The sender could not pay the fee or the rent, read as core reads a dry run ([SolanaLamportPreflight.shortfall]). */
+    private fun solanaShortfallOrNull(solana: V1SolanaFailureDetails?): RainError.InsufficientFunds? =
+        SolanaLamportPreflight.shortfall(solana?.transactionErrorJson, solana?.logs.orEmpty())
 }

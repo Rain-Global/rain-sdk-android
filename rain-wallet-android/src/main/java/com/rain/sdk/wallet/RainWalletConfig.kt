@@ -44,11 +44,13 @@ import com.rain.sdk.turnkey.TurnkeyConfig
  * @param sponsorGas When true, every send on a supported chain is fee-sponsored: the wallet
  *                   backend builds and pays the network fee, fee estimates still quote what the
  *                   wallet would pay itself, and the descriptor advertises
- *                   `Capability.GAS_SPONSORSHIP`. Sponsorship cost passes
- *                   through to the partner. Two limits: rent for a first-time recipient's Solana
- *                   token account is a separate backend setting and stays with the sender, and a
- *                   sponsored send runs no client-side revert preflight, so a failure surfaces as
- *                   the backend's failed status after broadcast. Defaults to true, which is the
+ *                   `Capability.GAS_SPONSORSHIP`. Sponsorship cost passes through to the partner.
+ *                   Two limits: a sponsored send runs no client-side revert preflight, so a
+ *                   failure surfaces as the backend's failed status after broadcast; and the rent
+ *                   of a first-time recipient's Solana token account is left to Rain's
+ *                   organization, so the SDK does not demand it from the sender while this is on
+ *                   (it does with this off, and always on `prepareWithdrawal`; the Rain wallet
+ *                   section of docs/METHODS.md has the contract). Defaults to true, which is the
  *                   product; pass false to have users pay their own fees.
  * @param passkeyDomain A web domain the partner controls, at least two labels of letters, digits
  *                      and hyphens such as `passkeys.example.com`, that the app's passkeys bind to.
@@ -87,7 +89,9 @@ class RainWalletConfig(
 }
 
 /**
- * The backing adapter's configuration for this wallet, field for field. A function of its own so
+ * The backing adapter's configuration for this wallet, field for field, with `sponsorRent` always
+ * true: whether Rain's organization funds the rent is Rain's switch, which a partner can neither see
+ * nor set, and a flip of it has to reach installed apps without a release. A function of its own so
  * the mapping is testable.
  */
 @JvmSynthetic
@@ -102,6 +106,7 @@ internal fun RainWalletConfig.toBacking(application: Application): TurnkeyConfig
         sessionPolicy = sessionPolicy.toBacking(),
         onSessionExpired = onSessionExpired,
         sponsorGas = sponsorGas,
+        sponsorRent = true,
         passkeyDomain = passkeyDomain,
     )
 }

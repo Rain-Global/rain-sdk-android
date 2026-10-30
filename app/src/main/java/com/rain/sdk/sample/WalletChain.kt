@@ -105,8 +105,8 @@ enum class WalletChain(
         explorerName = "Solana Explorer",
         tokenStandard = "SPL",
         defaultTokenAddress = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", // Devnet USDC mint
-        // Left blank on purpose: an SPL transfer creates the recipient's token account at the
-        // sender's expense, so the address is worth typing deliberately rather than defaulting.
+        // Left blank on purpose: an SPL transfer creates the recipient's token account, rent the
+        // sender pays unless sponsored, so the address is worth typing deliberately rather than defaulting.
         defaultRecipient = "",
         explorerTxPrefix = "https://explorer.solana.com/tx/",
         explorerAddressPrefix = "https://explorer.solana.com/address/",

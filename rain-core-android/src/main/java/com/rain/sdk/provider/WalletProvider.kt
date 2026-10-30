@@ -74,6 +74,13 @@ interface WalletProvider {
     fun sponsorsFees(chainId: Int): Boolean = Capability.GAS_SPONSORSHIP in capabilities
 
     /**
+     * True when the provider's organization funds the rent of a token account a Solana send on
+     * [chainId] creates, so core composes a collateral withdrawal without demanding that rent from
+     * the sender; the Rain wallet section of `docs/METHODS.md` has the contract. Defaults to false.
+     */
+    fun sponsorsRent(chainId: Int): Boolean = false
+
+    /**
      * Gets the current wallet address.
      */
     suspend fun getWalletAddress(): String

@@ -339,6 +339,7 @@ class PrivySolanaProviderTest {
             envelope(if (recipientAccountExists) tokenAccountValue("0", decimals = 6) else JSONObject.NULL),
         )
         rpc.stub("getBalance", envelope(10_000_000L))
+        rpc.stub("getMinimumBalanceForRentExemption", 1_488_440L)
         rpc.stub("getLatestBlockhash", envelope(JSONObject().put("blockhash", BLOCKHASH)))
         rpc.stub(
             "simulateTransaction",

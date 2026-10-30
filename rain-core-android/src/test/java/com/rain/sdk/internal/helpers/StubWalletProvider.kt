@@ -96,6 +96,10 @@ internal open class StubWalletProvider : WalletProvider {
     var sponsorsFeesToReturn: Boolean? = null
     override fun sponsorsFees(chainId: Int): Boolean = sponsorsFeesToReturn ?: super.sponsorsFees(chainId)
 
+    /** Overrides [sponsorsRent]; null keeps the port default, false. */
+    var sponsorsRentToReturn: Boolean? = null
+    override fun sponsorsRent(chainId: Int): Boolean = sponsorsRentToReturn ?: super.sponsorsRent(chainId)
+
     val sendNativeTokenCalls = mutableListOf<SendTokenCall>()
     val sendTokenCalls = mutableListOf<SendTokenCall>()
     val getBalanceCalls = mutableListOf<GetBalanceCall>()
