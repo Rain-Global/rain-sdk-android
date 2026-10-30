@@ -39,6 +39,9 @@ class RainWalletNeutralityTest {
             RainWalletKeyAccount::class,
             RainWalletSessionState::class,
             RainWalletAuthState::class,
+            RainWalletLoginOutcome::class,
+            RainWalletContactType::class,
+            RainWalletMaskedContact::class,
         ).forEach(::assertNeutral)
     }
 

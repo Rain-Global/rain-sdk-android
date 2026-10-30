@@ -80,7 +80,8 @@ internal object TurnkeyErrorMapping {
      * [RainError.Unauthorized], a passkey that already has a wallet is [RainError.InvalidConfig]
      * naming `loginWithPasskey` (a state error, as the other session-state refusals are; the message
      * is true whenever Rain says it), and everything else is [RainError.ProviderError] over the
-     * failure, which carries the status, the path and a 500's correlation id, and no body.
+     * failure, which carries the status, the path and a 500's correlation id, and no body; the
+     * failure of a two-code attempt rain-api ended adds its own "request a new login code".
      */
     fun mapRainApiAuthFailure(e: RainApiAuthFailure): RainError = when (e.kind) {
         RainApiAuthFailure.Kind.InvalidCode -> RainError.InvalidLoginCode()
@@ -100,6 +101,7 @@ internal object TurnkeyErrorMapping {
             )
         RainApiAuthFailure.Kind.NoWallet,
         RainApiAuthFailure.Kind.SignupInProgress,
+        RainApiAuthFailure.Kind.AttemptEnded,
         RainApiAuthFailure.Kind.Refused -> RainError.ProviderError(e)
     }
 

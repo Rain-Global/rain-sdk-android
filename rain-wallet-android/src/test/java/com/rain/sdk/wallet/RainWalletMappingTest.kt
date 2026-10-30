@@ -4,7 +4,10 @@ import android.app.Application
 import com.google.common.truth.Truth.assertThat
 import com.rain.sdk.error.RainError
 import com.rain.sdk.turnkey.LoginContact
+import com.rain.sdk.turnkey.LoginContactType
 import com.rain.sdk.turnkey.TurnkeyAuthState
+import com.rain.sdk.turnkey.TurnkeyLoginOutcome
+import com.rain.sdk.turnkey.TurnkeyMaskedContact
 import com.rain.sdk.turnkey.TurnkeySessionPolicy
 import com.rain.sdk.turnkey.TurnkeySessionState
 import io.mockk.mockk
@@ -86,6 +89,20 @@ class RainWalletMappingTest {
         assertThat(TurnkeyAuthState.Loading.toRainWallet()).isEqualTo(RainWalletAuthState.Loading)
         assertThat(TurnkeyAuthState.Authenticated.toRainWallet()).isEqualTo(RainWalletAuthState.Authenticated)
         assertThat(TurnkeyAuthState.Unauthenticated.toRainWallet()).isEqualTo(RainWalletAuthState.Unauthenticated)
+    }
+
+    @Test
+    fun `login outcomes map one-to-one, and a second-code outcome compares by contact kind and mask`() {
+        assertThat(TurnkeyLoginOutcome.SignedIn.toRainWallet()).isEqualTo(RainWalletLoginOutcome.SignedIn)
+        val phone = RainWalletMaskedContact(RainWalletContactType.PHONE, "+•••• 4567")
+        assertThat(TurnkeyLoginOutcome.SecondCodeRequired(TurnkeyMaskedContact(LoginContactType.EMAIL, "j•••@example.com")).toRainWallet())
+            .isEqualTo(RainWalletLoginOutcome.SecondCodeRequired(RainWalletMaskedContact(RainWalletContactType.EMAIL, "j•••@example.com")))
+        assertThat(TurnkeyLoginOutcome.SecondCodeRequired(TurnkeyMaskedContact(LoginContactType.PHONE, "+•••• 4567")).toRainWallet())
+            .isEqualTo(RainWalletLoginOutcome.SecondCodeRequired(phone))
+        assertThat(RainWalletLoginOutcome.SecondCodeRequired(phone))
+            .isNotEqualTo(RainWalletLoginOutcome.SecondCodeRequired(RainWalletMaskedContact(RainWalletContactType.EMAIL, "+•••• 4567")))
+        assertThat(RainWalletLoginOutcome.SecondCodeRequired(phone).toString())
+            .isEqualTo("SecondCodeRequired(contact=RainWalletMaskedContact(type=PHONE, masked=+•••• 4567))")
     }
 
     @Test

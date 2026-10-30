@@ -215,7 +215,8 @@ class TurnkeyConfig internal constructor(
  * Turnkey-specific wiring.
  *
  * In managed mode the provider is also the authentication surface: construct it, run
- * [sendLoginCode] / [confirmLoginCode], [loginWithPasskey] or [signUpWithPasskey] on it, then build
+ * [sendLoginCode] / [confirmLoginCode] (plus [sendSecondLoginCode] / [confirmSecondLoginCode] when
+ * the account needs two codes), [loginWithPasskey] or [signUpWithPasskey] on it, then build
  * the SDK and resolve. Resolving before a
  * session is live fails with `RainError.TokenExpired`. In both modes it also exports the wallet's
  * recovery phrase and private keys, see [exportRecoveryPhrase] and [exportPrivateKey].
@@ -498,14 +499,31 @@ class TurnkeyProvider internal constructor(
      * the code by then; a failure after the code was accepted drops the challenge. A failed switch
      * to the new session leaves the previous session selected; a provisioning failure keeps the new
      * session, which heals at resolution. A code login leaves the user's sessions on other devices
-     * alone. The channel the code went out on makes no difference here. Throws
-     * `RainError.InvalidLoginCode`, `RainError.InvalidConfig`, `RainError.Unauthorized`,
-     * `RainError.NetworkError`, `RainError.ProviderError`, `RainError.InternalError` or, from the
-     * session switch, `RainError.TokenExpired`; the `confirmLoginCode` row under *Members* in
-     * `docs/TURNKEY_SUPPORT.md` says which condition maps to which. Managed mode only.
+     * alone. The channel the code went out on makes no difference here. Returns
+     * [TurnkeyLoginOutcome.SignedIn], or [TurnkeyLoginOutcome.SecondCodeRequired] for an account
+     * Rain protects with two codes, with nothing logged in yet; [sendSecondLoginCode] then
+     * [confirmSecondLoginCode] finish. Throws the classes the `confirmLoginCode` row under
+     * *Members* in `docs/TURNKEY_SUPPORT.md` names. Managed mode only.
      */
     @InternalRainTurnkeyApi
-    suspend fun confirmLoginCode(code: String) = requireManagedAuth().confirmLoginCode(code)
+    suspend fun confirmLoginCode(code: String): TurnkeyLoginOutcome = requireManagedAuth().confirmLoginCode(code)
+
+    /**
+     * Has Rain send the second code of a two-code login to the account's other contact, or sends
+     * it again. Throws the classes the `sendSecondLoginCode` row under *Members* in
+     * `docs/TURNKEY_SUPPORT.md` names. Managed mode only.
+     */
+    @InternalRainTurnkeyApi
+    suspend fun sendSecondLoginCode() = requireManagedAuth().sendSecondLoginCode()
+
+    /**
+     * Confirms the code from [sendSecondLoginCode] and completes the login as [confirmLoginCode]
+     * does; a rejected code or a transport failure keeps the attempt, every other refusal ends it.
+     * Throws the classes the `confirmSecondLoginCode` row under *Members* in
+     * `docs/TURNKEY_SUPPORT.md` names. Managed mode only.
+     */
+    @InternalRainTurnkeyApi
+    suspend fun confirmSecondLoginCode(code: String) = requireManagedAuth().confirmSecondLoginCode(code)
 
     /**
      * Signs an existing user in with a passkey bound to [TurnkeyConfig]'s `passkeyDomain`, through
@@ -513,8 +531,10 @@ class TurnkeyProvider internal constructor(
      * user has none and uses [signUpWithPasskey] or a login code. A successful login stores the
      * session under a fresh key, selects it, clears the previous session, revokes the user's other
      * Turnkey sessions on every device (`invalidateExisting`) and backfills a missing Ethereum or
-     * Solana account onto the existing wallet. A dismissed sheet, a refused passkey or a failed
-     * ceremony leaves the current session untouched. Throws `RainError.InvalidConfig` before any
+     * Solana account onto the existing wallet. A two-code login between its codes is abandoned
+     * before the sheet opens, whether or not it completes; a pending first code survives. A
+     * dismissed sheet, a refused passkey or a failed ceremony leaves the current session untouched.
+     * Throws `RainError.InvalidConfig` before any
      * vendor call when no `passkeyDomain` is configured, or when the association file does not vouch
      * for this build, `RainError.UserRejected` when the sheet
      * was dismissed or the device holds no passkey for the domain, `RainError.ProviderError`
@@ -545,7 +565,8 @@ class TurnkeyProvider internal constructor(
      * registers a device key on the new account for a minute, and the SDK logs in with a login
      * stamped by that key. When the account holds no key for this device, the sheet opens again and
      * the passkey signs it in. Each new passkey is a new account, so a returning user signs in with
-     * [loginWithPasskey] or a login code; call [logout] first unless [currentAuthState] reads
+     * [loginWithPasskey] or a login code (a two-code login between its codes is abandoned, as
+     * there); call [logout] first unless [currentAuthState] reads
      * `Unauthenticated` ([hasActiveSession] reads false in a session's last 30 seconds, which still
      * refuses). A failure can leave an account behind; the `signUpWithPasskey` row in
      * `docs/TURNKEY_SUPPORT.md` says when, and which code tells you.

@@ -9,8 +9,11 @@ import com.rain.sdk.provider.ProviderContext
 import com.rain.sdk.provider.ProviderId
 import com.rain.sdk.provider.WalletProvider
 import com.rain.sdk.turnkey.LoginContact
+import com.rain.sdk.turnkey.LoginContactType
 import com.rain.sdk.turnkey.TurnkeyAuthState
 import com.rain.sdk.turnkey.TurnkeyKeyFamily
+import com.rain.sdk.turnkey.TurnkeyLoginOutcome
+import com.rain.sdk.turnkey.TurnkeyMaskedContact
 import com.rain.sdk.turnkey.TurnkeyProvider
 import com.rain.sdk.turnkey.TurnkeySessionPolicy
 import com.rain.sdk.turnkey.TurnkeySessionState
@@ -212,12 +215,28 @@ class RainProviderTest {
     }
 
     @Test
-    fun `confirmLoginCode forwards the code`() = runBlocking {
-        coEvery { backing.confirmLoginCode("481902") } just Runs
+    fun `confirmLoginCode forwards the code and maps the outcome`() = runBlocking {
+        coEvery { backing.confirmLoginCode("481902") } returns TurnkeyLoginOutcome.SignedIn
+        coEvery { backing.confirmLoginCode("000000") } returns
+            TurnkeyLoginOutcome.SecondCodeRequired(TurnkeyMaskedContact(LoginContactType.PHONE, "+•••• 4567"))
 
-        provider.confirmLoginCode("481902")
+        assertThat(provider.confirmLoginCode("481902")).isEqualTo(RainWalletLoginOutcome.SignedIn)
+        assertThat(provider.confirmLoginCode("000000"))
+            .isEqualTo(RainWalletLoginOutcome.SecondCodeRequired(RainWalletMaskedContact(RainWalletContactType.PHONE, "+•••• 4567")))
 
         coVerify(exactly = 1) { backing.confirmLoginCode("481902") }
+    }
+
+    @Test
+    fun `the second-code calls forward`() = runBlocking {
+        coEvery { backing.sendSecondLoginCode() } just Runs
+        coEvery { backing.confirmSecondLoginCode("481902") } just Runs
+
+        provider.sendSecondLoginCode()
+        provider.confirmSecondLoginCode("481902")
+
+        coVerify(exactly = 1) { backing.sendSecondLoginCode() }
+        coVerify(exactly = 1) { backing.confirmSecondLoginCode("481902") }
     }
 
     @Test

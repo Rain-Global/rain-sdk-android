@@ -134,6 +134,28 @@ class TurnkeyManagedContactAttachTest {
         }
 
     @Test
+    fun `a contact whose account needs two codes is refused once the code is accepted, with no token handed to the attach`() = runTest {
+        val turnkey = MockTurnkey()
+        val rainApi = rainApi()
+        rainApi.verifyOtp = { call -> MockRainApiAuth.secondCodeRequired(call.deviceKey) }
+        val controller = controller(turnkey, rainApi)
+        controller.sendContactVerificationCode(email)
+
+        val refused = expectThrows<RainError.Unauthorized> { controller.confirmContactVerification("111111") }
+
+        assertThat(refused).hasMessageThat().contains(TurnkeyManagedAuthController.CONTACT_OWNED_MESSAGE)
+        assertThat(turnkey.setUserEmailCalls).isEmpty()
+        assertThat(turnkey.clientSignatureCalls).isEmpty()
+        assertThat(turnkey.deletedDeviceKeys).containsExactly("device-key-1")
+        assertThat(turnkey.selectedSessionKey).isEqualTo(MockTurnkey.DEFAULT_SESSION_KEY)
+        // The code is spent, and nothing waits for a second code: an attach never continues the attempt Rain opened.
+        expectThrows<RainError.InvalidConfig> { controller.confirmContactVerification("111111") }
+        expectThrows<RainError.InvalidConfig> { controller.sendSecondLoginCode() }
+        assertThat(rainApi.verifyOtpCalls).hasSize(1)
+        assertThat(hookCalls).isEqualTo(0)
+    }
+
+    @Test
     fun `a contact this wallet signs in with, or none, attaches`() = runTest {
         listOf("this wallet" to MockTurnkey.defaultSession().organizationId, "no wallet" to null).forEach { (name, owner) ->
             val turnkey = MockTurnkey()

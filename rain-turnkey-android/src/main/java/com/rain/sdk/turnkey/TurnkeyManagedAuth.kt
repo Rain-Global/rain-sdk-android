@@ -24,6 +24,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
 import timber.log.Timber
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -179,7 +180,8 @@ internal object TurnkeyManagedConfigurator {
  * Owns the managed authentication of a [TurnkeyProvider]: the one-time-code login, email or SMS,
  * against Rain's embedded-wallet endpoints (code send, code verify, sign-up and login) with the
  * vendor's device primitives around them (a device key, the code's encryption, the client
- * signatures, the session store); account provisioning, session restore and logout; the passkey
+ * signatures, the session store), and its two-code form for an account Rain protects that way
+ * ([sendSecondLoginCode], [confirmSecondLoginCode]); account provisioning, session restore and logout; the passkey
  * flows, sign-in, sign-up and add-passkey, when a relying-party domain is configured; and contact
  * attach, a verified email or phone added to the signed-in account as a login method. Every Rain
  * leg carries a wallet auth token the host's backend mints through [authTokenProvider], bound to
@@ -234,6 +236,32 @@ constructor(
      * cannot consume a verification code and a verification cannot consume a login code.
      */
     private var pendingContactOtp: PendingOtp? = null
+
+    /**
+     * A two-code login between its codes: the token Rain keys the attempt on, the device key both
+     * codes are encrypted to and the session is issued to, the channel of the second code, the
+     * login message to sign with that key, and the second code's challenge once one was sent.
+     * Replaced whole under [pendingLock].
+     */
+    private class PendingSecondCode(
+        val token: AuthToken,
+        val deviceKey: String,
+        val channel: OtpChannel,
+        val clientSignatureMessage: String,
+        val challenge: OtpChallenge? = null,
+    ) {
+        fun withChallenge(challenge: OtpChallenge) = PendingSecondCode(token, deviceKey, channel, clientSignatureMessage, challenge)
+    }
+
+    private var pendingSecondCode: PendingSecondCode? = null
+
+    /** What the first code's verify led to: Rain's session, or the second-code outcome for the host. */
+    private sealed interface FirstCodeResult {
+        class Session(val login: RainApiLogin) : FirstCodeResult
+
+        class SecondCode(val outcome: TurnkeyLoginOutcome.SecondCodeRequired) : FirstCodeResult
+    }
+
     private val closed = AtomicBoolean(false)
     private val closedFlow = MutableStateFlow(false)
 
@@ -286,7 +314,8 @@ constructor(
      * the token is bound to. Touches no session. A second call for the same contact replaces the
      * pending challenge on success and keeps it on failure, so a failed resend leaves a code the
      * user can still type; a call for another contact or channel retires the pending challenge
-     * before anything is sent, so a failed switch leaves nothing confirmable. The contact is
+     * before anything is sent, so a failed switch leaves nothing confirmable, and so is a two-code
+     * login waiting for its second code, with its device key deleted. The contact is
      * canonicalized once here ([canonicalize]) and that string names the account on sign-up. A
      * blank or malformed contact throws [RainError.InvalidConfig] before the host or Rain is
      * called and changes nothing.
@@ -295,6 +324,7 @@ constructor(
         flowMutex.withLock {
             prepare()
             val (canonical, channel) = canonicalize(contact)
+            abandonSecondCode()
             retirePendingOtpUnlessFor(canonical, channel)
             val pending = requestCode(canonical, channel)
             pendingLock.withJavaLock {
@@ -320,20 +350,66 @@ constructor(
      * Rain's login revoked nothing, and the thrown error is the host's signal. A provisioning
      * failure once the new session is live throws with the session kept: [ensureAccounts] runs
      * again at provider resolution, so it heals without a new code.
+     *
+     * For an account Rain protects with two codes the verify answers no token: Rain keeps it and
+     * names the account's other contact, and this returns [TurnkeyLoginOutcome.SecondCodeRequired]
+     * with the challenge spent, the device key kept for the whole attempt and no session touched;
+     * [sendSecondLoginCode] and [confirmSecondLoginCode] finish the login. A 400 "start again" from
+     * the verify ends as any refusal that spends the code: the challenge dropped, the key deleted,
+     * the thrown error asking for a new code.
      */
-    suspend fun confirmLoginCode(code: String) {
+    suspend fun confirmLoginCode(code: String): TurnkeyLoginOutcome = flowMutex.withLock {
+        prepare()
+        val pending = requirePendingOtp()
+        val trimmed = requireCode(code)
+        val previousKey = context.selectedSessionKey
+        val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
+        val deviceKey = guarded { context.createDeviceKey() }
+        val result = onFailure({ deleteDeviceKey(deviceKey) }) { firstCode(pending, trimmed, deviceKey) }
+        val login = when (result) {
+            is FirstCodeResult.SecondCode -> return@withLock result.outcome
+            is FirstCodeResult.Session -> result.login
+        }
+        storeSession(login.sessionToken, sessionKey, deviceKey)
+        switchToSession(sessionKey, previousKey, previousRevoked = false)
+        ensureAccountsLocked()
+        TurnkeyLoginOutcome.SignedIn
+    }
+
+    // ---------- the second code ----------
+
+    /**
+     * `POST /otp/init` under the attempt's token, no renewal, since Rain keys the attempt on it;
+     * the `sendSecondLoginCode` row in `docs/METHODS.md` has the rules.
+     */
+    suspend fun sendSecondLoginCode() {
         flowMutex.withLock {
             prepare()
-            val pending = requirePendingOtp()
+            val attempt = requirePendingSecondCode()
+            val answer = attemptLeg(attempt) { rainApi.initOtp(it) }
+            val challenge = OtpChallenge(answer.otpId, answer.otpEncryptionTargetBundle, attempt.channel)
+            pendingLock.withJavaLock {
+                if (pendingSecondCode === attempt) pendingSecondCode = attempt.withChallenge(challenge)
+            }
+        }
+    }
+
+    /**
+     * The second verify, with the attempt's key signing Rain's login message, then the session
+     * handling of [confirmLoginCode]; the `confirmSecondLoginCode` row in `docs/METHODS.md` has
+     * the rules.
+     */
+    suspend fun confirmSecondLoginCode(code: String) {
+        flowMutex.withLock {
+            prepare()
+            val attempt = requirePendingSecondCode()
+            val challenge = attempt.challenge
+                ?: throw RainError.InvalidConfig("No second login code was requested; call sendSecondLoginCode first")
             val trimmed = requireCode(code)
             val previousKey = context.selectedSessionKey
             val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
-            val deviceKey = guarded { context.createDeviceKey() }
-            val login = onFailure({ deleteDeviceKey(deviceKey) }) {
-                val verificationToken = verifyCode(pending, trimmed, deviceKey, ::clearPendingOtp).verificationToken
-                loginOrSignUp(pending, verificationToken)
-            }
-            storeSession(login.sessionToken, sessionKey, deviceKey)
+            val login = verifySecondCode(attempt, challenge, trimmed)
+            storeSession(login.sessionToken, sessionKey, attempt.deviceKey)
             switchToSession(sessionKey, previousKey, previousRevoked = false)
             ensureAccountsLocked()
         }
@@ -349,14 +425,17 @@ constructor(
      * A failed switch signs the device out ([abandonSwitch]), since this login revoked the previous
      * session server-side. A dismissed sheet, a refused passkey or a failed ceremony leaves the
      * current session untouched; a session the vendor stored under the fresh key without selecting
-     * it is cleared. A pending login code survives, because it binds no device key; a pending
-     * contact verification does not, because the account it named changed. Throws
-     * [RainError.InvalidConfig] before touching the vendor when no domain is configured.
+     * it is cleared. A pending login code survives, because it binds no device key; a two-code
+     * login between its codes is abandoned first ([abandonSecondCode]), since the vendor's ceremony
+     * deletes every device key no stored session names; a pending contact verification does not
+     * survive either, because the account it named changed. Throws [RainError.InvalidConfig]
+     * before touching the vendor when no domain is configured.
      */
     suspend fun loginWithPasskey(activity: Activity) {
         flowMutex.withLock {
             requirePasskeysConfigured()
             prepare()
+            abandonSecondCode()
             val previousKey = context.selectedSessionKey
             val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
             ceremony(sessionKey) { context.completePasskeyLogin(activity, sessionKey, organizationId = null) }
@@ -372,7 +451,8 @@ constructor(
      * of the device's; the device key is deleted once Rain's sign-up and the stamped login have
      * answered. An account with no key for the device (adopted from an earlier attempt, or found saved
      * on a resend) signs in through the sheet instead. Refused over a live session; a dead one is
-     * cleared first. A sign-up Rain left in doubt is resent from [pendingPasskeySignups] by the next
+     * cleared first, and a two-code login between its codes is abandoned, as in [loginWithPasskey].
+     * A sign-up Rain left in doubt is resent from [pendingPasskeySignups] by the next
      * call; [signUpOnRain] has the rule, and the `signUpWithPasskey` row in `docs/METHODS.md` says
      * what each failure leaves behind.
      */
@@ -382,6 +462,7 @@ constructor(
             prepare()
             awaitRestoreSettled(TurnkeySessionCoordinator.AUTH_RESTORE_TIMEOUT_MS)
             clearDeadSessionOrRefuse()
+            abandonSecondCode()
             val token = AuthToken(contact = null, value = authToken(null))
             val sessionKey = SESSION_KEY_PREFIX + UUID.randomUUID()
             val kept = pendingPasskeySignups.load()
@@ -483,12 +564,13 @@ constructor(
             val trimmed = requireCode(code)
             val signedIn = requireLiveSession()
             val throwaway = guarded { context.createDeviceKey() }
-            val verification = try {
+            val answer = try {
                 verifyCode(pending, trimmed, throwaway, ::clearPendingContactOtp)
             } finally {
                 // Nothing else removes the throwaway key; the token stays usable without it.
                 withContext(NonCancellable) { deleteDeviceKey(throwaway) }
             }
+            val verification = attachVerification(answer)
             val owner = verification.walletSubOrganizationId
             if (owner != null && owner != signedIn.organizationId) throw RainError.Unauthorized(CONTACT_OWNED_MESSAGE)
             val verificationToken = verification.verificationToken
@@ -502,6 +584,17 @@ constructor(
                 }
             }
         }
+    }
+
+    /**
+     * The verification an attach can use, or the refusal: a call for a second code means the
+     * contact signs in to an account Rain protects with two codes, refused as another account's,
+     * with the token Rain kept never handed to the attach; a session is an answer no attach asked for.
+     */
+    private fun attachVerification(answer: RainApiVerifyAnswer): RainApiVerification = when (answer) {
+        is RainApiVerification -> answer
+        is RainApiSecondCodeRequired -> throw RainError.Unauthorized(CONTACT_OWNED_MESSAGE)
+        is RainApiLogin -> throw RainError.InternalError(UNEXPECTED_SESSION_MESSAGE)
     }
 
     /** Mirrors [retirePendingOtpUnlessFor] for the verification slot. */
@@ -536,18 +629,16 @@ constructor(
     }
 
     /**
-     * The verify step: the code encrypted to the challenge's bundle with [deviceKey], then
-     * `POST /otp/verify` under the pending token. [clearPending] runs once Rain accepted the code,
-     * whether or not the answer decoded, since the code is spent then; a rejected code and any
-     * failure before that keep the challenge. Answers the verification token with the wallet this
-     * tenant saved for the contact, when one exists.
+     * The verify step under the pending token; [clearPending] runs once Rain accepted the code,
+     * whether or not the answer decoded, and on a refusal that ends a two-code attempt, since the
+     * code is spent either way.
      */
     private suspend fun verifyCode(
         pending: PendingOtp,
         code: String,
         deviceKey: String,
         clearPending: () -> Unit,
-    ): RainApiVerification {
+    ): RainApiVerifyAnswer {
         val encrypted = guarded { context.encryptOtpCode(code, pending.challenge.encryptionTargetBundle, deviceKey) }
         val verification = try {
             rainLeg(pending.token) { rainApi.verifyOtp(it, pending.challenge.otpId, encrypted) }
@@ -555,9 +646,102 @@ constructor(
             // A 2xx the client could not read: Rain accepted the code, so it is spent.
             clearPending()
             throw e
+        } catch (e: RainError.ProviderError) {
+            if ((e.cause as? RainApiAuthFailure)?.kind == RainApiAuthFailure.Kind.AttemptEnded) clearPending()
+            throw e
         }
         clearPending()
         return verification
+    }
+
+    /**
+     * Rain's login or sign-up on a plain verification; on a call for a second code, the attempt
+     * kept with [deviceKey] once Rain's message proved to be a login naming that key.
+     */
+    private suspend fun firstCode(pending: PendingOtp, code: String, deviceKey: String): FirstCodeResult =
+        when (val answer = verifyCode(pending, code, deviceKey, ::clearPendingOtp)) {
+            is RainApiVerification -> FirstCodeResult.Session(loginOrSignUp(pending, answer.verificationToken))
+            is RainApiSecondCodeRequired -> {
+                requireLoginMessageFor(answer.clientSignatureMessage, deviceKey)
+                pendingLock.withJavaLock {
+                    pendingSecondCode = PendingSecondCode(pending.token, deviceKey, answer.channel, answer.clientSignatureMessage)
+                }
+                val contact = TurnkeyMaskedContact(answer.channel.toContactType(), answer.maskedContact)
+                FirstCodeResult.SecondCode(TurnkeyLoginOutcome.SecondCodeRequired(contact))
+            }
+            is RainApiLogin -> throw RainError.InternalError(UNEXPECTED_SESSION_MESSAGE)
+        }
+
+    /**
+     * The second code's verify: the code encrypted with the attempt's key, the message signed with
+     * it, both sent under the attempt's token. Rain's 2xx ends the attempt either way: the session
+     * is issued to the key, so the key stays only when the answer is the session.
+     */
+    private suspend fun verifySecondCode(attempt: PendingSecondCode, challenge: OtpChallenge, code: String): RainApiLogin {
+        val encrypted = guarded { context.encryptOtpCode(code, challenge.encryptionTargetBundle, attempt.deviceKey) }
+        val signature = guarded { context.clientSignatureFor(attempt.clientSignatureMessage, attempt.deviceKey) }
+        val answer = try {
+            attemptLeg(attempt) { rainApi.verifyOtp(it, challenge.otpId, encrypted, signature) }
+        } catch (e: RainError.InternalError) {
+            endSecondCode(attempt, deleteKey = true)
+            throw e
+        }
+        endSecondCode(attempt, deleteKey = answer !is RainApiLogin)
+        return answer as? RainApiLogin ?: throw RainError.InternalError(
+            "Rain API otp/verify answered a second code without a session; request a new login code"
+        )
+    }
+
+    /**
+     * One leg of a two-code attempt under its token, with no renewal, since Rain keys the attempt
+     * on the token. A wrong code keeps the attempt; every other refusal ends it, because Rain may
+     * already have and the client cannot tell; a transport failure keeps it.
+     */
+    private suspend fun <T> attemptLeg(attempt: PendingSecondCode, call: suspend (token: String) -> T): T {
+        val refusal = try {
+            return guarded { call(attempt.token.value) }
+        } catch (e: RainApiAuthFailure) {
+            e
+        }
+        if (refusal.kind != RainApiAuthFailure.Kind.InvalidCode) endSecondCode(attempt, deleteKey = true)
+        throw TurnkeyErrorMapping.mapAuthError(refusal)
+    }
+
+    /** Drops the attempt, and its device key unless the session Rain issued is bound to it. */
+    private suspend fun endSecondCode(attempt: PendingSecondCode, deleteKey: Boolean) {
+        pendingLock.withJavaLock { if (pendingSecondCode === attempt) pendingSecondCode = null }
+        if (deleteKey) withContext(NonCancellable) { deleteDeviceKey(attempt.deviceKey) }
+    }
+
+    /** Drops a two-code login between its codes and deletes its device key; Rain's side lapses on its own. */
+    private suspend fun abandonSecondCode() {
+        val attempt = pendingLock.withJavaLock { pendingSecondCode.also { pendingSecondCode = null } } ?: return
+        withContext(NonCancellable) { deleteDeviceKey(attempt.deviceKey) }
+    }
+
+    private fun requirePendingSecondCode(): PendingSecondCode =
+        pendingLock.withJavaLock { pendingSecondCode }
+            ?: throw RainError.InvalidConfig("No login is waiting for a second code; confirmLoginCode answers SecondCodeRequired first")
+
+    /**
+     * Refuses to hold [message] for signing unless it is the vendor's login usage naming
+     * [deviceKey] (`ClientSignatureMessageTest` pins the shape), so the key signs nothing else.
+     */
+    private fun requireLoginMessageFor(message: String, deviceKey: String) {
+        val isLogin = runCatching {
+            val json = JSONObject(message)
+            json.getString("type") == LOGIN_USAGE_TYPE && json.getJSONObject("login").getString("publicKey") == deviceKey
+        }.getOrDefault(false)
+        if (!isLogin) {
+            throw RainError.InternalError(
+                "Rain API otp/verify: the message to sign is not a login for this device's key; request a new login code"
+            )
+        }
+    }
+
+    private fun OtpChannel.toContactType(): LoginContactType = when (this) {
+        OtpChannel.EMAIL -> LoginContactType.EMAIL
+        OtpChannel.SMS -> LoginContactType.PHONE
     }
 
     /**
@@ -743,6 +927,16 @@ constructor(
             context.deleteDeviceKey(publicKey)
         } catch (e: CancellationException) {
             throw e
+        } catch (e: Exception) {
+            Timber.w("Rain SDK: could not delete a device key (%s)", e.javaClass.simpleName)
+        }
+    }
+
+    /** [deleteDeviceKey] for [close], which cannot suspend: on the calling thread, logged on failure. */
+    @Suppress("TooGenericExceptionCaught") // best-effort cleanup on a terminal call
+    private fun discardDeviceKey(publicKey: String) {
+        try {
+            context.discardDeviceKey(publicKey)
         } catch (e: Exception) {
             Timber.w("Rain SDK: could not delete a device key (%s)", e.javaClass.simpleName)
         }
@@ -936,9 +1130,9 @@ constructor(
 
     /**
      * Clears the selected session. Deliberate, so the host's `onSessionExpired` re-auth hook stays
-     * silent for the death this causes; cached accounts still go stale. A pending login code and a
-     * pending contact verification are dropped once the clear was attempted, whether or not it
-     * succeeded. Reads made right after
+     * silent for the death this causes; cached accounts still go stale. A pending login code, a
+     * pending contact verification and a two-code login between its codes, with its device key,
+     * are dropped once the clear was attempted, whether or not it succeeded. Reads made right after
      * this returns already see no session: the vendor flips its auth state, selected key and
      * session inline inside `clearSession`, and [hasActiveSession] and [currentAuthState] derive
      * from those values on demand, so no wait for the flip is needed here.
@@ -955,6 +1149,7 @@ constructor(
                 // consume it would silence the next genuine one.
                 clearPendingOtp()
                 clearPendingContactOtp()
+                abandonSecondCode()
                 return
             }
             try {
@@ -962,22 +1157,26 @@ constructor(
             } finally {
                 clearPendingOtp()
                 clearPendingContactOtp()
+                abandonSecondCode()
             }
         }
     }
 
     /**
      * Makes this controller inert: every auth call throws, the state reads unauthenticated, and
-     * both pending codes are dropped, each with the host's bearer token it holds. A kept
+     * both pending codes are dropped, each with the host's bearer token it holds, as is a two-code
+     * login between its codes, whose device key is deleted on the calling thread. A kept
      * passkey registration stays in its store for the next controller to resend.
      */
     fun close() {
         closed.set(true)
         closedFlow.value = true
-        pendingLock.withJavaLock {
+        val attempt = pendingLock.withJavaLock {
             pendingOtp = null
             pendingContactOtp = null
+            pendingSecondCode.also { pendingSecondCode = null }
         }
+        attempt?.let { discardDeviceKey(it.deviceKey) }
     }
 
     private suspend fun ensureAccountsLocked() {
@@ -1174,8 +1373,17 @@ constructor(
         const val SESSION_MIN_REMAINING_SECONDS = 30.0
         const val SESSION_KEY_PREFIX = "rain-turnkey-"
 
-        /** The refusal for a contact another wallet signs in with; names no contact. */
-        const val CONTACT_OWNED_MESSAGE = "This contact already signs in to another account"
+        /**
+         * The refusal for a contact another wallet signs in with, and for one whose account Rain
+         * protects with two codes, which an attach never gets a token for; names no contact.
+         */
+        const val CONTACT_OWNED_MESSAGE = "This contact belongs to another account"
+
+        /** A session answered to a verify that sent no client signature: an answer the device never asked for. */
+        const val UNEXPECTED_SESSION_MESSAGE = "Rain API otp/verify answered a session to a code that asked for none; request a new login code"
+
+        /** The vendor's `V1UsageType` for a login, the one message the device key signs for Rain. */
+        private const val LOGIN_USAGE_TYPE = "USAGE_TYPE_LOGIN"
 
         /** `HttpURLConnection` names no 429. */
         private const val HTTP_TOO_MANY_REQUESTS = 429

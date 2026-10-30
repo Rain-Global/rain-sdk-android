@@ -393,11 +393,17 @@ internal class MockTurnkey(
     /** The keys still in the keystore: created and not deleted. The session's key stays here on success. */
     val liveDeviceKeys: List<String> get() = createdDeviceKeys - deletedDeviceKeys.toSet()
 
+    /** The keys a stored session names (a `jwt-for-<key>` JWT), which the vendor's unused-key sweep spares. */
+    private val boundDeviceKeys = mutableSetOf<String>()
+
     val encryptOtpCodeCalls = mutableListOf<EncryptOtpCodeCall>()
     var encryptOtpCodeError: Exception? = null
 
+    data class ClientSignatureCall(val message: String, val publicKey: String)
+
     val loginSignatureCalls = mutableListOf<String>()
     val signUpSignatureCalls = mutableListOf<SignUpSignatureCall>()
+    val clientSignatureCalls = mutableListOf<ClientSignatureCall>()
 
     /** When set, both signature seams throw it; [signUpSignatureError] fails the sign-up signature alone. */
     var clientSignatureError: Exception? = null
@@ -530,6 +536,10 @@ internal class MockTurnkey(
         deletedDeviceKeys += publicKey
     }
 
+    override fun discardDeviceKey(publicKey: String) {
+        deletedDeviceKeys += publicKey
+    }
+
     override suspend fun encryptOtpCode(code: String, encryptionTargetBundle: String, publicKey: String): String {
         encryptOtpCodeCalls += EncryptOtpCodeCall(code, encryptionTargetBundle, publicKey)
         encryptOtpCodeError?.let { throw it }
@@ -555,12 +565,21 @@ internal class MockTurnkey(
         return stubbedClientSignature.copy(message = "{\"tokenId\":\"t\",\"$field\":\"$contact\"}")
     }
 
+    override suspend fun clientSignatureFor(message: String, publicKey: String): RainApiClientSignature {
+        clientSignatureCalls += ClientSignatureCall(message, publicKey)
+        clientSignatureError?.let { throw it }
+        // The vendor signs with the keystore entry named by the key; a controller that deleted it first fails on a device.
+        check(publicKey in liveDeviceKeys) { "the second-code signature needs device key $publicKey, which was deleted" }
+        return stubbedClientSignature.copy(publicKey = publicKey, message = message)
+    }
+
     override suspend fun storeSession(jwt: String, sessionKey: String) {
         storeSessionCalls += StoreSessionCall(jwt, sessionKey)
         // The vendor stores a session with the key pair its JWT names; a controller that deleted it first fails on a device.
         if (jwt.startsWith("jwt-for-")) {
             val bound = jwt.removePrefix("jwt-for-")
             check(bound in liveDeviceKeys) { "the session is bound to key $bound, which was deleted" }
+            boundDeviceKeys += bound
         }
         storeLikeVendor(sessionKey, storeSessionError, storeSessionAppliesBeforeThrowing, onStoreSession)
     }
@@ -591,9 +610,14 @@ internal class MockTurnkey(
         return deviceKeyLogin(call)
     }
 
+    /** Like the vendor, ends in its unused-key sweep on every exit: every live device key no stored session names goes. */
     override suspend fun completePasskeyLogin(activity: android.app.Activity, sessionKey: String, organizationId: String?) {
         passkeyLoginCalls += PasskeyLoginCall(sessionKey, organizationId)
-        storeLikeVendor(sessionKey, passkeyLoginError, passkeyStoresBeforeThrowing, onPasskeyLogin)
+        try {
+            storeLikeVendor(sessionKey, passkeyLoginError, passkeyStoresBeforeThrowing, onPasskeyLogin)
+        } finally {
+            deletedDeviceKeys += liveDeviceKeys.filterNot { it in boundDeviceKeys }
+        }
     }
 
     /** Runs inside the add-passkey ceremony, after the call is recorded; a gate here holds the sheet open. */

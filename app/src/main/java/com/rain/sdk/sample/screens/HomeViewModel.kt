@@ -24,7 +24,9 @@ import com.rain.sdk.sample.WalletSessionStatus
 import com.rain.sdk.wallet.RainProvider
 import com.rain.sdk.wallet.RainWalletAuthState
 import com.rain.sdk.wallet.RainWalletContact
+import com.rain.sdk.wallet.RainWalletContactType
 import com.rain.sdk.wallet.RainWalletKeyAccount
+import com.rain.sdk.wallet.RainWalletLoginOutcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -336,6 +338,10 @@ class HomeViewModel(
         _state.update { it.copy(rainWalletOtpCode = value) }
     }
 
+    fun onRainWalletSecondCodeChanged(value: String) {
+        _state.update { it.copy(rainWalletSecondCode = value) }
+    }
+
     fun onTurnkeyOrgIdChanged(value: String) {
         _state.update { it.copy(turnkeyOrgId = value) }
     }
@@ -465,11 +471,9 @@ class HomeViewModel(
     private fun onRainWalletExpired() {
         SampleLog.w("RainWallet.session", "Rain Wallet session expired, re-auth required")
         _state.update {
-            it.copy(
+            it.withoutRainWalletCodes().copy(
                 rainWalletSessionActive = false,
                 rainWalletPasskeySession = false,
-                rainWalletOtpSent = false,
-                rainWalletOtpCode = "",
                 rainWalletRevealedSecret = null,
                 rainWalletAttachCodeSent = false,
                 rainWalletAttachCode = "",
@@ -544,11 +548,10 @@ class HomeViewModel(
                     // editable while the send is in flight; a converted phone number shows its
                     // E.164 form) and stop treating any live session as this contact's — the
                     // confirm decides whose session it is.
-                    it.withRainWalletContact(channel, contact).copy(
+                    it.withRainWalletContact(channel, contact).withoutRainWalletCodes().copy(
                         isLoading = false,
                         rainWalletSessionActive = false,
                         rainWalletOtpSent = true,
-                        rainWalletOtpCode = "",
                         statusText = (if (resend) "New login code sent — " else "Login code sent — ") + channel.inboxHint
                     )
                 }
@@ -604,20 +607,15 @@ class HomeViewModel(
                 // the new one is written only on success: the restored-session checks trust it.
                 forgetRainWalletOwner()
                 // Sign-up or login, plus EVM + Solana account provisioning — all inside the SDK.
-                provider.confirmLoginCode(s.rainWalletOtpCode.trim())
-                recordRainWalletOwner(channel, contact)
-                SampleLog.i("RainWallet.otpVerify", "session active")
-                _state.update {
-                    it.copy(
-                        isLoading = false,
-                        rainWalletSessionActive = true,
-                        rainWalletPasskeySession = false,
-                        statusText = "Session active — initializing Rain..."
-                    )
+                when (val outcome = provider.confirmLoginCode(s.rainWalletOtpCode.trim())) {
+                    is RainWalletLoginOutcome.SecondCodeRequired -> {
+                        // Nothing is logged in yet and the live session is untouched, so the
+                        // previous owner still stands.
+                        restoreRainWalletOwner(previousOwner)
+                        startRainWalletSecondCode(provider, outcome)
+                    }
+                    RainWalletLoginOutcome.SignedIn -> onRainWalletCodeLoginSucceeded(channel, contact)
                 }
-                // No manual step: Rain initializes right away, as it does for a resumed session. A
-                // failure there resets the flow to "Send code", as every init failure does.
-                initializeRainWithRainWallet()
             } catch (e: RainError.InvalidLoginCode) {
                 SampleLog.w("RainWallet.otpVerify", "login code rejected", e)
                 // The SDK guarantees a rejected code leaves the live session untouched, so the
@@ -630,6 +628,134 @@ class HomeViewModel(
                         statusText = "That code was not accepted — check it and try again"
                     )
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                onRainWalletConfirmFailed(provider, channel, contact, hadSession, e)
+            }
+        }
+    }
+
+    /** A code login completed: the owner is recorded and Rain initializes right away, as for a resumed session. */
+    private fun onRainWalletCodeLoginSucceeded(channel: ContactChannel, contact: String) {
+        recordRainWalletOwner(channel, contact)
+        SampleLog.i("RainWallet.otpVerify", "session active")
+        _state.update {
+            it.copy(
+                isLoading = false,
+                rainWalletSessionActive = true,
+                rainWalletPasskeySession = false,
+                rainWalletSecondCodeTo = null,
+                rainWalletSecondCodeVia = null,
+                rainWalletSecondCodeSent = false,
+                rainWalletSecondCode = "",
+                statusText = "Session active — initializing Rain..."
+            )
+        }
+        // No manual step. A failure there resets the flow to "Send code", as every init failure does.
+        initializeRainWithRainWallet()
+    }
+
+    /**
+     * The first code passed and Rain wants the code sent to the account's other contact too. The
+     * second code is sent right away; "Resend second code" sends another. A send that fails before
+     * Rain answered (`RAIN_301`, `RAIN_502`) leaves the step for another try; any other failure
+     * means the SDK ended the attempt, so the flow restarts from "Send code".
+     */
+    private suspend fun startRainWalletSecondCode(provider: RainProvider, outcome: RainWalletLoginOutcome.SecondCodeRequired) {
+        SampleLog.i("RainWallet.otpVerify", "second code required, by ${outcome.contact.type.name.lowercase()}")
+        _state.update {
+            it.copy(
+                rainWalletSecondCodeTo = outcome.contact.masked,
+                rainWalletSecondCodeVia = outcome.contact.type.viaLabel,
+                rainWalletSecondCodeSent = false,
+                rainWalletSecondCode = "",
+            )
+        }
+        sendRainWalletSecondCode(provider, resend = false)
+    }
+
+    private val RainWalletContactType.viaLabel: String
+        get() = if (this == RainWalletContactType.EMAIL) "email" else "SMS"
+
+    fun sendRainWalletSecondCode() {
+        val provider = session.rainWalletProvider
+        if (_state.value.rainWalletSecondCodeTo == null || provider == null) {
+            _state.update { it.copy(statusText = "Confirm the first code first") }
+            return
+        }
+        _state.update { it.copy(isLoading = true) }
+        viewModelScope.launch { sendRainWalletSecondCode(provider, resend = true) }
+    }
+
+    private suspend fun sendRainWalletSecondCode(provider: RainProvider, resend: Boolean) {
+        val to = _state.value.rainWalletSecondCodeTo ?: return
+        _state.update { it.copy(isLoading = true, statusText = "Sending second code to $to...") }
+        try {
+            provider.sendSecondLoginCode()
+            SampleLog.i("RainWallet.otpInit", if (resend) "new second code sent" else "second code sent")
+            _state.update {
+                it.copy(
+                    isLoading = false,
+                    rainWalletSecondCodeSent = true,
+                    rainWalletSecondCode = "",
+                    statusText = (if (resend) "New second code sent to " else "First code accepted — second code sent to ") + to
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: RainError.NetworkError) {
+            onRainWalletSecondCodeSendFailed(e, attemptKept = true)
+        } catch (e: RainError.InternalError) {
+            onRainWalletSecondCodeSendFailed(e, attemptKept = true)
+        } catch (e: Exception) {
+            onRainWalletSecondCodeSendFailed(e, attemptKept = false)
+        }
+    }
+
+    /** The SDK keeps a two-code attempt only when Rain never answered the send, so only then does the step stay. */
+    private fun onRainWalletSecondCodeSendFailed(e: Exception, attemptKept: Boolean) {
+        SampleLog.e("RainWallet.otpInit", "second code failed: ${e.describe()}")
+        _state.update {
+            val base = if (attemptKept) it else it.withoutRainWalletCodes()
+            val label = if (attemptKept) "Second code failed" else "Second code failed, request a new code"
+            base.copy(isLoading = false, statusText = rainWalletAuthFailureText(label, e))
+        }
+    }
+
+    fun verifyRainWalletSecondCode() {
+        val s = _state.value
+        val provider = session.rainWalletProvider
+        if (s.rainWalletSecondCodeTo == null || !s.rainWalletSecondCodeSent || provider == null) {
+            _state.update { it.copy(statusText = "Send the second code first") }
+            return
+        }
+        if (s.rainWalletSecondCode.isBlank()) {
+            _state.update { it.copy(statusText = "Second code required") }
+            return
+        }
+
+        SampleLog.i("RainWallet.otpVerify", "confirming second code")
+        _state.update { it.copy(isLoading = true, statusText = "Confirming second code...") }
+        viewModelScope.launch {
+            val channel = s.rainWalletChannel
+            val contact = s.rainWalletContact.trim()
+            val previousOwner = snapshotRainWalletOwner()
+            val hadSession = provider.hasActiveSession()
+            try {
+                forgetRainWalletOwner()
+                provider.confirmSecondLoginCode(s.rainWalletSecondCode.trim())
+                onRainWalletCodeLoginSucceeded(channel, contact)
+            } catch (e: RainError.InvalidLoginCode) {
+                SampleLog.w("RainWallet.otpVerify", "second code rejected", e)
+                restoreRainWalletOwner(previousOwner)
+                _state.update {
+                    it.copy(isLoading = false, rainWalletSecondCode = "", statusText = "That code was not accepted — check it and try again")
+                }
+            } catch (e: RainError.NetworkError) {
+                SampleLog.w("RainWallet.otpVerify", "second code confirm did not reach Rain", e)
+                restoreRainWalletOwner(previousOwner)
+                _state.update { it.copy(isLoading = false, statusText = rainWalletAuthFailureText("Second code failed", e)) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -664,10 +790,8 @@ class HomeViewModel(
             }
         } else {
             _state.update {
-                it.copy(
+                it.withoutRainWalletCodes().copy(
                     isLoading = false,
-                    rainWalletOtpSent = false,
-                    rainWalletOtpCode = "",
                     statusText = "Login failed — request a new code: ${e.message}"
                 )
             }
@@ -838,12 +962,11 @@ class HomeViewModel(
                 // reset() closes the prepared provider, so the flow restarts from "Send code".
                 session.reset()
                 _state.update {
-                    it.copy(
+                    it.withoutRainWalletCodes().copy(
                         isLoading = false,
                         isInitialized = false,
                         sessionStatus = null,
                         rainWalletSessionActive = false,
-                        rainWalletOtpSent = false,
                         statusText = "Rain wallet init failed: ${e.message}"
                     )
                 }
@@ -880,8 +1003,9 @@ class HomeViewModel(
     /**
      * The shared passkey path: the provider is recorded and prepared as for a code login, the
      * previous owner is forgotten before the SDK call and the passkey owner recorded after it, then
-     * Rain initializes as it does after a confirmed code. Failures log and show the code and the
-     * class only, because an auth-proxy failure can echo the contact.
+     * Rain initializes as it does after a confirmed code. A two-code login between its codes is
+     * abandoned by the SDK as the call starts, so both code steps are cleared here first. Failures
+     * log and show the code and the class only, because an auth-proxy failure can echo the contact.
      */
     private fun runRainWalletPasskey(
         action: RainWalletPasskeyAction,
@@ -894,7 +1018,8 @@ class HomeViewModel(
         // Recorded before the provider is prepared so a relaunch resumes it, as for a code login.
         store.provider = SessionStore.Provider.RainWallet
         _state.update {
-            it.copy(rainWalletPasskeyInFlight = action, statusText = "$label: waiting for the passkey sheet...")
+            val base = if (it.rainWalletSecondCodeTo != null) it.withoutRainWalletCodes() else it
+            base.copy(rainWalletPasskeyInFlight = action, statusText = "$label: waiting for the passkey sheet...")
         }
         viewModelScope.launch {
             var provider: RainProvider? = null
@@ -913,11 +1038,9 @@ class HomeViewModel(
                 recordRainWalletPasskeyOwner()
                 SampleLog.i(area, "session active")
                 _state.update {
-                    it.copy(
+                    it.withoutRainWalletCodes().copy(
                         rainWalletSessionActive = true,
                         rainWalletPasskeySession = true,
-                        rainWalletOtpSent = false,
-                        rainWalletOtpCode = "",
                         statusText = "$label succeeded; initializing Rain...",
                     )
                 }
@@ -1669,6 +1792,12 @@ data class HomeUiState(
     val rainWalletPhone: String = "",
     val rainWalletOtpSent: Boolean = false,
     val rainWalletOtpCode: String = "",
+    /** A two-code login between its codes: the masked contact the second code goes to, as Rain sent it; null otherwise. */
+    val rainWalletSecondCodeTo: String? = null,
+    /** How the second code travels, "email" or "SMS", shown beside the masked contact. */
+    val rainWalletSecondCodeVia: String? = null,
+    val rainWalletSecondCodeSent: Boolean = false,
+    val rainWalletSecondCode: String = "",
     val rainWalletSessionActive: Boolean = false,
     /** The export value on screen, one at a time; never written to saved state. */
     val rainWalletRevealedSecret: RevealedSecret? = null,
@@ -1754,6 +1883,16 @@ data class HomeUiState(
             ContactChannel.Email -> rainWalletEmail
             ContactChannel.Phone -> rainWalletPhone
         }
+
+    /** Both code steps cleared, as when the flow restarts from "Send code". */
+    fun withoutRainWalletCodes(): HomeUiState = copy(
+        rainWalletOtpSent = false,
+        rainWalletOtpCode = "",
+        rainWalletSecondCodeTo = null,
+        rainWalletSecondCodeVia = null,
+        rainWalletSecondCodeSent = false,
+        rainWalletSecondCode = "",
+    )
 
     /**
      * Pins the channel and its field to what the code went to. The channel is pinned too because
