@@ -183,8 +183,8 @@ class RainSdkManagerSolanaWithdrawTest {
             }
         }
 
-        // The fee plus the token-account rent the cluster answered, in SOL.
-        assertThat(error.required?.compareTo(BigDecimal("0.00149344"))).isEqualTo(0)
+        // Two signatures' fees (the owner's and the ed25519 verification's) plus the token-account rent the cluster answered, in SOL.
+        assertThat(error.required?.compareTo(BigDecimal("0.00149844"))).isEqualTo(0)
         assertThat(stub.sendSolanaTransactionCalls).isEmpty()
     }
 

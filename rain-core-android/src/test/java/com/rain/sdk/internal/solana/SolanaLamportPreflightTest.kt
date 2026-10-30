@@ -50,13 +50,26 @@ class SolanaLamportPreflightTest {
         }
     }
 
-    private suspend fun require(includeAccountRent: Boolean, feesSponsored: Boolean, rentSponsored: Boolean) =
-        SolanaLamportPreflight.require(
-            SolanaRpcClient(),
-            rpc.urlFor(RainChain.SOLANA_DEVNET),
-            SolanaWithdrawFixtures.OWNER,
-            includeAccountRent = includeAccountRent,
-            feesSponsored = feesSponsored,
-            rentSponsored = rentSponsored
-        )
+    @Test
+    fun `bills one fee per signature`(): Unit = runBlocking {
+        val error = assertThrows(RainError.InsufficientFunds::class.java) {
+            runBlocking { require(includeAccountRent = false, feesSponsored = false, rentSponsored = false, signatures = 2) }
+        }
+        assertThat(error.required?.compareTo(BigDecimal("0.00001"))).isEqualTo(0)
+    }
+
+    private suspend fun require(
+        includeAccountRent: Boolean,
+        feesSponsored: Boolean,
+        rentSponsored: Boolean,
+        signatures: Int = 1
+    ) = SolanaLamportPreflight.require(
+        SolanaRpcClient(),
+        rpc.urlFor(RainChain.SOLANA_DEVNET),
+        SolanaWithdrawFixtures.OWNER,
+        includeAccountRent = includeAccountRent,
+        feesSponsored = feesSponsored,
+        rentSponsored = rentSponsored,
+        signatures = signatures
+    )
 }

@@ -39,10 +39,12 @@ class SolanaRpcClient(
     /** The lamports an account of [dataLength] bytes must hold to be rent exempt, via `getMinimumBalanceForRentExemption`. */
     suspend fun getMinimumBalanceForRentExemption(rpcUrl: String, dataLength: Int): BigInteger {
         val response = jsonRpcClient.call(rpcUrl, "getMinimumBalanceForRentExemption", listOf(dataLength))
-        if (!response.has("result") || response.isNull("result")) {
+        val rent = response.opt("result")?.toString()?.toBigDecimalOrNull()
+            ?.let { runCatching { it.toBigIntegerExact() }.getOrNull() }
+        if (rent == null || rent.signum() <= 0) {
             throw RainError.InternalError("Unexpected getMinimumBalanceForRentExemption response for $dataLength bytes")
         }
-        return BigInteger.valueOf(response.getLong("result"))
+        return rent
     }
 
     /** Most recent blockhash via `getLatestBlockhash`, used as a transfer's `recentBlockhash`. */
@@ -369,7 +371,7 @@ internal data class SolanaSimulation(
 ) {
     val succeeded: Boolean get() = error == null
 
-    /** The runtime refused the payer's lamports rather than the program's logic: a fee or rent shortfall. */
-    val fundsShortfall: Boolean
-        get() = error?.let { it.contains("InsufficientFundsForFee") || it.contains("InsufficientFundsForRent") } == true
+    /** The payer could not pay the fee or the rent, read by [SolanaLamportPreflight.shortfall]; null for a program's refusal. */
+    val shortfall: RainError.InsufficientFunds?
+        get() = SolanaLamportPreflight.shortfall(error, logs)
 }

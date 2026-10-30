@@ -42,13 +42,22 @@ Notable changes to the Rain Android SDK, newest first. The format follows
 
 ### Fixed
 
+- A self-paid Solana dry run the runtime refuses because the payer cannot cover the fee or the
+  rent, by its `InsufficientFundsForFee` or `InsufficientFundsForRent` error or by the System
+  Program's `Transfer: insufficient lamports` line, is `RAIN_402` `InsufficientFunds`, carrying the
+  lamports that line names, on `sendToken`, `withdrawCollateral` and `prepareWithdrawal` alike.
+  5.0.0-beta.1 reported it as `RAIN_403`, and `RAIN_405` on a withdrawal, so a host told the user the
+  network rejected the transaction when they lacked SOL.
 - The Solana preflight reads the rent of a token account it has to create from the cluster
   (`getMinimumBalanceForRentExemption` for the 165-byte account) instead of pinning 2,039,280
   lamports. On 2026-10-29 both mainnet-beta and devnet answer 1,488,440, so 5.0.0-beta.1's
   self-paid `sendToken` and `withdrawCollateral`, and `prepareWithdrawal`, over-quoted that rent in
   the balance they demanded and in `required` on their `RAIN_402`. The read happens only when the
   send has to create the recipient's account and the rent is not sponsored, so sponsored and
-  no-create sends make no new call, and `required` on the error carries the chain's figure.
+  no-create sends make no new call, and `required` on the error carries the chain's figure, which
+  the SDK refuses to read as anything but a positive whole number. A collateral withdrawal's fee is
+  billed for its two signatures, the owner's and the ed25519 verification's, where 5.0.0-beta.1
+  demanded one.
 - Sends and collateral withdrawals refuse an EVM address written in mixed case whose EIP-55
   checksum doesn't match, with `RAIN_102`, before anything is signed. A mistyped character almost
   always breaks the checksum, and 5.0.0-beta.1 checked only the address's shape, so `sendNative`,

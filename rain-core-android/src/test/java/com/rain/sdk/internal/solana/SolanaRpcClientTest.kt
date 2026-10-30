@@ -50,6 +50,16 @@ class SolanaRpcClientTest {
         assertThat(rpc.recordedBodies.single()).contains("[165]")
     }
 
+    @Test
+    fun `refuses a rent-exempt minimum that is not a positive whole number`(): Unit = runBlocking {
+        listOf<Any>(0L, -1L, 1.5).forEach { answer ->
+            rpc.stubObject("getMinimumBalanceForRentExemption", answer)
+            assertThrows(RainError.InternalError::class.java) {
+                runBlocking { client().getMinimumBalanceForRentExemption(url(), 165) }
+            }
+        }
+    }
+
     // ---------- getAccountInfo ----------
 
     @Test

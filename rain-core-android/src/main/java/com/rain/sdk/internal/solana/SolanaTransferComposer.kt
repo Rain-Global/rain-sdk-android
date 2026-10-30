@@ -218,7 +218,7 @@ class SolanaTransferComposer(
             Base64.getEncoder().encodeToString(transaction)
         )
         if (simulation.succeeded) return
-        if (simulation.fundsShortfall) throw RainError.InsufficientFunds()
+        simulation.shortfall?.let { throw it }
 
         Timber.e(
             "Rain SDK: Solana transaction simulation failed: %s; logs: %s",

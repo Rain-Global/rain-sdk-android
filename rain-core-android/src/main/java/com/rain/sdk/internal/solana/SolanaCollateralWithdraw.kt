@@ -105,14 +105,16 @@ internal class SolanaCollateralWithdrawComposer(
         val createDestination = !solanaRpcClient.accountExists(rpcUrl, Base58.encode(destinationAta))
         // The owner pays rent for a recipient token account this withdrawal creates, and the fee,
         // each unless the provider sponsors it. Checked up front so a short wallet gets a typed
-        // error before anything is signed, the same gate the transfer composer applies.
+        // error before anything is signed, the same gate the transfer composer applies, billed for
+        // two signatures: the owner's and the ed25519 verification's.
         SolanaLamportPreflight.require(
             solanaRpcClient,
             rpcUrl,
             ownerAddress,
             includeAccountRent = createDestination,
             feesSponsored = sponsoredFees,
-            rentSponsored = sponsoredRent
+            rentSponsored = sponsoredRent,
+            signatures = 2
         )
 
         // Reconstruct the exact message the executor signed; the program re-derives it on chain
@@ -210,7 +212,7 @@ internal class SolanaCollateralWithdrawComposer(
             Base64.getEncoder().encodeToString(transaction)
         )
         if (simulation.succeeded) return
-        if (simulation.fundsShortfall) throw RainError.InsufficientFunds()
+        simulation.shortfall?.let { throw it }
         Timber.e(
             "Rain SDK: Solana withdrawal simulation failed: %s; logs: %s",
             simulation.error,
