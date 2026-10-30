@@ -201,6 +201,30 @@ class TurnkeyManagedProviderTest {
     }
 
     @Test
+    fun `managed mode forwards the two-code flow, and BYO mode refuses it with the managed-mode message`() = runTest {
+        val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.walletWithEthAndSolana()), session = null)
+        turnkey.onStoreSession = { turnkey.authenticate() }
+        val rainApi = MockRainApiAuth()
+        rainApi.verifyOtp = { call ->
+            if (call.clientSignature == null) MockRainApiAuth.secondCodeRequired(call.deviceKey) else MockRainApiAuth.defaultLogin()
+        }
+        val provider = TurnkeyProvider(managedConfig(), contextOverride = turnkey, rainApiOverride = rainApi)
+
+        provider.sendLoginCode(LoginContact.Email("user@example.com"))
+        assertThat(provider.confirmLoginCode("111111"))
+            .isEqualTo(TurnkeyLoginOutcome.SecondCodeRequired(TurnkeyMaskedContact(LoginContactType.PHONE, "+•••• 4567")))
+        provider.sendSecondLoginCode()
+        provider.confirmSecondLoginCode("222222")
+
+        assertThat(rainApi.loginCalls).isEmpty()
+        assertThat(provider.currentAuthState()).isEqualTo(TurnkeyAuthState.Authenticated)
+
+        val byo = TurnkeyProvider(TurnkeyConfig(turnkey = TurnkeyContext), contextOverride = turnkey)
+        assertThat(expectThrows<RainError.InvalidConfig> { byo.sendSecondLoginCode() }).hasMessageThat().contains("managed mode")
+        assertThat(expectThrows<RainError.InvalidConfig> { byo.confirmSecondLoginCode("222222") }).hasMessageThat().contains("managed mode")
+    }
+
+    @Test
     fun `resolving a managed provider provisions a half-provisioned restored session before the wallet probe`() = runTest {
         val turnkey = MockTurnkey(wallets = listOf(MockTurnkey.defaultWallet())) // live session, Ethereum only
         turnkey.onCreateWalletAccounts = { turnkey.wallets = listOf(MockTurnkey.walletWithEthAndSolana()) }

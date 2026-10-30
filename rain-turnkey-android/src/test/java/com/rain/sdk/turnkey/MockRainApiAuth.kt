@@ -8,7 +8,15 @@ package com.rain.sdk.turnkey
  */
 internal class MockRainApiAuth : RainApiAuthClientProtocol {
 
-    data class VerifyOtpCall(val token: String, val otpId: String, val encryptedOtpBundle: String)
+    data class VerifyOtpCall(
+        val token: String,
+        val otpId: String,
+        val encryptedOtpBundle: String,
+        val clientSignature: RainApiClientSignature? = null,
+    ) {
+        /** The device key the code was encrypted to, read back from the bundle [MockTurnkey.encryptOtpCode] builds. */
+        val deviceKey: String get() = encryptedOtpBundle.substringAfterLast(',').removeSuffix(")")
+    }
 
     data class SignupCall(val token: String, val verificationToken: String, val clientSignature: RainApiClientSignature)
 
@@ -29,7 +37,7 @@ internal class MockRainApiAuth : RainApiAuthClientProtocol {
 
     /** What each call answers, in the order the calls arrive; the default answers are the happy path. */
     var initOtp: suspend (token: String) -> RainApiOtpChallenge = { RainApiOtpChallenge(DEFAULT_OTP_ID, DEFAULT_BUNDLE) }
-    var verifyOtp: suspend (VerifyOtpCall) -> RainApiVerification = { RainApiVerification(DEFAULT_VERIFICATION_TOKEN) }
+    var verifyOtp: suspend (VerifyOtpCall) -> RainApiVerifyAnswer = { RainApiVerification(DEFAULT_VERIFICATION_TOKEN) }
     var signup: suspend (SignupCall) -> RainApiSignup = { RainApiSignup(DEFAULT_SUB_ORGANIZATION_ID) }
     var login: suspend (LoginCall) -> RainApiLogin = { defaultLogin() }
     var signupPasskey: suspend (SignupPasskeyCall) -> RainApiSignup = { RainApiSignup(DEFAULT_SUB_ORGANIZATION_ID) }
@@ -39,8 +47,13 @@ internal class MockRainApiAuth : RainApiAuthClientProtocol {
         return initOtp.invoke(token)
     }
 
-    override suspend fun verifyOtp(token: String, otpId: String, encryptedOtpBundle: String): RainApiVerification {
-        val call = VerifyOtpCall(token, otpId, encryptedOtpBundle)
+    override suspend fun verifyOtp(
+        token: String,
+        otpId: String,
+        encryptedOtpBundle: String,
+        clientSignature: RainApiClientSignature?,
+    ): RainApiVerifyAnswer {
+        val call = VerifyOtpCall(token, otpId, encryptedOtpBundle, clientSignature)
         verifyOtpCalls += call
         return verifyOtp.invoke(call)
     }
@@ -81,7 +94,7 @@ internal class MockRainApiAuth : RainApiAuthClientProtocol {
     /** Every string any call carried: the place a contact must never appear. */
     val everythingSent: List<String>
         get() = initOtpCalls +
-            verifyOtpCalls.flatMap { listOf(it.token, it.otpId, it.encryptedOtpBundle) } +
+            verifyOtpCalls.flatMap { listOf(it.token, it.otpId, it.encryptedOtpBundle) + it.clientSignature?.strings().orEmpty() } +
             signupCalls.flatMap { listOf(it.token, it.verificationToken) + it.clientSignature.strings() } +
             loginCalls.flatMap { listOf(it.token, it.verificationToken, it.subOrganizationId.orEmpty()) + it.clientSignature.strings() } +
             signupPasskeyCalls.flatMap { listOf(it.token, it.challenge, it.publicKey) + it.attestation.strings() }
@@ -110,6 +123,23 @@ internal class MockRainApiAuth : RainApiAuthClientProtocol {
 
         /** `POST /otp/verify`'s refusal of a wrong, expired or locked code. */
         fun wrongCode() = refusal(RainApiAuthFailure.Kind.InvalidCode, 400, VERIFY_PATH)
+
+        /** A 400 "start again": rain-api ended the two-code attempt (too many tries, its timer, one already open). */
+        fun attemptEnded(path: String = VERIFY_PATH) = refusal(RainApiAuthFailure.Kind.AttemptEnded, 400, path)
+
+        /**
+         * rain-api's login message for the token it kept, as `clientSignatureMessage` carries it: the
+         * device key [publicKey] in the vendor's `V1TokenUsage` shape.
+         */
+        fun loginMessage(publicKey: String, tokenId: String = "tok-1"): String =
+            """{"login":{"publicKey":"$publicKey"},"tokenId":"$tokenId","type":"USAGE_TYPE_LOGIN"}"""
+
+        /** The verify answer for an account that needs two codes, with the message naming [publicKey]. */
+        fun secondCodeRequired(
+            publicKey: String,
+            channel: OtpChannel = OtpChannel.SMS,
+            maskedContact: String = if (channel == OtpChannel.SMS) "+•••• 4567" else "j•••@example.com",
+        ) = RainApiSecondCodeRequired(channel, maskedContact, loginMessage(publicKey))
 
         /** `POST /login`'s 404: no wallet for this contact in this tenant. */
         fun noWallet() = refusal(RainApiAuthFailure.Kind.NoWallet, 404, LOGIN_PATH)

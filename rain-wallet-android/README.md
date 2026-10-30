@@ -48,7 +48,11 @@ wallet.awaitSessionRestore()
 if (!wallet.hasActiveSession()) {
     wallet.sendLoginCode(RainWalletContact.Email("user@example.com"))
     // or RainWalletContact.Phone("+15551234567") for a code by SMS
-    wallet.confirmLoginCode(code) // sign-up or login, plus wallet provisioning
+    val outcome = wallet.confirmLoginCode(code) // sign-up or login, plus wallet provisioning
+    if (outcome is RainWalletLoginOutcome.SecondCodeRequired) { // the account needs two codes
+        wallet.sendSecondLoginCode() // Rain sends it to the account's other contact, outcome.contact.masked
+        wallet.confirmSecondLoginCode(secondCode)
+    }
     // or a passkey through the system sheet, presented from the foreground Activity:
     // wallet.loginWithPasskey(activity), or wallet.signUpWithPasskey(activity) for a new account
 }
@@ -121,7 +125,11 @@ Notes:
   code, encrypted), the sign-up and the login; Rain delivers the code and keys the account on the
   contact the token names. The contact also reaches Rain inside the verification token the code
   verify answers with, which the sign-up and the login send back, and, on a first login, inside the
-  sign-up message the device signs. On confirm of an attach, the verification token and the contact
+  sign-up message the device signs. For an account that needs two codes the same token carries the
+  second code request, with no body, and the second verify: the second code encrypted to the same
+  device key, and that key's signature over the login message Rain issued, which names the
+  verification Rain kept and the key, not the contact; Rain's answer names the other contact only
+  in masked form. On confirm of an attach, the verification token and the contact
   go to the wallet backend's user update. On a passkey sign-up the passkey's challenge and
   attestation and the public key of a key pair the device makes for the attempt go to Rain's passkey
   sign-up; that public key then goes to the wallet backend inside the login request the device signs

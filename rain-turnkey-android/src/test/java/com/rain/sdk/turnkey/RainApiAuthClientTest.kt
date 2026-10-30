@@ -194,10 +194,53 @@ class RainApiAuthClientTest {
         runBlocking {
             assertThat(client.verifyOtp("wat", "otp-1", "enc")).isEqualTo(RainApiVerification("vt", walletSubOrganizationId = "sub-7"))
             assertThat(client.verifyOtp("wat", "otp-1", "enc")).isEqualTo(RainApiVerification("vt", walletSubOrganizationId = null))
-            assertThat(client.verifyOtp("wat", "otp-1", "enc").walletSubOrganizationId).isNull()
+            assertThat((client.verifyOtp("wat", "otp-1", "enc") as RainApiVerification).walletSubOrganizationId).isNull()
         }
         val unreadable = assertThrows(RainError.InternalError::class.java) { runBlocking { client.verifyOtp("wat", "otp-1", "enc") } }
         assertThat(unreadable).hasMessageThat().contains("/v1/issuing/embedded-wallets/otp/verify")
+    }
+
+    @Test
+    fun `the verify answer decodes into its three shapes, and the client signature goes out only when given`() {
+        server.enqueue(answer(200, """{"verificationToken":"vt","walletSubOrganizationId":null}"""))
+        server.enqueue(
+            answer(
+                200,
+                """{"secondCodeRequired":{"contactType":"phone","maskedContact":"+•••• 4567"},""" +
+                    """"clientSignatureMessage":"{\"type\":\"USAGE_TYPE_LOGIN\"}"}""",
+            )
+        )
+        server.enqueue(
+            answer(200, """{"secondCodeRequired":{"contactType":"email","maskedContact":"j•••@example.com"},"clientSignatureMessage":"m"}""")
+        )
+        server.enqueue(answer(200, loginBody))
+        runBlocking {
+            assertThat(client.verifyOtp("wat", "otp-1", "enc")).isEqualTo(RainApiVerification("vt", walletSubOrganizationId = null))
+            assertThat(client.verifyOtp("wat", "otp-1", "enc"))
+                .isEqualTo(RainApiSecondCodeRequired(OtpChannel.SMS, "+•••• 4567", """{"type":"USAGE_TYPE_LOGIN"}"""))
+            assertThat(client.verifyOtp("wat", "otp-1", "enc")).isEqualTo(RainApiSecondCodeRequired(OtpChannel.EMAIL, "j•••@example.com", "m"))
+            assertThat(client.verifyOtp("wat", "otp-2", "enc", signature)).isEqualTo(RainApiLogin(sessionToken = "jwt", providerUserId = "u"))
+        }
+        assertThat(takeRequest().json().keyList()).containsExactly("otpId", "encryptedOtpBundle")
+        repeat(2) { takeRequest() }
+        val withSignature = takeRequest().json()
+        assertThat(withSignature.keyList()).containsExactly("otpId", "encryptedOtpBundle", "clientSignature")
+        assertThat(withSignature.getString("otpId")).isEqualTo("otp-2")
+        val sent = withSignature.getJSONObject("clientSignature")
+        assertThat(sent.keyList()).containsExactly("publicKey", "scheme", "message", "signature")
+        assertThat(sent.getString("scheme")).isEqualTo(RainApiClientSignature.CLIENT_SIGNATURE_SCHEME_API_P256)
+
+        // A contact type outside the two, a second-code object that is not one, or a missing field is unreadable.
+        listOf(
+            """{"secondCodeRequired":{"contactType":"fax","maskedContact":"x"},"clientSignatureMessage":"m"}""",
+            """{"secondCodeRequired":"yes","clientSignatureMessage":"m"}""",
+            """{"secondCodeRequired":{"contactType":"email"},"clientSignatureMessage":"m"}""",
+            """{"secondCodeRequired":{"contactType":"email","maskedContact":"j•••@example.com"}}""",
+        ).forEach { body ->
+            server.enqueue(answer(200, body))
+            val unreadable = assertThrows(RainError.InternalError::class.java) { runBlocking { client.verifyOtp("wat", "otp-1", "enc") } }
+            assertWithMessage(body).that(unreadable).hasMessageThat().contains("/v1/issuing/embedded-wallets/otp/verify")
+        }
     }
 
     @Test
@@ -244,6 +287,12 @@ class RainApiAuthClientTest {
             Triple(400, "Verification failed", RainApiAuthFailure.Kind.Refused),
             Triple(400, "This contact can't receive a code", RainApiAuthFailure.Kind.Refused),
             Triple(400, "Token was issued for a different email or phone", RainApiAuthFailure.Kind.Refused),
+            Triple(400, "Too many attempts; start again", RainApiAuthFailure.Kind.AttemptEnded),
+            Triple(400, "Login attempt expired; start again", RainApiAuthFailure.Kind.AttemptEnded),
+            Triple(400, "Login attempt already started; start again", RainApiAuthFailure.Kind.AttemptEnded),
+            Triple(400, "Client signature required", RainApiAuthFailure.Kind.Refused),
+            Triple(409, "Second code required", RainApiAuthFailure.Kind.Refused),
+            Triple(503, "Login is unavailable right now; try again shortly", RainApiAuthFailure.Kind.Refused),
             Triple(401, "Token expired", RainApiAuthFailure.Kind.TokenRejected),
             Triple(401, "Bad token", RainApiAuthFailure.Kind.TokenRejected),
             Triple(401, "Invalid tenant", RainApiAuthFailure.Kind.Forbidden),
@@ -320,8 +369,14 @@ class RainApiAuthClientTest {
         assertThat(taken).isInstanceOf(RainError.InvalidConfig::class.java)
         assertThat(taken.errorCode).isEqualTo(RainErrorCode.INVALID_CONFIG)
         assertThat(taken).hasMessageThat().contains("loginWithPasskey")
+        val ended = mapped(400, "Too many attempts; start again")
+        assertThat(ended).isInstanceOf(RainError.ProviderError::class.java)
+        assertThat(ended.errorCode).isEqualTo(RainErrorCode.PROVIDER_ERROR)
+        assertThat(ended).hasMessageThat().contains("request a new login code")
         listOf(
             400 to "Verification failed",
+            409 to "Second code required",
+            503 to "Login is unavailable right now; try again shortly",
             404 to "No wallet exists for this contact",
             409 to "Signup in progress",
             409 to "A signup is already in progress",

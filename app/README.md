@@ -80,7 +80,12 @@ methods:
   channel and the contact stay locked); the code field takes letters on both channels
   because the backend's code format is one shared setting and may be alphanumeric. If the login
   itself succeeded but a later step failed, the sample carries on signed in (Rain's initialization
-  finishes the wallet setup); any other failure restarts from *Send code*. An email login and a phone
+  finishes the wallet setup); any other failure restarts from *Send code*. An account Rain protects
+  with two codes (the tenant setting on, an email and a phone on the account) gets a *Second code*
+  step once the first code is accepted: the sample has Rain send it to the account's other contact
+  at once, shows the channel and the contact as Rain masked it, and *Resend second code* sends
+  another; a wrong second code keeps the step, and so does a send or a confirm that did not reach
+  Rain; any other failure, or a passkey button, restarts from *Send code*. An email login and a phone
   login by the same person are two different accounts. The sandbox test number `+1 999-999-9999`
   with the code `000000` worked under the auth proxy; whether Rain's endpoints honour it is
   unconfirmed, so check it on a dev run before relying on it. On *Send code* and *Send verification

@@ -190,6 +190,9 @@ internal interface TurnkeyContextProtocol {
     /** Removes the key pair [publicKey] from the vendor's keystore; the vendor's `deleteKeyPair`. */
     suspend fun deleteDeviceKey(publicKey: String)
 
+    /** [deleteDeviceKey] on the calling thread, for the one caller that cannot suspend: a managed provider's `close()`. */
+    fun discardDeviceKey(publicKey: String)
+
     /**
      * The typed [code] encrypted to the enclave bundle a code request answered with, carrying the
      * device key [publicKey] inside the ciphertext: the body `POST /otp/verify` takes. The vendor's
@@ -212,6 +215,14 @@ internal interface TurnkeyContextProtocol {
      * and the vendor's serializer omits nulls, so the signed message has to say `[]` too.
      */
     suspend fun clientSignatureForSignUp(verificationToken: String, contact: String, channel: OtpChannel): RainApiClientSignature
+
+    /**
+     * The client signature the second verify of a two-code login takes: [message], the login
+     * message rain-api answered the first verify with, signed raw with the device key [publicKey]
+     * both codes were encrypted to, the way the vendor signs the login message it builds itself.
+     * The caller has checked that the message is a login naming that key.
+     */
+    suspend fun clientSignatureFor(message: String, publicKey: String): RainApiClientSignature
 
     /**
      * Stores the session [jwt] `POST /login` answered with under [sessionKey]; the vendor's
@@ -420,6 +431,8 @@ internal class TurnkeyContextAdapter(
         withContext(ioDispatcher) { context.deleteKeyPair(publicKey = publicKey) }
     }
 
+    override fun discardDeviceKey(publicKey: String) = context.deleteKeyPair(publicKey = publicKey)
+
     override suspend fun encryptOtpCode(code: String, encryptionTargetBundle: String, publicKey: String): String =
         withContext(ioDispatcher) {
             encryptOtpCodeToBundle(otpCode = code, otpEncryptionTargetBundle = encryptionTargetBundle, publicKey = publicKey)
@@ -442,6 +455,9 @@ internal class TurnkeyContextAdapter(
             oauthProviders = emptyList(),
         ).signed()
     }
+
+    override suspend fun clientSignatureFor(message: String, publicKey: String): RainApiClientSignature =
+        withContext(ioDispatcher) { ClientSignaturePayload(message = message, clientSignaturePublicKey = publicKey).signed() }
 
     /**
      * The vendor's own signing steps (sdk-kotlin 2.1.0 `TurnkeyContext.loginWithOtp`): the message's

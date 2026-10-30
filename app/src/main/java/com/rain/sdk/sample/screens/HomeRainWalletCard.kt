@@ -60,16 +60,7 @@ internal fun RainWalletCard(state: HomeUiState, actions: ProviderCardActions) {
                 !state.rainWalletSessionActive,
             loading = state.isLoading && !codeSent && !state.rainWalletSessionActive,
         )
-        if (codeSent) {
-            OneTimeCodeStep(
-                code = state.rainWalletOtpCode,
-                onCodeChanged = actions.onRainWalletOtpCodeChanged,
-                sessionActive = state.rainWalletSessionActive,
-                isLoading = state.isLoading,
-                onVerify = actions.onVerifyRainWalletOtp,
-                placeholder = state.rainWalletChannel.codePlaceholder,
-            )
-        }
+        if (codeSent) RainWalletCodeSteps(state, actions)
         if (state.rainWalletSessionActive) {
             InitializeRainButton(
                 isInitialized = state.isInitialized,
@@ -81,6 +72,63 @@ internal fun RainWalletCard(state: HomeUiState, actions: ProviderCardActions) {
         } else {
             RainWalletPasskeyButtons(state, actions)
         }
+    }
+}
+
+/** The first code's entry until a second code is required, then the second code's step in its place. */
+@Composable
+private fun RainWalletCodeSteps(state: HomeUiState, actions: ProviderCardActions) {
+    val secondCodeTo = state.rainWalletSecondCodeTo
+    if (secondCodeTo == null) {
+        OneTimeCodeStep(
+            code = state.rainWalletOtpCode,
+            onCodeChanged = actions.onRainWalletOtpCodeChanged,
+            sessionActive = state.rainWalletSessionActive,
+            isLoading = state.isLoading,
+            onVerify = actions.onVerifyRainWalletOtp,
+            placeholder = state.rainWalletChannel.codePlaceholder,
+        )
+    } else {
+        RainWalletSecondCodeStep(secondCodeTo, state, actions)
+    }
+}
+
+/**
+ * The second code of a two-code login: the first code passed and Rain sent a code to the account's
+ * other contact, shown masked as Rain sent it. The view model sends it as soon as the first code is
+ * accepted; the button sends another, and the field and "Verify and log in" appear once one is
+ * out. "Resend code" above starts the login over with a fresh first code.
+ */
+@Composable
+private fun RainWalletSecondCodeStep(maskedContact: String, state: HomeUiState, actions: ProviderCardActions) {
+    val codeSent = state.rainWalletSecondCodeSent
+    RainDivider()
+    RainLabel("Second code")
+    RainMuted("This account also needs the code sent by ${state.rainWalletSecondCodeVia ?: "Rain"} to $maskedContact")
+    RainButton(
+        text = if (codeSent) "Resend second code" else "Send second code",
+        onClick = actions.onSendRainWalletSecondCode,
+        modifier = Modifier.fillMaxWidth(),
+        style = RainButtonStyle.Secondary,
+        enabled = !state.isLoading,
+        loading = state.isLoading && !codeSent,
+    )
+    if (codeSent) {
+        RainField(
+            label = "Second code",
+            value = state.rainWalletSecondCode,
+            onValueChange = actions.onRainWalletSecondCodeChanged,
+            placeholder = "Code sent to $maskedContact",
+            enabled = !state.isLoading,
+            keyboardType = KeyboardType.Ascii,
+        )
+        RainButton(
+            text = "Verify and log in",
+            onClick = actions.onVerifyRainWalletSecondCode,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = state.rainWalletSecondCode.isNotBlank() && !state.isLoading,
+            loading = state.isLoading,
+        )
     }
 }
 
@@ -265,6 +313,20 @@ private fun RainWalletCardEmailCodeSentPreview() {
 private fun RainWalletCardSmsCodeSentPreview() {
     RainWalletCardPreview(
         previewRainWalletState.copy(rainWalletChannel = ContactChannel.Phone, rainWalletOtpSent = true),
+    )
+}
+
+@Preview(name = "Rain Wallet · second code required, sent by SMS", showBackground = true, heightDp = 820)
+@Composable
+private fun RainWalletCardSecondCodeSentPreview() {
+    RainWalletCardPreview(
+        previewRainWalletState.copy(
+            rainWalletOtpSent = true,
+            rainWalletSecondCodeTo = "+•••• 4567",
+            rainWalletSecondCodeVia = "SMS",
+            rainWalletSecondCodeSent = true,
+            rainWalletSecondCode = "275813",
+        ),
     )
 }
 

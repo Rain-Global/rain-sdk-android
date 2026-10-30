@@ -8,6 +8,12 @@ Notable changes to the Rain Android SDK, newest first. The format follows
 
 ### Added
 
+- Two-code login on the Rain wallet. When a tenant turns the setting on, an account with both an
+  email and a phone confirms a code from each: `confirmLoginCode` returns
+  `RainWalletLoginOutcome.SecondCodeRequired` with the other contact masked, then
+  `sendSecondLoginCode()` (call again to resend) and `confirmSecondLoginCode(code)` finish the
+  login. No new error code. The three rows under [Rain wallet provider](docs/METHODS.md#rain-wallet-provider)
+  carry the contract; the managed `TurnkeyProvider` (internal API) gains the same members.
 - **Breaking:** `RAIN_305` `RainError.TransactionOutcomeUnknown`, a new `RainErrorCode` case and a
   new `RainError` subclass: a send through `rain-turnkey-android` or `rain-wallet-android`, EVM or
   Solana, that the wallet backend may have accepted before its answer was lost (a 5xx answer to the
@@ -141,6 +147,9 @@ Notable changes to the Rain Android SDK, newest first. The format follows
 
 ### Changed
 
+- **Breaking:** `RainProvider.confirmLoginCode` and the managed `TurnkeyProvider.confirmLoginCode`
+  return the login outcome instead of `Unit`. Migration: branch on `RainWalletLoginOutcome`; a call
+  that ignores the result still compiles but leaves a two-code account between its codes.
 - The SDK's own HTTP calls share one OkHttp client (`RainHttp` in `rain-core-android`, internal API).
   Two calls that 5.0.0-beta.1 ran with no whole-call bound now have one: the Turnkey wallet's chain
   reads at 10 s and the withdrawal reads at 60 s.

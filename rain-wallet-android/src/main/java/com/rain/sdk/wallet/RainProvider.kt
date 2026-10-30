@@ -32,7 +32,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  * wallet.awaitSessionRestore()
  * if (!wallet.hasActiveSession()) {
  *     wallet.sendLoginCode(RainWalletContact.Email("user@example.com"))
- *     wallet.confirmLoginCode(code) // sign-up or login, plus wallet provisioning
+ *     val outcome = wallet.confirmLoginCode(code) // sign-up or login, plus wallet provisioning
+ *     if (outcome is RainWalletLoginOutcome.SecondCodeRequired) {
+ *         wallet.sendSecondLoginCode() // to the account's other contact, outcome.contact.masked
+ *         wallet.confirmSecondLoginCode(secondCode)
+ *     }
  *     // or: wallet.loginWithPasskey(activity)
  * }
  *
@@ -45,7 +49,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Send a one-time login code to the user's email or phone, confirm it (a first login signs the
  * user up and creates one wallet holding an Ethereum and a Solana account on a single seed; a
- * returning login finds the account), then register the provider and resolve
+ * returning login finds the account, and one Rain protects with two codes asks for the code sent
+ * to its other contact too), then register the provider and resolve
  * `rain.provider(ProviderId.RAIN)`. The code request, the confirm, the passkey sign-up and the
  * attach run under a wallet auth token your backend mints and hands the app through
  * [RainWalletConfig.authTokenProvider]; what leaves the device is listed in the module README.
@@ -226,36 +231,67 @@ class RainProvider internal constructor(
 
     /**
      * Confirms the code from [sendLoginCode]: logs the contact's wallet in, or signs the contact up
-     * when this tenant has none, creating one wallet holding an Ethereum and a Solana account inside
-     * the sign-up. A returning login backfills a missing account onto the existing wallet. A
-     * rejected code keeps the challenge, so the user can retype it; a failure after the code was
-     * accepted drops it, so request a new code. A failed switch to the new session leaves the
-     * previous session selected; a provisioning failure keeps the new session, which heals at
-     * resolution. A code login does not revoke the user's sessions on other devices. The
-     * `confirmLoginCode` row under *Rain wallet provider* in `docs/METHODS.md` says which condition
-     * maps to which code.
+     * when this tenant has none, creating one wallet holding an Ethereum and a Solana account. A
+     * returning login backfills a missing account. A rejected code keeps the challenge, so the user
+     * can retype it; a failure after the code was accepted drops it. For an account Rain protects
+     * with two codes this returns [RainWalletLoginOutcome.SecondCodeRequired] with nothing logged
+     * in yet: call [sendSecondLoginCode], then [confirmSecondLoginCode]. The `confirmLoginCode` row
+     * in `docs/METHODS.md` maps each condition to its code.
      *
-     * @throws RainError.InvalidLoginCode (`RAIN_203`) when the code is rejected.
-     * @throws RainError.InvalidConfig (`RAIN_102`) on a precondition: no code requested, a blank
-     *   code, a failed token provider, a closed provider.
-     * @throws RainError.Unauthorized (`RAIN_202`) when Rain refuses the token or the tenant, or from
-     *   the account backfill.
-     * @throws RainError.NetworkError (`RAIN_301`) when Rain, or your backend behind the token
-     *   provider, cannot be reached.
-     * @throws RainError.ProviderError (`RAIN_501`) for every other refusal by Rain.
-     * @throws RainError.TokenExpired (`RAIN_201`) from the session switch after the code was accepted.
-     * @throws RainError.InternalError (`RAIN_502`) when the backend's initialization failed for
-     *   this launch, or when Rain's answer could not be read.
+     * @return [RainWalletLoginOutcome.SignedIn], or [RainWalletLoginOutcome.SecondCodeRequired]
+     *   carrying the contact the second code goes to, masked by Rain.
+     * @throws RainError.InvalidLoginCode (`RAIN_203`)
+     * @throws RainError.InvalidConfig (`RAIN_102`)
+     * @throws RainError.Unauthorized (`RAIN_202`)
+     * @throws RainError.NetworkError (`RAIN_301`)
+     * @throws RainError.ProviderError (`RAIN_501`)
+     * @throws RainError.TokenExpired (`RAIN_201`)
+     * @throws RainError.InternalError (`RAIN_502`)
      * @see sendLoginCode
      */
-    suspend fun confirmLoginCode(code: String) {
-        backing.confirmLoginCode(code)
+    suspend fun confirmLoginCode(code: String): RainWalletLoginOutcome = backing.confirmLoginCode(code).toRainWallet()
+
+    /**
+     * Has Rain send the second code of a two-code login to the account's other contact, the one
+     * [RainWalletLoginOutcome.SecondCodeRequired] named, or sends it again; the attempt's wallet
+     * auth token is reused, so [RainWalletConfig.authTokenProvider] is not called. Every refusal by
+     * Rain ends the attempt. The `sendSecondLoginCode` row in `docs/METHODS.md` maps each condition
+     * to its code.
+     *
+     * @throws RainError.InvalidConfig (`RAIN_102`)
+     * @throws RainError.Unauthorized (`RAIN_202`)
+     * @throws RainError.NetworkError (`RAIN_301`)
+     * @throws RainError.ProviderError (`RAIN_501`)
+     * @throws RainError.InternalError (`RAIN_502`)
+     * @see confirmSecondLoginCode
+     */
+    suspend fun sendSecondLoginCode() {
+        backing.sendSecondLoginCode()
+    }
+
+    /**
+     * Confirms the code from [sendSecondLoginCode] and completes the login as [confirmLoginCode]
+     * does. A rejected code or a transport failure keeps the attempt, so the user can retype or
+     * retry; every other refusal ends it, and [sendLoginCode] starts over. The
+     * `confirmSecondLoginCode` row in `docs/METHODS.md` maps each condition to its code.
+     *
+     * @throws RainError.InvalidLoginCode (`RAIN_203`)
+     * @throws RainError.InvalidConfig (`RAIN_102`)
+     * @throws RainError.Unauthorized (`RAIN_202`)
+     * @throws RainError.NetworkError (`RAIN_301`)
+     * @throws RainError.ProviderError (`RAIN_501`)
+     * @throws RainError.TokenExpired (`RAIN_201`)
+     * @throws RainError.InternalError (`RAIN_502`)
+     * @see sendSecondLoginCode
+     */
+    suspend fun confirmSecondLoginCode(code: String) {
+        backing.confirmSecondLoginCode(code)
     }
 
     /**
      * Clears the stored session (full logout), after waiting for a restore in flight to settle,
-     * without firing [RainWalletConfig.onSessionExpired]; a pending login code and a pending contact
-     * verification are dropped.
+     * without firing [RainWalletConfig.onSessionExpired]; a pending login code, a pending contact
+     * verification and a two-code login between its codes are dropped.
      * [hasActiveSession] and [currentAuthState] read unauthenticated as soon as it returns. A no-op
      * when no session is selected, but not infallible: it runs the same backend readiness checks as
      * every other authentication call.
@@ -277,8 +313,9 @@ class RainProvider internal constructor(
      * or a login code. A successful login stores the session under a fresh key, selects it, clears
      * the previous session, revokes the user's other sessions on every device (the signed-out
      * device's [RainWalletConfig.onSessionExpired] fires at its next call) and backfills a missing
-     * account onto the existing wallet. A dismissed sheet, a failed ceremony or a refused passkey
-     * leaves the current session untouched.
+     * account onto the existing wallet. A two-code login between its codes is abandoned before the
+     * sheet opens, whether or not it completes; a pending first code survives. A dismissed sheet,
+     * a failed ceremony or a refused passkey leaves the current session untouched.
      *
      * @param activity The foreground Activity the system passkey sheet is presented from, so the
      *   sheet lands in the app's task. The call suspends until the sheet closes, which can take as
@@ -314,7 +351,8 @@ class RainProvider internal constructor(
      * sheet creates the passkey, Rain registers a device key on the new account for a minute, and
      * the SDK logs in with a login stamped by that key. When the account holds no key for this
      * device, the sheet opens again and the passkey signs it in. Each new passkey is a new account,
-     * so a returning user signs in with [loginWithPasskey] or a login code; call [logout] first
+     * so a returning user signs in with [loginWithPasskey] or a login code (a two-code login between
+     * its codes is abandoned, as there); call [logout] first
      * unless [currentAuthState] reads `Unauthenticated` ([hasActiveSession] reads false in a
      * session's last 30 seconds, which still refuses). A failure can leave an account behind; the
      * `signUpWithPasskey` row in `docs/METHODS.md` says when, and which code tells you.
@@ -412,7 +450,8 @@ class RainProvider internal constructor(
      * Confirms the code from [sendContactVerificationCode] and attaches the verified contact to the
      * signed-in account. Requires a live session, checked before the code is spent. Once the code
      * is accepted, the update sets the account's email or phone to the contact, replacing the one
-     * of the same kind it had, if any. A contact another account in this tenant signs in with is
+     * of the same kind it had, if any. A contact another account in this tenant signs in with, or
+     * one whose account Rain protects with two codes, is
      * refused with [RainError.Unauthorized] once the code is accepted, nothing changed and the code
      * spent. A rejected code keeps the challenge, so the user can
      * retype it; a failure after the code was accepted drops it, so request a new code. Fails with

@@ -32,15 +32,39 @@ import kotlin.coroutines.resumeWithException
 internal data class RainApiOtpChallenge(val otpId: String, val otpEncryptionTargetBundle: String)
 
 /**
- * `POST /otp/verify`'s answer: Turnkey's verification token, a JWT good for ten minutes that
- * carries the public key the code was encrypted with and names the contact, so `toString()`
- * redacts it; and [walletSubOrganizationId], the wallet this tenant saved for the token's contact,
- * null when there is none or when the answer omits the field.
+ * What `POST /otp/verify` answers, one of three objects told apart by a field only it carries:
+ * [RainApiVerification] when the code completes the check, [RainApiSecondCodeRequired] when the
+ * account needs the code sent to its other contact too, [RainApiLogin] when a second code, sent
+ * with the client signature, logged the account in.
  */
-internal data class RainApiVerification(val verificationToken: String, val walletSubOrganizationId: String? = null) {
+internal sealed interface RainApiVerifyAnswer
+
+/**
+ * `POST /otp/verify`'s answer for a code that completes the check: Turnkey's verification token,
+ * a JWT good for ten minutes that carries the public key the code was encrypted with and names
+ * the contact, so `toString()` redacts it; and [walletSubOrganizationId], the wallet this tenant
+ * saved for the token's contact, null when there is none or when the answer omits the field.
+ */
+internal data class RainApiVerification(
+    val verificationToken: String,
+    val walletSubOrganizationId: String? = null,
+) : RainApiVerifyAnswer {
     override fun toString(): String =
         "RainApiVerification(verificationToken=<redacted>, walletSubOrganizationId=$walletSubOrganizationId)"
 }
+
+/**
+ * `POST /otp/verify`'s answer when the account needs two codes: rain-api keeps the verification
+ * token and names the contact it will send the second code to, by [channel] and in the masked form
+ * [maskedContact], shown to the user as sent, plus [clientSignatureMessage], the login message the
+ * device signs with the key the first code was encrypted to and sends with the second verify. The
+ * message names the kept token and that key, nothing personal.
+ */
+internal data class RainApiSecondCodeRequired(
+    val channel: OtpChannel,
+    val maskedContact: String,
+    val clientSignatureMessage: String,
+) : RainApiVerifyAnswer
 
 /** `POST /signup` and `POST /signup/passkey`'s answer. */
 internal data class RainApiSignup(val subOrganizationId: String)
@@ -53,7 +77,7 @@ internal data class RainApiLogin(
     /** The Turnkey session JWT to store under the device key. */
     val sessionToken: String,
     val providerUserId: String,
-) {
+) : RainApiVerifyAnswer {
     override fun toString(): String = "RainApiLogin(sessionToken=<redacted>, providerUserId=$providerUserId)"
 }
 
@@ -103,8 +127,9 @@ internal data class RainApiPasskeyAttestation(
  * on. The kind is read off the status and, for 400, 401, 404 and 409, rain-api's own
  * `{statusCode, error, message}` body; the body is then dropped before this is thrown, so the
  * message names the path, the status and, on a 500, the `correlationId` that finds Rain's server
- * log, and nothing else Rain said. Not a vendor failure for `carriesVendorData`: it carries nothing
- * a host may not see, so the mapper's exit passes it through.
+ * log, and nothing else Rain said; a [Kind.AttemptEnded] adds the SDK's own sentence on what to do.
+ * Not a vendor failure for `carriesVendorData`: it carries nothing a host may not see, so the
+ * mapper's exit passes it through.
  */
 internal class RainApiAuthFailure(
     val kind: Kind,
@@ -112,11 +137,22 @@ internal class RainApiAuthFailure(
     val path: String,
     /** A 500's `correlationId`, kept only when it is a UUID; null on every other answer. */
     val correlationId: String? = null,
-) : RuntimeException("Rain API $path: HTTP $status" + correlationId?.let { " (correlationId $it)" }.orEmpty()) {
+) : RuntimeException(
+    "Rain API $path: HTTP $status" + correlationId?.let { " (correlationId $it)" }.orEmpty() +
+        if (kind == Kind.AttemptEnded) "; the login attempt is over, request a new login code" else ""
+) {
 
     enum class Kind {
         /** 400 "Invalid or expired code": wrong, expired or locked. Keep the attempt; the user retypes. */
         InvalidCode,
+
+        /**
+         * 400 whose message says "start again": a two-code login attempt is over on rain-api's
+         * side (too many second codes tried, its own timer, or a first verify that met an attempt
+         * still open), and the code just verified is spent with it. The controller drops what it
+         * kept; a new `sendLoginCode` starts over.
+         */
+        AttemptEnded,
 
         /** 401 for a missing, malformed, unknown, expired or revoked token: ask the host for a new one. */
         TokenRejected,
@@ -163,7 +199,13 @@ internal class RainApiAuthFailure(
 internal interface RainApiAuthClientProtocol {
     suspend fun initOtp(token: String): RainApiOtpChallenge
 
-    suspend fun verifyOtp(token: String, otpId: String, encryptedOtpBundle: String): RainApiVerification
+    /** [clientSignature] goes only with the second code of a two-code login; the first verify sends none. */
+    suspend fun verifyOtp(
+        token: String,
+        otpId: String,
+        encryptedOtpBundle: String,
+        clientSignature: RainApiClientSignature? = null,
+    ): RainApiVerifyAnswer
 
     suspend fun signup(token: String, verificationToken: String, clientSignature: RainApiClientSignature): RainApiSignup
 
@@ -211,14 +253,21 @@ internal class RainApiAuthClient(
             )
         }
 
-    /** `POST /otp/verify`: the typed code, encrypted to the challenge's bundle with the device key. */
-    override suspend fun verifyOtp(token: String, otpId: String, encryptedOtpBundle: String): RainApiVerification =
-        post(OTP_VERIFY, token, JSONObject().put("otpId", otpId).put("encryptedOtpBundle", encryptedOtpBundle)) { json ->
-            RainApiVerification(
-                verificationToken = json.requiredString("verificationToken"),
-                walletSubOrganizationId = json.optionalString("walletSubOrganizationId"),
-            )
-        }
+    /**
+     * `POST /otp/verify`: the typed code, encrypted to the challenge's bundle with the device key,
+     * and, for the second code of a two-code login, the signature over the message the first verify
+     * answered with; a null signature is omitted from the body, never sent as `null`.
+     */
+    override suspend fun verifyOtp(
+        token: String,
+        otpId: String,
+        encryptedOtpBundle: String,
+        clientSignature: RainApiClientSignature?,
+    ): RainApiVerifyAnswer {
+        val body = JSONObject().put("otpId", otpId).put("encryptedOtpBundle", encryptedOtpBundle)
+        if (clientSignature != null) body.put("clientSignature", clientSignature.toJson())
+        return post(OTP_VERIFY, token, body, ::decodeVerifyAnswer)
+    }
 
     /** `POST /signup`: a wallet for the token's contact in the token's tenant. */
     override suspend fun signup(token: String, verificationToken: String, clientSignature: RainApiClientSignature): RainApiSignup =
@@ -303,21 +352,28 @@ internal class RainApiAuthClient(
     /**
      * The kind for a refusal, from the status and rain-api's `{statusCode, error, message}` body.
      * "Invalid or expired code" is matched whole: `/otp/init`'s "This contact can't receive a code" is
-     * also a 400 and must not read as a wrong code before any code was sent. "Invalid tenant" is a
+     * also a 400 and must not read as a wrong code before any code was sent. A 400 that ends in
+     * "start again", the three refusals that end a two-code login attempt, is
+     * [RainApiAuthFailure.Kind.AttemptEnded]. "Invalid tenant" is a
      * 401 too, but a new token fails the same way, so it joins the tenant refusals and the controller
      * never loops on the host's token provider. A 404 is [RainApiAuthFailure.Kind.NoWallet] only when
      * the body is rain-api's own, because a 404 from a proxy in front of it says nothing about the
      * wallet, and the controller must neither sign up nor attach on it. Three 409 phrases are read:
      * "already has a wallet" is [RainApiAuthFailure.Kind.PasskeyTaken], "already in progress" is
      * [RainApiAuthFailure.Kind.SignupInProgress] and "already been used" is
-     * [RainApiAuthFailure.Kind.TokenUsed]. Everything else is the status alone.
+     * [RainApiAuthFailure.Kind.TokenUsed]; `/login`'s 409 "Second code required", which the SDK never
+     * provokes, since it never calls `/login` for an account whose verify asked for a second code,
+     * is Refused like any other 409. Everything else is the status alone, a 503 included.
      */
     private fun classify(status: Int, body: String, path: String): RainApiAuthFailure {
         val rainBody = rainApiBody(body)
         val message = (rainBody?.optString("message")?.takeIf { it.isNotEmpty() } ?: body).lowercase()
         val kind = when (status) {
-            HttpURLConnection.HTTP_BAD_REQUEST ->
-                if (INVALID_CODE_PHRASE in message) RainApiAuthFailure.Kind.InvalidCode else RainApiAuthFailure.Kind.Refused
+            HttpURLConnection.HTTP_BAD_REQUEST -> when {
+                INVALID_CODE_PHRASE in message -> RainApiAuthFailure.Kind.InvalidCode
+                ATTEMPT_ENDED_PHRASE in message -> RainApiAuthFailure.Kind.AttemptEnded
+                else -> RainApiAuthFailure.Kind.Refused
+            }
             HttpURLConnection.HTTP_UNAUTHORIZED ->
                 if (INVALID_TENANT_PHRASE in message) RainApiAuthFailure.Kind.Forbidden else RainApiAuthFailure.Kind.TokenRejected
             HttpURLConnection.HTTP_FORBIDDEN -> RainApiAuthFailure.Kind.Forbidden
@@ -382,6 +438,7 @@ internal class RainApiAuthClient(
         private const val ERROR_BODY_LIMIT_BYTES = 4_096L
 
         private const val INVALID_CODE_PHRASE = "invalid or expired code"
+        private const val ATTEMPT_ENDED_PHRASE = "start again"
         private const val INVALID_TENANT_PHRASE = "invalid tenant"
         private const val SIGNUP_IN_PROGRESS_PHRASE = "already in progress"
         private const val PASSKEY_TAKEN_PHRASE = "already has a wallet"
@@ -442,6 +499,37 @@ private fun HttpUrl.isLoopback(): Boolean = host == "localhost" || host == "127.
  */
 private fun JSONObject.requiredString(key: String): String =
     opt(key) as? String ?: throw JSONException("$key is missing")
+
+/**
+ * The verify answer by the field only one of its three shapes carries. A `secondCodeRequired`
+ * that is not an object, or a `contactType` outside `email` and `phone`, is unreadable, as a
+ * missing field is.
+ */
+private fun decodeVerifyAnswer(json: JSONObject): RainApiVerifyAnswer = when {
+    json.has("secondCodeRequired") -> {
+        val second = json.getJSONObject("secondCodeRequired")
+        RainApiSecondCodeRequired(
+            channel = second.requiredString("contactType").toOtpChannel(),
+            maskedContact = second.requiredString("maskedContact"),
+            clientSignatureMessage = json.requiredString("clientSignatureMessage"),
+        )
+    }
+    json.has("sessionToken") -> RainApiLogin(
+        sessionToken = json.requiredString("sessionToken"),
+        providerUserId = json.requiredString("providerUserId"),
+    )
+    else -> RainApiVerification(
+        verificationToken = json.requiredString("verificationToken"),
+        walletSubOrganizationId = json.optionalString("walletSubOrganizationId"),
+    )
+}
+
+/** rain-api's `contactType` of a second code, `email` or `phone`, as the channel the code travels on; anything else is unreadable. */
+private fun String.toOtpChannel(): OtpChannel = when (this) {
+    "email" -> OtpChannel.EMAIL
+    "phone" -> OtpChannel.SMS
+    else -> throw JSONException("contactType is not email or phone")
+}
 
 /** An optional string field: a missing field or a JSON null is null, a string is itself, anything else is unreadable. */
 private fun JSONObject.optionalString(key: String): String? = when (val value = opt(key)) {
