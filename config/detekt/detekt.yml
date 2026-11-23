@@ -1,0 +1,117 @@
+# Rain SDK detekt configuration.
+#
+# Runs with buildUponDefaultConfig = true: every rule not mentioned here uses detekt's
+# defaults. Pre-existing findings at adoption time are recorded in each module's
+# detekt-baseline.xml — those files should only ever shrink. Fix new findings, or
+# @Suppress("RuleName") at the smallest possible scope; don't add baseline entries.
+
+naming:
+  FunctionNaming:
+    # Composables are PascalCase by convention (sample app UI).
+    ignoreAnnotated: ['Composable']
+
+style:
+  MaxLineLength:
+    maxLineLength: 150
+  # The public session-state types are sealed classes on purpose: a hierarchy a `when` can be
+  # exhaustive over, not an interface that happens to be abstract.
+  AbstractClassCanBeInterface:
+    ignoreSealedClasses: true
+  # Compose @Preview functions are private by convention and only ever invoked by Android
+  # Studio, so they are neither "unused" nor part of a file's real API surface.
+  UnusedPrivateProperty:
+    ignoreAnnotated: ['Preview']
+  UnusedPrivateFunction:
+    ignoreAnnotated: ['Preview']
+
+complexity:
+  TooManyFunctions:
+    ignoreAnnotatedFunctions: ['Preview']
+
+# ktlint rules (detekt-rules-ktlint-wrapper plugin). The code style is set here, once: the wrapper
+# does not read .editorconfig, whose ktlint_code_style mirrors this value for the IDE.
+#
+# Line length is enforced ONCE, by style.MaxLineLength above — the ktlint wrapper's copy stays
+# off, and the wrapping rules that carry their own limit are pinned to the same 150 columns (the
+# wrapper has no ruleset-level line length and does not read .editorconfig's max_line_length; its
+# per-rule default is 120).
+#
+# The 2.0 wrapper switches on many ktlint rules that the 1.23 ruleset shipped inactive. They are
+# kept off here so the enforced style does not change in a toolchain update; adopting any of
+# them is a separate, code-wide formatting decision.
+ktlint:
+  code_style: 'intellij_idea'
+  MaximumLineLength:
+    active: false
+  ArgumentListWrapping:
+    maxLineLength: 150
+  ChainMethodContinuation:
+    maxLineLength: 150
+  FunctionReturnTypeSpacing:
+    maxLineLength: 150
+  ParameterListWrapping:
+    maxLineLength: 150
+  ParameterWrapping:
+    maxLineLength: 150
+  PropertyWrapping:
+    maxLineLength: 150
+  Wrapping:
+    maxLineLength: 150
+  BackingPropertyNaming:
+    active: false
+  BinaryExpressionWrapping:
+    active: false
+  BlankLineBetweenWhenConditions:
+    active: false
+  ClassSignature:
+    active: false
+  ConditionWrapping:
+    active: false
+  ContextReceiverListWrapping:
+    active: false
+  ContextReceiverMapping:
+    active: false
+  EnumWrapping:
+    active: false
+  FunctionExpressionBody:
+    active: false
+  FunctionLiteral:
+    active: false
+  FunctionSignature:
+    active: false
+  FunctionTypeModifierSpacing:
+    active: false
+  Kdoc:
+    active: false
+  MixedConditionOperators:
+    active: false
+  MultilineLoop:
+    active: false
+  NoEmptyFile:
+    active: false
+  ParameterListSpacing:
+    active: false
+  PropertyName:
+    active: false
+  SpacingAroundSquareBrackets:
+    active: false
+  StatementWrapping:
+    active: false
+  ThenSpacing:
+    active: false
+  TrailingCommaOnCallSite:
+    active: false
+  TrailingCommaOnDeclarationSite:
+    active: false
+  TypeArgumentComment:
+    active: false
+  TypeArgumentListSpacing:
+    active: false
+  TypeParameterComment:
+    active: false
+  TypeParameterListSpacing:
+    active: false
+  ValueArgumentComment:
+    active: false
+  ValueParameterComment:
+    active: false

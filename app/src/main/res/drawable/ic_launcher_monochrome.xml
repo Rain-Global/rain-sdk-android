@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launcher icon monochrome layer for themed icons (Android 13+); the system supplies the tint.
+     Source: rain-sdk-icon.svg (1024 x 1024). The outer group maps SVG pixels to dp so the 1024 canvas is
+     centred on the 108 dp layer and the "{ ra }" artwork spans 60 dp, inside the 66 dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.09375"
+        android:scaleY="0.09375"
+        android:translateX="6"
+        android:translateY="6">
+        <group
+            android:translateX="198"
+            android:translateY="400"
+            android:scaleX="2.24"
+            android:scaleY="2.24">
+            <path
+                android:pathData="M20,2 C10,2 10,18 10,26 L10,42 C10,48 6,50 2,50 C6,50 10,52 10,58 L10,74 C10,82 10,98 20,98"
+                android:strokeColor="#FFFFFF"
+                android:strokeWidth="9"
+                android:strokeLineCap="round"
+                android:strokeLineJoin="round" />
+        </group>
+        <group
+            android:translateX="826"
+            android:translateY="400"
+            android:scaleX="-2.24"
+            android:scaleY="2.24">
+            <path
+                android:pathData="M20,2 C10,2 10,18 10,26 L10,42 C10,48 6,50 2,50 C6,50 10,52 10,58 L10,74 C10,82 10,98 20,98"
+                android:strokeColor="#FFFFFF"
+                android:strokeWidth="9"
+                android:strokeLineCap="round"
+                android:strokeLineJoin="round" />
+        </group>
+        <group
+            android:translateX="307"
+            android:translateY="391.2"
+            android:scaleX="2.6525"
+            android:scaleY="2.6525">
+            <path
+                android:fillColor="#FFFFFF"
+                android:pathData="M124.52,91.13c16.6,0,30.05-13.46,30.05-30.05v-31.02c0-16.6-13.46-30.05-30.05-30.05H40.72C18.23,0,0,18.23,0,40.72v50.41h21.33v-50.41c0-10.69,8.7-19.39,19.39-19.39h83.8c4.81,0,8.73,3.92,8.73,8.73v31.02c0,4.81-3.92,8.73-8.73,8.73h-38.78c-4.81,0-8.73-3.92-8.73-8.73s3.92-8.73,8.73-8.73h37.81v-21.33h-37.81c-16.6,0-30.05,13.46-30.05,30.05s13.46,30.05,30.05,30.05h38.78Z" />
+        </group>
+    </group>
+</vector>

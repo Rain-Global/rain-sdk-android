@@ -1,0 +1,19 @@
+# Read by Android Studio and by ktlint tooling that honours it. CI's ktlint rules run inside
+# detekt, which does not read this file: the style CI enforces is set once as `ktlint.code_style`
+# in config/detekt/detekt.yml, and the value below mirrors it.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{kt,kts}]
+ktlint_code_style = intellij_idea
+indent_size = 4
+# Keep wrapping decisions consistent with detekt's style.MaxLineLength (150).
+max_line_length = 150
+
+[*.{yml,yaml}]
+indent_size = 2

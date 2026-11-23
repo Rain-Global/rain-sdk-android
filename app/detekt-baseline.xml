@@ -1,0 +1,49 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:AuthPullScreen.kt:@Suppress("LongParameterList") // Slot-style Compose API: state, a support flag, and the callbacks. @Composable private fun AuthPullContent</ID>
+    <ID>CyclomaticComplexMethod:AuthPullViewModel.kt:AuthPullViewModel$fun approve</ID>
+    <ID>CyclomaticComplexMethod:CollateralWithdrawScreen.kt:@Composable private fun CollateralWithdrawContent</ID>
+    <ID>LongMethod:AuthPullScreen.kt:@Suppress("LongParameterList") // Slot-style Compose API: state, a support flag, and the callbacks. @Composable private fun AuthPullContent</ID>
+    <ID>LongMethod:AuthPullViewModel.kt:AuthPullViewModel$fun approve</ID>
+    <ID>LongMethod:CollateralWithdrawScreen.kt:@Composable private fun CollateralWithdrawContent</ID>
+    <ID>LongMethod:HomeViewModel.kt:HomeViewModel$fun initializeRainWithPrivy</ID>
+    <ID>LongMethod:HomeViewModel.kt:HomeViewModel$fun initializeSdk</ID>
+    <ID>LongMethod:HomeViewModel.kt:HomeViewModel$fun sendRainWalletOtp</ID>
+    <ID>LongMethod:MainActivity.kt:@Composable fun SampleApp</ID>
+    <ID>LongMethod:SendTokensScreen.kt:@Composable private fun SendTokensContent</ID>
+    <ID>LongMethod:SendTokensViewModel.kt:SendTokensViewModel$fun sendTokenTransfer</ID>
+    <ID>LongParameterList:CollateralWithdrawScreen.kt:@Composable fun CollateralWithdrawScreen</ID>
+    <ID>LongParameterList:WalletChain.kt:WalletChain</ID>
+    <ID>LongParameterList:WalletInfoScreen.kt:@Composable fun WalletInfoScreen</ID>
+    <ID>MagicNumber:CollateralWithdrawViewModel.kt:CollateralWithdrawViewModel$12</ID>
+    <ID>MagicNumber:CollateralWithdrawViewModel.kt:CollateralWithdrawViewModel$24</ID>
+    <ID>MagicNumber:CollateralWithdrawViewModel.kt:CollateralWithdrawViewModel$40</ID>
+    <ID>MagicNumber:SampleLog.kt:SampleLog$4</ID>
+    <ID>MagicNumber:SampleLog.kt:SampleLog$8</ID>
+    <ID>MagicNumber:WalletChain.kt:WalletChain$32</ID>
+    <ID>MagicNumber:WalletChain.kt:WalletChain$42</ID>
+    <ID>MagicNumber:WalletChain.kt:WalletChain$44</ID>
+    <ID>NoNameShadowing:MainActivity.kt:{ selectedChain = it }</ID>
+    <ID>ReturnCount:AuthPullViewModel.kt:AuthPullViewModel$private fun resolvedAmount: AmountSelection</ID>
+    <ID>ReturnCount:AuthPullViewModel.kt:AuthPullViewModel$private fun validate: Boolean</ID>
+    <ID>ReturnCount:SampleLog.kt:SampleLog$fun maskEmail: String</ID>
+    <ID>ReturnCount:SampleLog.kt:SampleLog$fun maskToken: String</ID>
+    <ID>ReturnCount:SendTokensViewModel.kt:SendTokensViewModel$fun sendNative</ID>
+    <ID>ReturnCount:SendTokensViewModel.kt:SendTokensViewModel$fun sendTokenTransfer</ID>
+    <ID>TooGenericExceptionCaught:AuthPullViewModel.kt:AuthPullViewModel$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:BalancesViewModel.kt:BalancesViewModel$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:CollateralWithdrawViewModel.kt:CollateralWithdrawViewModel$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:HomeViewModel.kt:HomeViewModel$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:SendTokensViewModel.kt:SendTokensViewModel$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:TransactionHistoryViewModel.kt:TransactionHistoryViewModel$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:WalletInfoViewModel.kt:WalletInfoViewModel$e: Exception</ID>
+    <ID>TooGenericExceptionThrown:CollateralWithdrawViewModel.kt:CollateralWithdrawViewModel$throw Exception(friendlySignatureError(e))</ID>
+    <ID>TooManyFunctions:CollateralWithdrawViewModel.kt:CollateralWithdrawViewModel : ViewModel</ID>
+    <ID>TooManyFunctions:HomeViewModel.kt:HomeViewModel : ViewModel</ID>
+    <ID>UseOrEmpty:AuthPullViewModel.kt:AuthPullUiState$WalletChain.firstAuthPullChain?.defaultTokenAddress ?: ""</ID>
+    <ID>UseOrEmpty:CollateralWithdrawViewModel.kt:CollateralWithdrawViewModel$contract.adminAddresses.firstOrNull() ?: ""</ID>
+    <ID>UseOrEmpty:SessionStore.kt:SessionStore.&lt;no name provided>$prefs?.getString(key, "") ?: ""</ID>
+  </CurrentIssues>
+</SmellBaseline>

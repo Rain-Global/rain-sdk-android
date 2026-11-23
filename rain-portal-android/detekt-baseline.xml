@@ -1,0 +1,44 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:PortalSessionCoordinator.kt:PortalSessionCoordinator$private suspend fun &lt;T> execute: T</ID>
+    <ID>Filename:PortalTestFixtures.kt:com.rain.sdk.portal.PortalTestFixtures.kt</ID>
+    <ID>InstanceOfCheckForException:PortalManager.kt:PortalManager$e is RainError</ID>
+    <ID>InstanceOfCheckForException:PortalProvider.kt:PortalProvider$e is RainError</ID>
+    <ID>LargeClass:PortalManager.kt:PortalManager</ID>
+    <ID>LoopWithTooManyJumpStatements:PortalManager.kt:PortalManager$for</ID>
+    <ID>MagicNumber:PortalErrorMapping.kt:PortalErrorMapping$408</ID>
+    <ID>MagicNumber:PortalErrorMapping.kt:PortalErrorMapping$429</ID>
+    <ID>MagicNumber:PortalErrorMapping.kt:PortalErrorMapping$500</ID>
+    <ID>MagicNumber:PortalErrorMapping.kt:PortalErrorMapping$599</ID>
+    <ID>MagicNumber:PortalManager.kt:PortalManager$128</ID>
+    <ID>MagicNumber:PortalManager.kt:PortalManager$16</ID>
+    <ID>MagicNumber:PortalManager.kt:PortalManager$64</ID>
+    <ID>MatchingDeclarationName:PortalTestFixtures.kt:TestFixtures</ID>
+    <ID>ReturnCount:PortalManager.kt:PortalManager$private fun resolveTransactionValue: BigDecimal?</ID>
+    <ID>ReturnCount:PortalManager.kt:PortalManager$private fun userOperationSucceeded: Boolean</ID>
+    <ID>ReturnCount:PortalManager.kt:PortalManager$private suspend fun currentBlockNumber: BigInteger?</ID>
+    <ID>ReturnCount:PortalManager.kt:PortalManager$private suspend fun minedTransactionHash: String</ID>
+    <ID>ReturnCount:PortalManager.kt:PortalManager$private suspend fun userOperationEvent: Pair&lt;String, Boolean>?</ID>
+    <ID>ReturnCount:PortalSessionCoordinator.kt:PortalSessionCoordinator$private suspend fun attempt: RefreshOutcome</ID>
+    <ID>ThrowsCount:PortalManager.kt:PortalManager$private suspend fun fetchContractBalance: Balance</ID>
+    <ID>ThrowsCount:PortalManager.kt:PortalManager$private suspend fun fetchNativeBalance: Balance</ID>
+    <ID>ThrowsCount:PortalManager.kt:PortalManager$private suspend fun minedTransactionHash: String</ID>
+    <ID>ThrowsCount:PortalManager.kt:PortalManager$suspend fun estimateTransactionFee: BigDecimal</ID>
+    <ID>ThrowsCount:PortalManager.kt:PortalManager$suspend fun getAddress: String</ID>
+    <ID>ThrowsCount:PortalManager.kt:PortalManager$suspend fun getBalances: List&lt;Balance></ID>
+    <ID>ThrowsCount:PortalManager.kt:PortalManager$suspend fun getTransactions: List&lt;RainTransaction></ID>
+    <ID>ThrowsCount:PortalManager.kt:PortalManager$suspend fun sendTransaction: String</ID>
+    <ID>ThrowsCount:PortalManager.kt:PortalManager$suspend fun signTypedData: String</ID>
+    <ID>TooGenericExceptionCaught:PortalManager.kt:PortalManager$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:PortalProvider.kt:PortalProvider$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:PortalSessionCoordinator.kt:PortalSessionCoordinator$e: Exception</ID>
+    <ID>TooManyFunctions:PortalManager.kt:PortalManager</ID>
+    <ID>TooManyFunctions:PortalSessionCoordinator.kt:PortalSessionCoordinator</ID>
+    <ID>UnnecessarySafeCall:PortalManager.kt:PortalManager$tx.category?.let { RainTransactionCategory(it) }</ID>
+    <ID>UseCheckOrError:PortalSessionCoordinatorTest.kt:PortalSessionCoordinatorTest$throw IllegalStateException("boom")</ID>
+    <ID>UselessCallOnNotNull:PortalErrorMapping.kt:PortalErrorMapping$e.message.orEmpty()</ID>
+    <ID>UselessCallOnNotNull:PortalManager.kt:PortalManager$rawBalance.isNullOrEmpty()</ID>
+  </CurrentIssues>
+</SmellBaseline>

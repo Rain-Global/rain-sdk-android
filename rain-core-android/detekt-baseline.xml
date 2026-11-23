@@ -1,0 +1,158 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:RainSdkManager.kt:RainSdkManager$@Suppress("ThrowsCount") // one throw per way a confirmation can end: refused, reverted, pending, unreadable override suspend fun confirmTokenAllowance: RainTokenAllowance</ID>
+    <ID>CyclomaticComplexMethod:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$private fun decodeInstruction: Transfer?</ID>
+    <ID>Filename:RainSdkManagerTest.kt:com.rain.sdk.internal.core.RainSdkManagerTest.kt</ID>
+    <ID>InjectDispatcher:JsonRpcClient.kt:JsonRpcClient$IO</ID>
+    <ID>InjectDispatcher:RainSdkManager.kt:RainSdkManager$Default</ID>
+    <ID>InjectDispatcher:RainTransactionBuilderImpl.kt:RainTransactionBuilderImpl$IO</ID>
+    <ID>InjectDispatcher:TransactionCoordinator.kt:TransactionCoordinator$IO</ID>
+    <ID>InstanceOfCheckForException:RainSdkManager.kt:RainSdkManager$e is RainError</ID>
+    <ID>InstanceOfCheckForException:RainTransactionBuilderImpl.kt:RainTransactionBuilderImpl$e is RainError</ID>
+    <ID>InstanceOfCheckForException:TransactionExecutor.kt:TransactionExecutor$e is RainError</ID>
+    <ID>InstanceOfCheckForException:TransactionSigner.kt:TransactionSigner$e is RainError</ID>
+    <ID>LargeClass:RainSdkManagerApprovalTest.kt:RainSdkManagerApprovalTest</ID>
+    <ID>LongMethod:RainSdkManager.kt:RainSdkManager$@Suppress("ThrowsCount") // one throw per way a confirmation can end: refused, reverted, pending, unreadable override suspend fun confirmTokenAllowance: RainTokenAllowance</ID>
+    <ID>LongMethod:SolanaCollateralWithdraw.kt:SolanaCollateralWithdrawComposer$suspend fun composeWithdraw: UnsignedSolanaTransfer</ID>
+    <ID>LongMethod:SolanaTransferComposer.kt:SolanaTransferComposer$@Suppress("LongParameterList") suspend fun composeSplToken: UnsignedSolanaTransfer</ID>
+    <ID>LongParameterList:MockChainReader.kt:MockChainReader</ID>
+    <ID>LongParameterList:RainClient.kt:RainClient$@Throws(RainError::class) suspend fun confirmTokenAllowance: RainTokenAllowance</ID>
+    <ID>LongParameterList:RainClient.kt:RainClient$@Throws(RainError::class) suspend fun estimateWithdrawalFee: BigDecimal</ID>
+    <ID>LongParameterList:RainClient.kt:RainClient$@Throws(RainError::class) suspend fun prepareWithdrawal: RainPreparedWithdrawal</ID>
+    <ID>LongParameterList:RainClient.kt:RainClient$@Throws(RainError::class) suspend fun withdrawCollateral: String</ID>
+    <ID>LongParameterList:RainEip712Utils.kt:RainEip712Utils$fun createEIP712Json: String</ID>
+    <ID>LongParameterList:RainSdk.kt:RainSdk$@Throws(RainError::class) fun buildWithdrawTransactionData: String</ID>
+    <ID>LongParameterList:RainSdk.kt:RainSdk$@Throws(RainError::class) suspend fun buildEIP712Message: RainEIP712Message</ID>
+    <ID>LongParameterList:RainSdkManager.kt:RainSdkManager</ID>
+    <ID>LongParameterList:RainSdkManager.kt:RainSdkManager$private suspend fun withdrawRequest</ID>
+    <ID>LongParameterList:RainTransactionBuilder.kt:RainTransactionBuilder$fun buildWithdrawTransactionData: String</ID>
+    <ID>LongParameterList:RainTransactionBuilder.kt:RainTransactionBuilder$suspend fun buildEIP712Message: RainEIP712Message</ID>
+    <ID>LongParameterList:SolanaCollateralWithdraw.kt:SolanaCollateralWithdrawComposer$suspend fun composeWithdraw: UnsignedSolanaTransfer</ID>
+    <ID>LongParameterList:SolanaCollateralWithdraw.kt:SolanaWithdrawMessages$fun coordinatorWithdrawMessage: ByteArray</ID>
+    <ID>LongParameterList:SolanaInstructions.kt:SolanaInstructions$fun transferChecked: Instruction</ID>
+    <ID>LongParameterList:SolanaInstructions.kt:SolanaInstructions$fun withdrawSingleSignerCollateralAsset: Instruction</ID>
+    <ID>LongParameterList:TestFixtures.kt:TestManagers$fun approvalManager: Triple&lt;RainSdkManager, StubWalletProvider, MockChainReader></ID>
+    <ID>LoopWithTooManyJumpStatements:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$for</ID>
+    <ID>MagicNumber:Erc20Calldata.kt:Erc20Calldata$64</ID>
+    <ID>MagicNumber:EthereumConverter.kt:EthereumConverter$128</ID>
+    <ID>MagicNumber:EthereumConverter.kt:EthereumConverter$16</ID>
+    <ID>MagicNumber:EthereumConverter.kt:EthereumConverter$18</ID>
+    <ID>MagicNumber:EthereumConverter.kt:EthereumConverter$31</ID>
+    <ID>MagicNumber:Multicall3.kt:Multicall3$0xFF</ID>
+    <ID>MagicNumber:Multicall3.kt:Multicall3$10</ID>
+    <ID>MagicNumber:Multicall3.kt:Multicall3$28</ID>
+    <ID>MagicNumber:Multicall3.kt:Multicall3$32</ID>
+    <ID>MagicNumber:Multicall3.kt:Multicall3$32L</ID>
+    <ID>MagicNumber:Multicall3.kt:Multicall3$4</ID>
+    <ID>MagicNumber:Multicall3.kt:Multicall3$64</ID>
+    <ID>MagicNumber:Multicall3.kt:Multicall3$8</ID>
+    <ID>MagicNumber:Multicall3.kt:Multicall3$96</ID>
+    <ID>MagicNumber:RainEip712Utils.kt:RainEip712Utils$10</ID>
+    <ID>MagicNumber:RainHexUtils.kt:RainHexUtils$4</ID>
+    <ID>MagicNumber:RainTransactionBuilderImpl.kt:RainTransactionBuilderImpl$32</ID>
+    <ID>MagicNumber:SolanaAddresses.kt:SolanaAddresses$0x7F</ID>
+    <ID>MagicNumber:SolanaAddresses.kt:SolanaAddresses$255</ID>
+    <ID>MagicNumber:SolanaCollateralWithdraw.kt:SolanaCollateralAccounts$8</ID>
+    <ID>MagicNumber:SolanaCollateralWithdraw.kt:SolanaCollateralAccounts.BorshReader$0xFF</ID>
+    <ID>MagicNumber:SolanaCollateralWithdraw.kt:SolanaCollateralAccounts.BorshReader$4</ID>
+    <ID>MagicNumber:SolanaCollateralWithdraw.kt:SolanaCollateralAccounts.BorshReader$8</ID>
+    <ID>MagicNumber:SolanaCollateralWithdraw.kt:SolanaWithdrawMessages$0x19</ID>
+    <ID>MagicNumber:SolanaCollateralWithdraw.kt:SolanaWithdrawMessages$0xFF</ID>
+    <ID>MagicNumber:SolanaCollateralWithdraw.kt:SolanaWithdrawMessages$0xFFFFFFFFL</ID>
+    <ID>MagicNumber:SolanaCollateralWithdraw.kt:SolanaWithdrawMessages$16</ID>
+    <ID>MagicNumber:SolanaCollateralWithdraw.kt:SolanaWithdrawMessages$24</ID>
+    <ID>MagicNumber:SolanaCollateralWithdraw.kt:SolanaWithdrawMessages$64</ID>
+    <ID>MagicNumber:SolanaCollateralWithdraw.kt:SolanaWithdrawMessages$7</ID>
+    <ID>MagicNumber:SolanaCollateralWithdraw.kt:SolanaWithdrawMessages$8</ID>
+    <ID>MagicNumber:SolanaConverter.kt:SolanaConverter$63</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$0xFF</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$10</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$12</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$14</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$16</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$24</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$255</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$32</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$4</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$6</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$64</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$8</ID>
+    <ID>MagicNumber:SolanaInstructions.kt:SolanaInstructions$9</ID>
+    <ID>MagicNumber:SolanaTransactionBuilder.kt:SolanaTransactionBuilder$0x80</ID>
+    <ID>MagicNumber:SolanaTransactionBuilder.kt:SolanaTransactionBuilder$0xFFFF</ID>
+    <ID>MagicNumber:SolanaTransactionBuilder.kt:SolanaTransactionBuilder$4</ID>
+    <ID>MagicNumber:SolanaTransactionBuilder.kt:SolanaTransactionBuilder$7</ID>
+    <ID>MagicNumber:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$0xFF</ID>
+    <ID>MagicNumber:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$10</ID>
+    <ID>MagicNumber:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$12</ID>
+    <ID>MagicNumber:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$3</ID>
+    <ID>MagicNumber:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$4</ID>
+    <ID>MagicNumber:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$7</ID>
+    <ID>MagicNumber:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$8</ID>
+    <ID>MagicNumber:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$9</ID>
+    <ID>MagicNumber:SolanaTransactionDecoder.kt:SolanaTransactionDecoder.Reader$0x7F</ID>
+    <ID>MagicNumber:SolanaTransactionDecoder.kt:SolanaTransactionDecoder.Reader$0x80</ID>
+    <ID>MagicNumber:SolanaTransactionDecoder.kt:SolanaTransactionDecoder.Reader$0xFF</ID>
+    <ID>MagicNumber:SolanaTransactionDecoder.kt:SolanaTransactionDecoder.Reader$7</ID>
+    <ID>MatchingDeclarationName:RainSdkManagerTest.kt:RainSdkBuilderTest</ID>
+    <ID>MaxLineLength:EvmChainReader.kt:EvmChainReader$"Rain SDK: balanceOf reverted for token ${token.symbol ?: token.address} (${token.address}) on chain $chainId — omitting from result"</ID>
+    <ID>MaxLineLength:EvmChainReader.kt:EvmChainReader$"Rain SDK: malformed balanceOf payload for token ${token.symbol ?: token.address} (${token.address}) on chain $chainId — omitting from result"</ID>
+    <ID>ReturnCount:EthereumConverter.kt:EthereumConverter$fun parseHexToString: String?</ID>
+    <ID>ReturnCount:MockRpcServer.kt:MockRpcServer.&lt;no name provided>$override fun dispatch: MockResponse</ID>
+    <ID>ReturnCount:SolanaAddresses.kt:SolanaAddresses$internal fun isOnCurve: Boolean</ID>
+    <ID>ReturnCount:SolanaRpcClient.kt:SolanaRpcClient$private fun parseTokenAccount: SolanaTokenAccount?</ID>
+    <ID>ReturnCount:SolanaRpcClient.kt:SolanaRpcClient$suspend fun getLatestSignature: String?</ID>
+    <ID>ReturnCount:SolanaRpcClient.kt:SolanaRpcClient$suspend fun getMintInfo: SolanaMintInfo?</ID>
+    <ID>ReturnCount:SolanaRpcClient.kt:SolanaRpcClient$suspend fun getTokenAccount: SolanaTokenAccount?</ID>
+    <ID>ReturnCount:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$fun decode: Transfer?</ID>
+    <ID>ReturnCount:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$private fun decodeInstruction: Transfer?</ID>
+    <ID>ReturnCount:SolanaTransactionDecoder.kt:SolanaTransactionDecoder$private fun hexToBytes: ByteArray?</ID>
+    <ID>ReturnCount:VendorErrorClassifier.kt:VendorErrorClassifier$fun fromVendorMessage: RainError?</ID>
+    <ID>SwallowedException:RainHexUtils.kt:RainHexUtils$e: Exception</ID>
+    <ID>SwallowedException:RainSdkManager.kt:RainSdkManager$e: ArithmeticException</ID>
+    <ID>SwallowedException:SolanaCollateralWithdraw.kt:SolanaCollateralWithdrawComposer$e: IllegalArgumentException</ID>
+    <ID>SwallowedException:SolanaTransferComposer.kt:SolanaTransferComposer$e: ArithmeticException</ID>
+    <ID>SwallowedException:Web3jProvider.kt:Web3jProvider$e: Exception</ID>
+    <ID>ThrowsCount:ConfigManager.kt:ConfigManager$fun validateRpcEndpoints</ID>
+    <ID>ThrowsCount:JsonRpcClient.kt:JsonRpcClient$suspend fun call: JSONObject</ID>
+    <ID>ThrowsCount:Multicall3.kt:Multicall3$fun decodeAggregate3Result: List&lt;Result></ID>
+    <ID>ThrowsCount:RainAmountUtils.kt:RainAmountUtils$fun toBaseUnits: BigInteger</ID>
+    <ID>ThrowsCount:RainHexUtils.kt:RainHexUtils$fun hexToBytes: ByteArray</ID>
+    <ID>ThrowsCount:RainSdk.kt:RainSdk.Builder$private fun validateAuthPullConfig</ID>
+    <ID>ThrowsCount:RainSdkManager.kt:RainSdkManager$private fun validateApprovalRequest</ID>
+    <ID>ThrowsCount:RainSdkManager.kt:RainSdkManager$private fun verifyConfirmedAllowance</ID>
+    <ID>ThrowsCount:SolanaCollateralWithdraw.kt:SolanaCollateralWithdrawComposer$suspend fun composeWithdraw: UnsignedSolanaTransfer</ID>
+    <ID>ThrowsCount:SolanaTransferComposer.kt:SolanaTransferComposer$@Suppress("LongParameterList") suspend fun composeSplToken: UnsignedSolanaTransfer</ID>
+    <ID>ThrowsCount:TransactionExecutor.kt:TransactionExecutor$suspend fun sendTransaction: String</ID>
+    <ID>ThrowsCount:TransactionSigner.kt:TransactionSigner$suspend fun signTypedData: String</ID>
+    <ID>ThrowsCount:TransactionValidator.kt:TransactionValidator$fun validateWithdrawRequest</ID>
+    <ID>TooGenericExceptionCaught:EvmChainReader.kt:EvmChainReader$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:QRGenerator.kt:QRGenerator$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:RainHexUtils.kt:RainHexUtils$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:RainSdk.kt:RainSdk$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:RainSdkManager.kt:RainSdkManager$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:RainTransactionBuilderImpl.kt:RainTransactionBuilderImpl$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:SolanaChainReader.kt:SolanaChainReader$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:TransactionCoordinator.kt:TransactionCoordinator$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:TransactionExecutor.kt:TransactionExecutor$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:TransactionSigner.kt:TransactionSigner$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:Web3jProvider.kt:Web3jProvider$e: Exception</ID>
+    <ID>TooGenericExceptionThrown:RainSdkManagerApprovalTest.kt:RainSdkManagerApprovalTest.&lt;no name provided>$throw RuntimeException("session store unavailable")</ID>
+    <ID>TooGenericExceptionThrown:RainSdkManagerBalanceTest.kt:RainSdkManagerBalanceTest.&lt;no name provided>$throw RuntimeException("indexer 503")</ID>
+    <ID>TooGenericExceptionThrown:RainSdkManagerGetAllBalancesTest.kt:RainSdkManagerGetAllBalancesTest.&lt;no name provided>$throw RuntimeException("indexer down for $chainId")</ID>
+    <ID>TooGenericExceptionThrown:RainSdkManagerSendTokenTest.kt:RainSdkManagerSendTokenTest.&lt;no name provided>$throw RuntimeException("rpc 503")</ID>
+    <ID>TooGenericExceptionThrown:RainSdkManagerWalletInfoTest.kt:RainSdkManagerWalletInfoTest.&lt;no name provided>$throw RuntimeException("network down")</ID>
+    <ID>TooGenericExceptionThrown:RainSdkManagerWalletInfoTest.kt:RainSdkManagerWalletInfoTest.&lt;no name provided>$throw RuntimeException("service unavailable")</ID>
+    <ID>TooManyFunctions:EvmChainReader.kt:EvmChainReader : ChainReader</ID>
+    <ID>TooManyFunctions:RainClient.kt:RainClient</ID>
+    <ID>TooManyFunctions:RainSdkManager.kt:RainSdkManager : RainClient</ID>
+    <ID>TooManyFunctions:SolanaChainReader.kt:SolanaChainReader : ChainReader</ID>
+    <ID>TooManyFunctions:SolanaRpcClient.kt:SolanaRpcClient</ID>
+    <ID>TooManyFunctions:WalletProvider.kt:WalletProvider</ID>
+    <ID>UseOrEmpty:SolanaRpcClient.kt:SolanaRpcClient$value.optJSONArray("logs")?.let { array -> (0 until array.length()).mapNotNull { array.optString(it, "").ifEmpty { null } } } ?: emptyList()</ID>
+    <ID>UseOrEmpty:TokenRegistry.kt:TokenRegistry$tokensByChainId[chainId] ?: emptyList()</ID>
+    <ID>VariableNaming:RainAuthPullConfigTest.kt:RainAuthPullConfigTest$/** A real EVM chain that is not an Auth Pull chain in either environment. */ private val ETHEREUM_MAINNET = 1</ID>
+  </CurrentIssues>
+</SmellBaseline>

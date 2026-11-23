@@ -1,0 +1,415 @@
+name: CI
+
+# Five job names across the workflow files are required status checks in the "Protect main branchs"
+# ruleset: Test, Analysis, R8 and Release here, Changelog in changelog.yml. A required check that
+# never reports blocks every merge into main. The Release job fails a PR whose workflows no longer
+# provide a required name or whose triggers carry a path filter, but only an admin can edit the
+# ruleset (Settings > Rules): take a name off it before renaming or removing the job, and put the new
+# name on after the merge.
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'feature/**', 'release/**']
+  # Lets a release workflow run these same checks on the tagged commit before it publishes.
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  checks: write # test-result annotations on the job
+
+jobs:
+  # Unit tests for every module, the skipped-test gate, and the dependency-level modular split.
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # JDK 24 runs the forked test JVM because Turnkey's com.turnkey:encoding jar is class-file 68.
+      # Installed first so the second setup-java (21, used by Gradle/AGP/Kotlin) becomes JAVA_HOME
+      # while 24 stays reachable as JAVA_HOME_24_X64 for the toolchain resolver.
+      - name: Set up JDK 24 (unit-test launcher)
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: '24'
+
+      - name: Set up JDK 21 (Gradle)
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          log-accepted-android-sdk-licenses: false
+          # The action's default list also asks for the legacy `tools` package, which the SDK
+          # repository no longer offers, so sdkmanager exits 1 before Gradle runs
+          # (android-actions/setup-android#537). AGP fetches the platform and build-tools it
+          # needs itself.
+          packages: platform-tools
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Print toolchains
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME"; java -version
+          echo "JAVA_HOME_24_X64=$JAVA_HOME_24_X64"; "$JAVA_HOME_24_X64/bin/java" -version
+
+      - name: Unit tests and skipped-test gate
+        run: >
+          ./gradlew testDebugUnitTest checkNoSkippedUnitTests
+          -Porg.gradle.java.installations.fromEnv=JAVA_HOME_24_X64
+          --stacktrace
+
+      # The modular split at the dependency level: core resolves no wallet vendor SDK and each
+      # adapter resolves only its own. A green compile cannot prove this, since a vendor left on
+      # core's classpath is merely unused there. Resolution only, so it also runs after a test failure.
+      - name: Vendor-free classpaths
+        if: ${{ !cancelled() }}
+        run: ./gradlew checkVendorFreeClasspaths --stacktrace
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unit-test-results
+          path: |
+            **/build/test-results/**/*.xml
+            **/build/reports/tests/**
+          if-no-files-found: warn
+
+      # Annotations and the job summary only; the job's own result is the check.
+      - name: Annotate test results
+        if: always()
+        uses: mikepenz/action-junit-report@3585e9575db828022551b4231f165eb59a0e74e3 # v5.6.2
+        with:
+          report_paths: '**/build/test-results/testDebugUnitTest/TEST-*.xml'
+          annotate_only: true
+          fail_on_failure: true
+          require_tests: true
+          detailed_summary: true
+          include_passed: false
+
+  # Static analysis and API docs in one job, so the sources compile once instead of three times
+  # (the Gradle daemon and build outputs carry over between steps). Each tool is its own step and
+  # the later ones still run after an earlier failure, so a red job names the tool in its step list.
+  analysis:
+    name: Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          log-accepted-android-sdk-licenses: false
+          packages: platform-tools
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      # Type-resolving tasks (not the bare `detekt` task, which runs without a classpath and
+      # silently skips the type-resolution rule set: UnsafeCallOnNullableType etc.)
+      - name: detekt
+        id: detekt
+        run: ./gradlew detektDebug detektDebugUnitTest --stacktrace
+
+      - name: How to fix formatting findings
+        if: failure() && steps.detekt.outcome == 'failure'
+        run: echo "::error::detekt failed. Formatting findings are auto-fixable — run './gradlew detektDebug detektDebugUnitTest -PdetektAutoCorrect' locally and commit the result. Other findings need a manual fix or a @Suppress at the smallest scope."
+
+      # detekt baseline signatures are positionless (a baselined rule+class+expression
+      # triple also waives FUTURE identical findings in that class), so growth must be
+      # caught in review: baselines may only shrink. Entries are compared, not counted, so a
+      # new entry cannot hide behind entries that went away. Missing on main = newly adopted,
+      # allowed. While main still carries the detekt 1.x id format (`Rule:File.kt$Class$...`),
+      # entries are compared by rule, file and class.
+      - name: Baselines may only shrink
+        run: |
+          git fetch --quiet --depth=1 origin main
+          ids() { grep -o '<ID>[^<]*</ID>' | sed -E 's#</?ID>##g; s/&lt;/</g; s/&gt;/>/g'; }
+          # rule|file|class|signature. A function's signature is reduced to its name, so annotating a
+          # baselined function or changing its parameters does not read as a new entry, while a finding
+          # on another function of the same class does; other entries keep their expression text.
+          key() {
+            sed -E -e 's/^([^:]+):([^$:]+\.kt)[$:]([^$]*)\$?(.*)$/\1|\2|\3|\4/' \
+                   -e 's/^([^|]*\|[^|]*\|)[^|]*(fun [A-Za-z0-9_]+)[^|]*\|/\1\2|/' \
+                   -e 's/\|[^|]*(fun [A-Za-z0-9_]+)[^|]*$/|\1/'
+          }
+          # While main still carries the detekt 1.x id format (`Rule:File.kt$Class$...`), whose function
+          # signatures are spelled differently, entries are compared by rule, file and class only; an
+          # entry on a top-level function (its own signature stands in for the class) by rule and file.
+          coarse() { key | sed -E 's/\|[^|]*$//; s/\|(\(|([^|]* )?fun ).*$/|<top-level>/'; }
+          fail=0
+          for f in $(git ls-files '*detekt-baseline.xml'); do
+            # Baseline absent on main = newly adopted module; allowed.
+            git cat-file -e "FETCH_HEAD:$f" 2>/dev/null || continue
+            if git show "FETCH_HEAD:$f" | grep -q '<ID>[^<]*\.kt\$'; then
+              added=$(comm -13 <(git show "FETCH_HEAD:$f" | ids | coarse | sort -u) <(ids < "$f" | coarse | sort -u))
+            else
+              added=$(comm -13 <(git show "FETCH_HEAD:$f" | ids | key | sort -u) <(ids < "$f" | key | sort -u))
+            fi
+            if [ -n "$added" ]; then
+              echo "::error file=$f::detekt baseline gained entries — fix the finding or @Suppress at the smallest scope instead"
+              echo "$added"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      # R8's exit code is not trustworthy here: the portal-android AAR ships a global
+      # -ignorewarnings in its consumer rules, which can demote missing-class errors to
+      # warnings. Assert the postcondition directly.
+
+      - name: Android Lint
+        if: ${{ !cancelled() }}
+        run: ./gradlew lint --stacktrace
+
+      - name: Dokka (API docs)
+        if: ${{ !cancelled() }}
+        run: ./gradlew dokkaGenerate --stacktrace
+
+      - name: Upload reports on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: analysis-reports
+          path: |
+            **/build/reports/detekt/**
+            **/build/reports/lint-results-*.*
+            **/build/intermediates/lint_vital_intermediate_text_report/**
+          if-no-files-found: warn
+
+  # Build-time consumer check: proves R8 completes against the SDK modules and exercises their
+  # consumer-rules.pro keep rules. The shrunk app is not RUN in CI, so runtime behaviour under R8
+  # stays unverified here.
+  r8:
+    name: R8
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          log-accepted-android-sdk-licenses: false
+          packages: platform-tools
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Sample app release build
+        run: ./gradlew :app:assembleRelease --stacktrace
+
+      - name: Kotlin floor
+        run: ./gradlew checkKotlinFloor --stacktrace
+
+      # R8's exit code is not trustworthy here: the portal-android AAR ships a global
+      # -ignorewarnings in its consumer rules, which can demote missing-class errors to
+      # warnings. Assert the postcondition directly.
+      - name: R8 postcondition (no missing classes)
+        run: |
+          f=app/build/outputs/mapping/release/missing_rules.txt
+          if [ -s "$f" ]; then
+            echo "::error::R8 reported missing classes; rules needed:"
+            cat "$f"
+            exit 1
+          fi
+          if grep -q -- '-ignorewarnings' app/build/outputs/mapping/release/configuration.txt 2>/dev/null; then
+            echo "::warning::A dependency injects -ignorewarnings into the R8 config (known: portal-android AAR). Missing-class errors may be demoted to warnings; this step is the backstop."
+          fi
+
+
+      - name: Upload R8 outputs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: r8-outputs
+          path: '**/build/outputs/mapping/**'
+          if-no-files-found: warn
+
+  # Release: everything that has to be right before a version can ship, checked on every PR.
+  # The workflow files lint, every check the ruleset requires exists as a job in this tree, and no
+  # trigger carries a path filter, so a small edit cannot leave the pipeline unable to merge or
+  # release. When the published version changes, the release files must agree and the version must
+  # be unpublished, because a Maven Central release can never be changed or deleted. On a PR that
+  # changes none of this the job passes at once: a required check that a path filter skips never
+  # reports, and a check that never reports blocks the merge.
+  release:
+    name: Release
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Syntax, expressions and action inputs of every workflow file; a broken file would otherwise
+      # surface as checks that never report. Binary pinned by version and checksum. shellcheck stays
+      # off until the existing run: scripts have been cleaned up for it.
+      - name: Workflow files lint (actionlint)
+        env:
+          VERSION: 1.7.12
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          curl -fsSL -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz"
+          echo "${SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color -shellcheck=
+
+      # The ruleset lists check names; a job renamed or removed here without updating it blocks every
+      # merge, and a path filter on a trigger skips the run on some PRs, with the same effect.
+      - name: Required checks match the workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          required=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main" \
+            --jq '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context] | .[]')
+          jobs=$(ruby -ryaml -e 'Dir[".github/workflows/*.yml"].sort.each { |f| YAML.load_file(f)["jobs"].each { |id, j| puts(j["name"] || id) } }')
+          echo "required: $(tr '\n' ',' <<< "$required" | sed 's/,$//')"
+          echo "jobs:     $(tr '\n' ',' <<< "$jobs" | sed 's/,$//')"
+          fail=0
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            if ! grep -qxF "$name" <<< "$jobs"; then
+              echo "::error::the ruleset requires a check named '$name' but no job in .github/workflows has that name; take it off the ruleset (Settings > Rules) before merging, or restore the job"
+              fail=1
+            fi
+          done <<< "$required"
+          ruby -ryaml -e '
+            bad = Dir[".github/workflows/*.yml"].flat_map do |f|
+              y = YAML.load_file(f); on = y["on"] || y[true]
+              next [] unless on.is_a?(Hash)
+              on.select { |ev, v| v.is_a?(Hash) && (v.key?("paths") || v.key?("paths-ignore")) }.keys.map { |ev| "#{f}: #{ev}" }
+            end
+            bad.each { |b| puts "::error::#{b} has a path filter; a PR the filter skips gets no run and no check, which blocks its merge" }
+            exit 1 unless bad.empty?' || fail=1
+          exit $fail
+
+      - name: Compare the published version with the base branch
+        id: version
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --quiet --depth=1 origin "$BASE_SHA"
+          # Tolerates spacing and quote style around the value; fails loudly when the key is missing,
+          # because a silent "unchanged" would switch this check off for every later PR.
+          read_version() { sed -nE 's/^[[:space:]]*rain-sdk[[:space:]]*=[[:space:]]*["'"'"']([^"'"'"']*)["'"'"'].*/\1/p' | head -n 1; }
+          base=$(git show "${BASE_SHA}:gradle/libs.versions.toml" | read_version)
+          head=$(read_version < gradle/libs.versions.toml)
+          if [ -z "$head" ]; then
+            echo "::error::gradle/libs.versions.toml has no readable rain-sdk version line"
+            exit 1
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          if [ "$base" = "$head" ]; then
+            echo "rain-sdk is unchanged ($head); nothing to check." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "rain-sdk changes $base -> $head; checking the release files."
+          fi
+
+      - name: Check that the release files agree and the version is new
+        if: steps.version.outputs.base != steps.version.outputs.head
+        env:
+          VERSION: ${{ steps.version.outputs.head }}
+        run: |
+          python3 - <<'EOF'
+          import glob, os, re, subprocess, sys, urllib.error, urllib.request
+
+          v = os.environ["VERSION"]
+          errors = []
+
+          # Lowercase dotted pre-release ids only; Gradle and Maven sort them, mixed styles do not sort.
+          if not re.fullmatch(r"\d+\.\d+\.\d+(-(beta|rc)\.\d+)?", v):
+              errors.append(f"version {v!r} is not X.Y.Z, X.Y.Z-beta.N or X.Y.Z-rc.N")
+
+          # The CHANGELOG entry becomes the GitHub release notes, so it must exist and say something.
+          changelog = open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(rf"^## \[{re.escape(v)}\] - \d{{4}}-\d{{2}}-\d{{2}}[^\n]*\n(.*?)(?=^## \[|\Z)",
+                        changelog, re.M | re.S)
+          if m is None:
+              errors.append(f"CHANGELOG.md has no '## [{v}] - YYYY-MM-DD' heading")
+          elif not m.group(1).strip():
+              errors.append(f"the CHANGELOG.md section for {v} is empty")
+
+          # Every install line in tracked Markdown must carry the new version. Only lines a host would
+          # copy into a build file count, so prose, migration notes and the CHANGELOG may name old versions.
+          tracked = [p for p in subprocess.check_output(["git", "ls-files", "*.md"], text=True).split() if p != "CHANGELOG.md"]
+          coordinate = re.compile(r"xyz\.rain:rain-[a-z]+-android:([0-9][0-9A-Za-z.+-]*)")
+          for path in tracked:
+              for n, line in enumerate(open(path, encoding="utf-8"), 1):
+                  if "implementation" not in line:
+                      continue
+                  for found in coordinate.findall(line):
+                      if found != v:
+                          errors.append(f"{path}:{n} pins {found}, expected {v}")
+
+          # A version that is already on Central cannot be published again.
+          url = f"https://repo1.maven.org/maven2/xyz/rain/rain-core-android/{v}/rain-core-android-{v}.pom"
+          try:
+              urllib.request.urlopen(url, timeout=30)
+              errors.append(f"{v} is already on Maven Central ({url})")
+          except urllib.error.HTTPError as e:
+              if e.code != 404:
+                  errors.append(f"repo1.maven.org answered {e.code} for {url}")
+          except (urllib.error.URLError, TimeoutError, OSError) as e:
+              errors.append(f"could not reach repo1.maven.org to confirm {v} is unpublished ({e}); re-run when it is reachable")
+
+          # The tag must not exist yet, and the version must sort after every published one on the same
+          # major.minor line, so a patch on an older line is allowed while 5.1.x is out.
+          def order(tag):
+              t = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-(beta|rc)\.(\d+))?", tag)
+              if t is None:
+                  return None
+              return (int(t[1]), int(t[2]), int(t[3]), {"beta": 0, "rc": 1, None: 2}[t[4]], int(t[5] or 0))
+          refs = subprocess.check_output(["git", "ls-remote", "--tags", "origin"], text=True).splitlines()
+          tags = [r.split("refs/tags/")[1] for r in refs if "refs/tags/" in r and not r.endswith("^{}")]
+          if v in tags:
+              errors.append(f"tag {v} already exists on origin")
+          mine = order(v)
+          same_line = [t for t in tags if order(t) and order(t)[:2] == (mine or ())[:2]]
+          newest = max(same_line, key=order, default=None)
+          if newest and mine and mine <= order(newest):
+              errors.append(f"{v} does not sort after the latest tag on its line, {newest}")
+
+          summary = open(os.environ["GITHUB_STEP_SUMMARY"], "a")
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              summary.write(f"## Release readiness: {v} is not ready\n\n" + "".join(f"- {e}\n" for e in errors))
+              sys.exit(1)
+          summary.write(f"## Release readiness: {v} is ready\n\nCHANGELOG heading, install coordinates, "
+                        "Maven Central and tags all agree.\n")
+          print(f"{v} is ready to release.")
+          EOF

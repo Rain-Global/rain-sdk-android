@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Wallet — line glyph for the pink icon tile (Phosphor idiom: 16-unit round stroke, 256 grid). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="256"
+    android:viewportHeight="256">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="16"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M32,64v128a24,24 0 0 0 24,24h160a16,16 0 0 0 16,-16v-104a16,16 0 0 0 -16,-16h-160a24,24 0 0 1 0,-48h136" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M180,136a12,12 0 1 1 0,24a12,12 0 1 1 0,-24Z" />
+</vector>

@@ -1,0 +1,55 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:TurnkeyManager.kt:TurnkeyManager$internal suspend fun getEvmTransactionsFromActivities: List&lt;RainTransaction></ID>
+    <ID>CyclomaticComplexMethod:TurnkeyManager.kt:TurnkeyManager$internal suspend fun solanaBalancesOrNull: List&lt;Balance>?</ID>
+    <ID>CyclomaticComplexMethod:TurnkeyManager.kt:TurnkeyManager$private fun indexedTransaction: RainTransaction</ID>
+    <ID>CyclomaticComplexMethod:TurnkeySessionCoordinator.kt:TurnkeySessionCoordinator$private suspend fun &lt;T> execute: T</ID>
+    <ID>DoubleMutabilityForCollection:MockTurnkey.kt:MockTurnkeyClient$/** * Optional queue of status responses returned sequentially by `getSendTransactionStatus`. * When non-empty, each call consumes the next entry; the final entry is reused for * subsequent calls. When empty (default), a single BROADCASTED status containing * [mockTransactionHash] is returned. */ var sendTransactionStatusQueue: MutableList&lt;StatusFixture> = mutableListOf()</ID>
+    <ID>InjectDispatcher:TurnkeyProvider.kt:TurnkeyProvider$Default</ID>
+    <ID>InjectDispatcher:TurnkeyProvider.kt:TurnkeyProvider$IO</ID>
+    <ID>LargeClass:TurnkeyManager.kt:TurnkeyManager</ID>
+    <ID>LargeClass:TurnkeySolanaProviderTest.kt:TurnkeySolanaProviderTest</ID>
+    <ID>LongMethod:TurnkeySolanaProviderTest.kt:TurnkeySolanaProviderTest$@Test fun `getTransactions on solana decodes an spl transfer and resolves the recipient wallet`: Unit</ID>
+    <ID>LongMethod:TurnkeySolanaProviderTest.kt:TurnkeySolanaProviderTest$private fun splFixture: Boolean</ID>
+    <ID>LongParameterList:MockChainReader.kt:MockChainReader</ID>
+    <ID>LongParameterList:MockTurnkey.kt:MockTurnkey.Companion$fun makeActivity: V1Activity</ID>
+    <ID>LongParameterList:MockTurnkey.kt:MockTurnkey.Companion$fun makeSolanaActivity: V1Activity</ID>
+    <ID>LongParameterList:TurnkeyManager.kt:TurnkeyManager</ID>
+    <ID>LongParameterList:TurnkeyManager.kt:TurnkeyManager$private fun indexedTransaction: RainTransaction</ID>
+    <ID>LongParameterList:TurnkeyManager.kt:TurnkeyManager$private suspend fun buildSendTransactionBody: TEthSendTransactionBody</ID>
+    <ID>LongParameterList:TurnkeySolanaProviderTest.kt:TurnkeySolanaProviderTest$private fun splFixture: Boolean</ID>
+    <ID>LongParameterList:TurnkeyWalletProviderHistoryTest.kt:TurnkeyWalletProviderHistoryTest$private fun ethTransaction</ID>
+    <ID>LoopWithTooManyJumpStatements:TurnkeyManager.kt:TurnkeyManager$for</ID>
+    <ID>MagicNumber:TurnkeyManager.kt:TurnkeyManager$10</ID>
+    <ID>MagicNumber:TurnkeyManager.kt:TurnkeyManager$100</ID>
+    <ID>MagicNumber:TurnkeyManager.kt:TurnkeyManager$1000</ID>
+    <ID>MagicNumber:TurnkeyManager.kt:TurnkeyManager$1000.0</ID>
+    <ID>MagicNumber:TurnkeyManager.kt:TurnkeyManager$16</ID>
+    <ID>MagicNumber:TurnkeyManager.kt:TurnkeyManager$27</ID>
+    <ID>MagicNumber:TurnkeySessionCoordinator.kt:TurnkeySessionCoordinator$1000.0</ID>
+    <ID>MagicNumber:TurnkeySessionCoordinator.kt:TurnkeySessionCoordinator$401</ID>
+    <ID>MagicNumber:TurnkeySessionCoordinator.kt:TurnkeySessionCoordinator$408</ID>
+    <ID>MagicNumber:TurnkeySessionCoordinator.kt:TurnkeySessionCoordinator$429</ID>
+    <ID>MagicNumber:TurnkeySessionCoordinator.kt:TurnkeySessionCoordinator$500</ID>
+    <ID>MagicNumber:TurnkeySessionCoordinator.kt:TurnkeySessionCoordinator$599</ID>
+    <ID>RedundantSuspendModifier:TurnkeyManager.kt:TurnkeyManager$suspend</ID>
+    <ID>ReturnCount:MockRpcServer.kt:MockRpcServer.&lt;no name provided>$override fun dispatch: MockResponse</ID>
+    <ID>ReturnCount:TurnkeyManager.kt:TurnkeyManager$@Suppress("TooGenericExceptionCaught") // a failed status read ends the poll, not the send; recovered from chain private suspend fun pollForSolanaCompletion: String?</ID>
+    <ID>ReturnCount:TurnkeyManager.kt:TurnkeyManager$internal suspend fun getAddress: String</ID>
+    <ID>ReturnCount:TurnkeyManager.kt:TurnkeyManager$private fun caip19Asset: Caip19Asset?</ID>
+    <ID>ReturnCount:TurnkeySessionCoordinator.kt:TurnkeySessionCoordinator$private fun notifyExpired</ID>
+    <ID>ReturnCount:TurnkeySessionCoordinator.kt:TurnkeySessionCoordinator$private suspend fun ensureValidSession: Session</ID>
+    <ID>ReturnCount:TurnkeyWalletProvider.kt:TurnkeyWalletProvider$override suspend fun getBalances: List&lt;Balance></ID>
+    <ID>SwallowedException:TurnkeyManager.kt:TurnkeyManager$e: RainError.InvalidRpcUrl</ID>
+    <ID>ThrowsCount:TurnkeyManager.kt:TurnkeyManager$@Suppress("TooGenericExceptionCaught") // a failed status read after acceptance is pending, not a failed send private suspend fun pollForTransactionHash: String</ID>
+    <ID>ThrowsCount:TurnkeyManager.kt:TurnkeyManager$internal suspend fun submitSolanaTransaction: String</ID>
+    <ID>TooGenericExceptionCaught:TurnkeySessionCoordinator.kt:TurnkeySessionCoordinator$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:TurnkeyWalletProvider.kt:TurnkeyWalletProvider$e: Exception</ID>
+    <ID>TooGenericExceptionThrown:TurnkeySessionCoordinatorTest.kt:TurnkeySessionCoordinatorTest.&lt;no name provided>$throw RuntimeException("HTTP error from /activities: 500")</ID>
+    <ID>TooManyFunctions:TurnkeySessionCoordinator.kt:TurnkeySessionCoordinator</ID>
+    <ID>TooManyFunctions:TurnkeyWalletProvider.kt:TurnkeyWalletProvider : WalletProvider</ID>
+    <ID>UseOrEmpty:TurnkeyManager.kt:TurnkeyManager$it.caip19 ?: ""</ID>
+  </CurrentIssues>
+</SmellBaseline>

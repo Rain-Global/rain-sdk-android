@@ -1,0 +1,39 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>InjectDispatcher:PrivyProvider.kt:PrivyProvider$Default</ID>
+    <ID>InjectDispatcher:PrivyProvider.kt:PrivyProvider$IO</ID>
+    <ID>InjectDispatcher:PrivyRpcClient.kt:PrivyRpcClient$IO</ID>
+    <ID>InstanceOfCheckForException:PrivyWalletProvider.kt:PrivyWalletProvider$e is RainError</ID>
+    <ID>LongParameterList:PrivyWalletProvider.kt:PrivyWalletProvider</ID>
+    <ID>MagicNumber:PrivyErrorMapping.kt:PrivyErrorMapping$401</ID>
+    <ID>MagicNumber:PrivyErrorMapping.kt:PrivyErrorMapping$403</ID>
+    <ID>MagicNumber:PrivySessionCoordinator.kt:PrivySessionCoordinator$408</ID>
+    <ID>MagicNumber:PrivySessionCoordinator.kt:PrivySessionCoordinator$429</ID>
+    <ID>MagicNumber:PrivySessionCoordinator.kt:PrivySessionCoordinator$500</ID>
+    <ID>MagicNumber:PrivySessionCoordinator.kt:PrivySessionCoordinator$599</ID>
+    <ID>MagicNumber:PrivyWalletProvider.kt:PrivyWalletProvider$10</ID>
+    <ID>MagicNumber:PrivyWalletProvider.kt:PrivyWalletProvider$11155111</ID>
+    <ID>MagicNumber:PrivyWalletProvider.kt:PrivyWalletProvider$137</ID>
+    <ID>MagicNumber:PrivyWalletProvider.kt:PrivyWalletProvider$42161</ID>
+    <ID>MagicNumber:PrivyWalletProvider.kt:PrivyWalletProvider$43114</ID>
+    <ID>MagicNumber:PrivyWalletProvider.kt:PrivyWalletProvider$56</ID>
+    <ID>MagicNumber:PrivyWalletProvider.kt:PrivyWalletProvider$59144</ID>
+    <ID>MagicNumber:PrivyWalletProvider.kt:PrivyWalletProvider$8453</ID>
+    <ID>MagicNumber:PrivyWalletProvider.kt:PrivyWalletProvider$84532</ID>
+    <ID>ReturnCount:PrivySessionCoordinator.kt:PrivySessionCoordinator$private fun notifyDeath</ID>
+    <ID>ReturnCount:PrivyWalletProvider.kt:PrivyWalletProvider$override suspend fun getWalletAddress: String</ID>
+    <ID>ThrowsCount:PrivyManager.kt:PrivyManager$private suspend fun request: String</ID>
+    <ID>ThrowsCount:PrivyManager.kt:PrivyManager$suspend fun resolveWallet: EmbeddedEthereumWallet</ID>
+    <ID>ThrowsCount:PrivyRpcClient.kt:PrivyRpcClient$suspend fun callForHexResult: String</ID>
+    <ID>TooGenericExceptionCaught:PrivyManager.kt:PrivyManager$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:PrivySessionCoordinator.kt:PrivySessionCoordinator$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:PrivyWalletProvider.kt:PrivyWalletProvider$e: Exception</ID>
+    <ID>TooManyFunctions:PrivySessionCoordinator.kt:PrivySessionCoordinator</ID>
+    <ID>TooManyFunctions:PrivyWalletProvider.kt:PrivyWalletProvider : WalletProvider</ID>
+    <ID>UseCheckOrError:PrivySessionCoordinatorTest.kt:PrivySessionCoordinatorTest$throw IllegalStateException("bad request shape")</ID>
+    <ID>UseOrEmpty:PrivyWalletProvider.kt:PrivyWalletProvider$details?.sender ?: ""</ID>
+    <ID>UseOrEmpty:PrivyWalletProvider.kt:PrivyWalletProvider$transaction.transactionHash ?: transaction.userOperationHash ?: transaction.privyTransactionId ?: ""</ID>
+  </CurrentIssues>
+</SmellBaseline>

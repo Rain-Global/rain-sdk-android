@@ -1,0 +1,86 @@
+name: CI
+
+# Every change a host can notice ships with its release note, written while the change is fresh.
+# Its own workflow, because it must re-run when the skip-changelog label is added or removed, and
+# label events on ci.yml would re-run the whole matrix (or let a skipped job pass a required check).
+#
+# The job name `Changelog` is a required status check in the "Protect main branchs" ruleset; the
+# Release job in ci.yml fails a PR that renames it without the ruleset, and only an admin can edit
+# the ruleset (Settings > Rules). Never add `paths` filters to the trigger. The workflow is named CI
+# like ci.yml so the PR page lists this check beside the others.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changelog-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    name: Changelog
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Require a CHANGELOG entry for SDK source changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SKIPPED: ${{ contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
+        run: |
+          python3 - <<'EOF'
+          import os, re, subprocess, sys
+
+          summary = open(os.environ["GITHUB_STEP_SUMMARY"], "a")
+          def done(msg):
+              print(msg); summary.write(msg + "\n"); sys.exit(0)
+          def fail(msg):
+              print(f"::error::{msg}"); summary.write(msg + "\n"); sys.exit(1)
+
+          if os.environ["SKIPPED"] == "true":
+              done("The skip-changelog label is set; no entry required.")
+
+          base, head = os.environ["BASE_SHA"], os.environ["HEAD_SHA"]
+          subprocess.run(["git", "fetch", "--quiet", "origin", base, head], check=True)
+          merge_base = subprocess.check_output(["git", "merge-base", base, head], text=True).strip()
+          files = subprocess.check_output(["git", "diff", "--name-only", merge_base, head], text=True).split()
+
+          sdk = [f for f in files if re.match(r"rain-[a-z]+-android/src/main/", f)]
+          if not sdk:
+              done("No SDK source files changed; no entry required.")
+
+          how = ("Add a line under '## [Unreleased]' in CHANGELOG.md (Added, Changed, Deprecated, Removed or "
+                 "Fixed; a line a host must act on starts with **Breaking:**), or add the skip-changelog "
+                 "label when nothing a host can notice changed.")
+          if "CHANGELOG.md" not in files:
+              fail(f"{len(sdk)} SDK source file(s) changed but CHANGELOG.md did not. {how}")
+
+          # A release PR cuts [Unreleased] into a dated section, so its notes sit under the new version
+          # heading. When the PR changes the published version, any CHANGELOG edit counts.
+          def version_at(ref):
+              toml = subprocess.check_output(["git", "show", f"{ref}:gradle/libs.versions.toml"], text=True)
+              m = re.search(r'^\s*rain-sdk\s*=\s*["\']([^"\']*)["\']', toml, re.M)
+              return m.group(1) if m else None
+          if version_at(merge_base) != version_at(head):
+              done(f"Release PR ({version_at(merge_base)} -> {version_at(head)}): CHANGELOG.md changed, entry accepted anywhere.")
+
+          # Which lines of the head CHANGELOG did this PR touch, and do any fall in [Unreleased]?
+          diff = subprocess.check_output(["git", "diff", "-U0", merge_base, head, "--", "CHANGELOG.md"], text=True)
+          hunks = [(int(a), int(b) if b else 1)
+                   for a, b in re.findall(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", diff, re.M)]
+          lines = subprocess.check_output(["git", "show", f"{head}:CHANGELOG.md"], text=True).splitlines()
+          start = next((i for i, l in enumerate(lines, 1) if l.startswith("## [Unreleased]")), None)
+          if start is None:
+              fail("CHANGELOG.md has no '## [Unreleased]' section. " + how)
+          end = next((i for i, l in enumerate(lines, 1) if i > start and l.startswith("## [")), len(lines) + 1)
+          if not any(start < s < end or start < s + max(n, 1) - 1 < end for s, n in hunks):
+              fail("CHANGELOG.md changed, but not inside the '## [Unreleased]' section. " + how)
+          done(f"CHANGELOG.md has an entry under [Unreleased] for the {len(sdk)} SDK source file(s) changed.")
+          EOF
